@@ -39,7 +39,6 @@ def update(prev, cur, dim, idx, inp_seq_len):
     orig_cur = cur
     if prev.dtype == torch.float8_e4m3fn:
         from habana_frameworks.torch.hpex.kernels.Fp8Ops import cast_to_fp8_v2
-
         cur = cast_to_fp8_v2(cur, None, False, False, prev.dtype)[0]
     if cur.shape[2] > 1 and cur.shape[2] <= prev.shape[2]:
         # Initialize
@@ -118,6 +117,32 @@ class Matmul(torch.nn.Module):
     def forward(self, x, y):
         return torch.matmul(x, y)
 
+class KVCache(torch.nn.Module):
+
+    def __init__(self):
+        super(KVCache, self).__init__()
+        self.cache = None
+        self.inp_seq_len = -1
+
+    def allocate(self, inp_seq_len, kv_cache_fp8, dtype, device, shape):
+        if self.cache is None or self.cache.shape != shape:
+            self.inp_seq_len = inp_seq_len
+            if kv_cache_fp8:
+                dtype = torch.float8_e4m3fn
+            self.cache = torch.zeros(shape, dtype=dtype, device=device)
+        else:
+            assert (
+                self.inp_seq_len == inp_seq_len
+            ), f"inp_seq_len must be the same. self.inp_seq_len:{self.inp_seq_len} inp_seq_len:{inp_seq_len}"
+            self.cache.fill_(0)
+
+    def get_shape(self):
+        if self.cache is None:
+            return None
+        return self.cache.shape
+
+    def forward(self, cur, dim, idx):
+        return update(self.cache, cur, dim, idx, self.inp_seq_len)
 
 class KVCache(torch.nn.Module):
     def __init__(self):
@@ -155,7 +180,8 @@ class GaudiLlamaAttention(LlamaAttention):
         self.k_cache = KVCache()
         self.v_cache = KVCache()
         self.inp_seq_len = -1
-        self.norm_factor = 1.0 / math.sqrt(self.head_dim)
+        self.register_buffer("norm_factor", torch.tensor(1.0 / math.sqrt(self.head_dim)), persistent=False)
+
 
     def allocate_kv_cache(self, batch_size, max_seq_len, inp_seq_len, kv_cache_fp8):
         cache_shape = (batch_size, self.num_key_value_heads, max_seq_len, self.head_dim)

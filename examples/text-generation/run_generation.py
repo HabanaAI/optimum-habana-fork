@@ -554,7 +554,6 @@ def main():
         print(separator)
     if args.quant_config:
         import habana_quantization_toolkit
-
         habana_quantization_toolkit.finish_measurements(model)
 
 
