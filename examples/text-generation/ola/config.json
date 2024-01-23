@@ -1,0 +1,55 @@
+{
+  "architectures": [
+    "MPTForCausalLM"
+  ],
+  "attn_config": {
+    "alibi": true,
+    "alibi_bias_max": 8,
+    "attn_impl": "torch",
+    "attn_pdrop": 0.0,
+    "attn_type": "grouped_query_attention",
+    "attn_uses_sequence_id": false,
+    "clip_qkv": 6,
+    "kv_n_heads": 8,
+    "prefix_lm": false,
+    "qk_ln": false,
+    "softmax_scale": null
+  },
+  "auto_map": {
+    "AutoConfig": "configuration_mpt.MPTConfig",
+    "AutoModelForCausalLM": "modeling_mpt.MPTForCausalLM"
+  },
+  "d_model": 4608,
+  "emb_pdrop": 0.0,
+  "embedding_fraction": 1.0,
+  "expansion_ratio": 4,
+  "fc_type": "torch",
+  "ffn_config": {
+    "fc_type": "torch",
+    "ffn_type": "mptmlp"
+  },
+  "init_config": {
+    "emb_init_std": null,
+    "emb_init_uniform_lim": null,
+    "fan_mode": "fan_in",
+    "init_div_is_residual": true,
+    "init_gain": 0.0,
+    "init_nonlinearity": "relu",
+    "init_std": null,
+    "name": "kaiming_normal_"
+  },
+  "init_device": "cpu",
+  "learned_pos_emb": false,
+  "logit_scale": null,
+  "max_seq_len": 4096,
+  "model_type": "mpt",
+  "n_heads": 48,
+  "n_layers": 32,
+  "no_bias": true,
+  "norm_type": "low_precision_layernorm",
+  "resid_pdrop": 0.0,
+  "torch_dtype": "bfloat16",
+  "transformers_version": "4.33.3",
+  "use_cache": false,
+  "vocab_size": 70400
+}
