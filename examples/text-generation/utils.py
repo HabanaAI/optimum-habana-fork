@@ -235,7 +235,7 @@ def setup_distributed_model(args, model_dtype, model_kwargs, logger):
     model = model.module
     if model.config.model_type == "llama":
         patch_scoped_linear_all_reduce(model)
-
+    
     if args.quant_config:
         import habana_quantization_toolkit
         habana_quantization_toolkit.prep_model(model)
