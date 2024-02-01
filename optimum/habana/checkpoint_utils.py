@@ -58,7 +58,9 @@ def get_checkpoint_files(model_name_or_path, local_rank, token=None):
 
     # Extensions: .bin | .pt
     # Creates a list of paths from all downloaded files in cache dir
-    file_list = [str(entry) for entry in Path(cached_repo_dir).rglob("*.[bp][it][n]") if entry.is_file()]
+    path = Path(cached_repo_dir)
+    globs = ["*.bin", "*.pt", "*.safetensors"]
+    file_list = [str(entry) for glob in globs for entry in Path(cached_repo_dir).rglob(glob) if entry.is_file()]
     return file_list
 
 
