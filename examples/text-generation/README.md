@@ -296,6 +296,26 @@ QUANT_CONFIG=./quantization_config/maxabs_quant.json python ../gaudi_spawn.py \
 ```
 `--fp8` is required to enable quantization in fp8.
 
+### Using Habana Flash Attention
+
+Habana Flash Attention addresses large sequence lenghts on prompt stage of inference. Using causal attention mask on prompt stage requires input sequences in batch to be of the same length, but can provide a memory saving, thus enabling higher batch sizes.
+
+```bash
+python run_generation.py \
+--model_name_or_path meta-llama/Llama-2-7b-hf \
+--use_hpu_graphs \
+--use_kv_cache \
+--reuse_cache \
+--trim_logits \
+--attn_softmax_bf16 \
+--max_input_tokens 31744 \
+--max_new_tokens 1024 \
+--batch_size=2 \
+--use_flash_attention \
+--flash_attention_recompute \
+--flash_attention_causal_mask \
+--book_source
+```
 
 ## Language Model Evaluation Harness
 
