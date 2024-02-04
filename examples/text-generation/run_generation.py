@@ -311,7 +311,7 @@ def main():
                     if torch.is_tensor(input_tokens[t]):
                         input_tokens[t] = input_tokens[t].to(args.device)
 
-            outputs = model.generate(
+            output_tokens = model.generate(
                 **input_tokens,
                 generation_config=generation_config,
                 lazy_mode=use_lazy_mode,
@@ -319,10 +319,10 @@ def main():
                 profiling_steps=args.profiling_steps,
                 profiling_warmup_steps=args.profiling_warmup_steps,
             ).cpu()
-            x = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+            outputs = tokenizer.batch_decode(output_tokens, skip_special_tokens=True)
             duration = time.perf_counter() - t0
             print(f"Total E2E time of this iteration is {duration:.3f}s", flush=True)
-            return x
+            return outputs
 
         from optimum.habana.utils import HabanaProfile
 
