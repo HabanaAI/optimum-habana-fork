@@ -1490,6 +1490,7 @@ class GaudiGenerationMixin(GenerationMixin):
 
             if greedy_first:
                 import habana_frameworks.torch.hpu as torch_hpu
+
                 torch_hpu.synchronize()
                 print(f"First Token time(greedy):{time.perf_counter()*1000}")
                 greedy_first = False
@@ -1712,7 +1713,7 @@ class GaudiGenerationMixin(GenerationMixin):
         hb_profer = HabanaProfile(warmup=profiling_warmup_steps, active=profiling_steps)
         hb_profer.start()
         this_peer_finished = False  # used by synced_gpus only
-        sample_first=True
+        sample_first = True
         # auto-regressive generation
         while True:
             if lazy_mode:
@@ -1815,6 +1816,7 @@ class GaudiGenerationMixin(GenerationMixin):
 
             if sample_first:
                 import habana_frameworks.torch.hpu as torch_hpu
+
                 torch_hpu.synchronize()
                 print(f"First Token time(sample):{time.perf_counter()*1000}")
                 sample_first = False
