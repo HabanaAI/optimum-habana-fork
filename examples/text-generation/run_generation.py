@@ -189,7 +189,7 @@ def setup_parser(parser):
     parser.add_argument(
         "--bucket_internal",
         action="store_true",
-        help="Split kv sequence into buckets in decode phase. It is useful for long new tokens.",
+        help="Split kv sequence into buckets in decode phase. It improves throughput when max_new_tokens is large.",
     )
     parser.add_argument(
         "--dataset_max_samples",
