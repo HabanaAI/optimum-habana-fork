@@ -909,9 +909,13 @@ class GaudiTrainer(Trainer):
                             inputs["use_flash_attention"] = True
                         if self.model.generation_config.flash_attention_recompute:
                             inputs["flash_attention_recompute"] = True
+<<<<<<< HEAD
                         if self.model.generation_config.flash_attention_causal_mask:
                             inputs["flash_attention_causal_mask"] = True
                         if self.model.generation_config.use_fused_rope is False:
+=======
+                        if not self.model.generation_config.use_fused_rope:
+>>>>>>> e48398d (Expose Llama Fused OPs control from run_lora_clm.py (#23))
                             inputs["use_fused_rope"] = False
 
                 # TODO: keep syncs for fast DDP?
@@ -1791,9 +1795,13 @@ class GaudiTrainer(Trainer):
                         inputs["use_flash_attention"] = True
                     if self.model.generation_config.flash_attention_recompute:
                         inputs["flash_attention_recompute"] = True
+<<<<<<< HEAD
                     if self.model.generation_config.flash_attention_causal_mask:
                         inputs["flash_attention_causal_mask"] = True
                     if self.model.generation_config.use_fused_rope is False:
+=======
+                    if not self.model.generation_config.use_fused_rope:
+>>>>>>> e48398d (Expose Llama Fused OPs control from run_lora_clm.py (#23))
                         inputs["use_fused_rope"] = False
 
             # Prediction step
