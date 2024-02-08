@@ -804,31 +804,6 @@ class GaudiLlamaForCausalLM(LlamaForCausalLM):
 
     def allocate_kv_cache(self, batch_size, max_seq_len, inp_seq_len):
         self.model.allocate_kv_cache(batch_size, max_seq_len, inp_seq_len)
-
-    def reorder_kv_cache(self, beam_idx: torch.LongTensor):
-        return self.model.reorder_kv_cache(beam_idx)
-
-    def update_sincos_cache(self, seq_len):
-        self.model.update_sincos_cache(seq_len)
-
-    def forward(
-        self,
-        input_ids: torch.LongTensor = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[List[torch.FloatTensor]] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        labels: Optional[torch.LongTensor] = None,
-        use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-        token_idx: Optional[torch.Tensor] = None,
-        trim_logits: Optional[bool] = False,
-        attn_softmax_bf16: Optional[bool] = False,
-        reuse_cache: Optional[bool] = False,
-        use_flash_attention: Optional[bool] = False,
-        flash_attention_recompute: Optional[bool] = False,
         flash_attention_causal_mask: Optional[bool] = False,
         cache_idx: int = None,
         use_fused_rope: Optional[bool] = True,
