@@ -1380,6 +1380,7 @@ class GaudiGenerationMixin(GenerationMixin):
         hb_profer.start()
         this_peer_finished = False  # used by synced_gpus only
         bucket_size = model_kwargs["bucket_size"]
+        prev_idx = None  # avoiding calculate cache_idx when its value is not changing
         bucket_internal = model_kwargs["bucket_internal"]
         reduce_recompile = model_kwargs["reduce_recompile"]
 
@@ -1413,10 +1414,14 @@ class GaudiGenerationMixin(GenerationMixin):
                     )
                 else:
                     # Calculate slice idx for kv cache. Breaking down the kv cache in the attention block helps to reduce computation time.
-                    idx = torch.div(model_kwargs.get("token_idx") - 1, bucket_size, rounding_mode="floor")
-                    if idx < (model_kwargs["kv_cache_len"] // bucket_size):
-                        cache_idx = (idx.item() + 1) * bucket_size
-                        model_kwargs["cache_idx"] = cache_idx
+                    if model_kwargs.get("token_idx") <= (model_kwargs["kv_cache_len"] // bucket_size) * bucket_size:
+                        idx = torch.div(model_kwargs.get("token_idx") - 1, bucket_size, rounding_mode="floor")
+                        if idx != prev_idx:
+                            cache_idx = (idx.item() + 1) * bucket_size
+                            model_kwargs["cache_idx"] = cache_idx
+                            prev_idx = idx
+                    else:
+                        model_kwargs["cache_idx"] = model_kwargs["kv_cache_len"]
 
             # prepare model inputs
             model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
