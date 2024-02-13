@@ -240,6 +240,8 @@ class GaudiGenerationMixin(GenerationMixin):
 
         if token_idx is not None:
             token_idx.add_(1)
+            if "token_idx_cpu" in model_kwargs:
+                model_kwargs["token_idx_cpu"] += 1
 
         return model_kwargs
 
@@ -609,10 +611,12 @@ class GaudiGenerationMixin(GenerationMixin):
         if model_kwargs["reduce_recompile"]:
             assert generation_config.bucket_size
         if generation_config.bucket_internal:
-            assert generation_config.bucket_size >= 0, "bucket_internal and bucket_size flags set together"
+            assert generation_config.bucket_size >= 0, "please set bucket_size to use bucket_internal"
             assert generation_config.reuse_cache, "please set reuse_cache to use bucket_internal"
         if generation_config.reuse_cache and not generation_config.bucket_internal:
-            assert generation_config.bucket_size <= 0, "reuse_cache and bucketing flags set together"
+            assert (
+                generation_config.bucket_size <= 0
+            ), "please set bucket_internal along with reuse_cache and bucket_size"
 
         if generation_config.static_shapes:
             # Pad inputs to have static shapes during generation, this gives better performance than dynamic shapes on HPUs
@@ -624,6 +628,7 @@ class GaudiGenerationMixin(GenerationMixin):
                     # token_idx is the current index in the generation process, it is incremented each time a new token is generated
                     token_idx = inputs_tensor.shape[-1]
                     model_kwargs["token_idx"] = torch.tensor(token_idx, device=inputs_tensor.device)
+                    model_kwargs["token_idx_cpu"] = token_idx
                     inputs_tensor = torch.nn.functional.pad(
                         inputs_tensor, (0, generation_config.max_new_tokens), value=generation_config.pad_token_id
                     )
@@ -1390,7 +1395,7 @@ class GaudiGenerationMixin(GenerationMixin):
         reduce_recompile = model_kwargs["reduce_recompile"]
 
         prompt_len = input_ids.shape[-1]
-        
+
         if not bucket_internal:
             if bucket_size >= 0:
                 inc = iter(incrementor(bucket_size, prompt_len))
@@ -1420,10 +1425,14 @@ class GaudiGenerationMixin(GenerationMixin):
                     )
                 else:
                     # Calculate slice idx for kv cache. Breaking down the kv cache in the attention block helps to reduce computation time.
-                    if model_kwargs.get("token_idx") <= (model_kwargs["kv_cache_len"] // bucket_size) * bucket_size:
-                        idx = torch.div(model_kwargs.get("token_idx") - 1, bucket_size, rounding_mode="floor")
-                        if idx != prev_idx:
-                            cache_idx = (idx.item() + 1) * bucket_size
+                    if (
+                        model_kwargs.get("token_idx_cpu")
+                        <= (model_kwargs["kv_cache_len"] // bucket_size) * bucket_size
+                    ):
+                        idx = (model_kwargs.get("token_idx_cpu") - 1) // bucket_size
+                        if prev_idx != idx:
+                            self.clear_cache()
+                            cache_idx = (idx + 1) * bucket_size
                             model_kwargs["cache_idx"] = cache_idx
                             prev_idx = idx
                     else:
@@ -1528,6 +1537,8 @@ class GaudiGenerationMixin(GenerationMixin):
             if this_peer_finished and not synced_gpus:
                 break
 
+        if lazy_mode:
+            self.clear_cache()
         hb_profer.stop()
         if streamer is not None:
             streamer.end()
