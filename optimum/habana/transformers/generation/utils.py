@@ -708,6 +708,7 @@ class GaudiGenerationMixin(GenerationMixin):
         model_kwargs["attn_softmax_bf16"] = generation_config.attn_softmax_bf16
 
         # determine whether limit_hpu_graphs needs to be used
+        model_kwargs["use_hpu_graphs"] = hpu_graphs
         model_kwargs["limit_hpu_graphs"] = generation_config.limit_hpu_graphs
 
         # prepare for allocate kv cache
@@ -1501,9 +1502,10 @@ class GaudiGenerationMixin(GenerationMixin):
                 if model_kwargs.get("token_idx_cpu") <= (model_kwargs["kv_cache_len"] // bucket_size) * bucket_size:
                     idx = (model_kwargs.get("token_idx_cpu") - 1) // bucket_size
                     if prev_idx != idx:
-                        self.clear_cache()
                         model_kwargs["cache_idx"] = (idx + 1) * bucket_size
                         prev_idx = idx
+                        if model_kwargs["use_hpu_graphs"]:
+                            self.clear_cache()
                 else:
                     model_kwargs["cache_idx"] = model_kwargs["kv_cache_len"]
 
@@ -1532,7 +1534,7 @@ class GaudiGenerationMixin(GenerationMixin):
             if this_peer_finished and not synced_gpus:
                 break
 
-        if lazy_mode:
+        if model_kwargs["use_hpu_graphs"]:
             self.clear_cache()
         hb_profer.stop()
         if streamer is not None:
