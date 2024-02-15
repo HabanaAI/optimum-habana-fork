@@ -17,6 +17,7 @@
 import copy
 import inspect
 import math
+import time
 import warnings
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
 
@@ -546,6 +547,9 @@ class GaudiGenerationMixin(GenerationMixin):
             generation_config.ignore_eos = kwargs.get("ignore_eos", lazy_mode)
         generation_config.validate()
         model_kwargs = generation_config.update(**kwargs)  # All unused kwargs must be model kwargs
+        if self.config.model_type == "falcon" and "token_type_ids" in kwargs.keys():
+            for key in ["token_type_ids"]:
+                model_kwargs.pop(key, None)
         self._validate_model_kwargs(model_kwargs.copy())
         # 2. Set generation parameters if not already defined
         logits_processor = logits_processor if logits_processor is not None else LogitsProcessorList()
@@ -593,21 +597,29 @@ class GaudiGenerationMixin(GenerationMixin):
                 inputs_tensor, generation_config.pad_token_id, generation_config.eos_token_id
             )
 
-        is_greedy_or_beam_and_bucket = generation_config.bucket_size > 0 and (
-            self._get_generation_mode(generation_config, assistant_model) == GenerationMode.GREEDY_SEARCH
-            or self._get_generation_mode(generation_config, assistant_model) == GenerationMode.BEAM_SEARCH
+        is_greedy_or_beam_and_bucket = (
+            not generation_config.bucket_internal
+            and generation_config.bucket_size > 0
+            and (
+                self._get_generation_mode(generation_config, assistant_model) == GenerationMode.GREEDY_SEARCH
+                or self._get_generation_mode(generation_config, assistant_model) == GenerationMode.BEAM_SEARCH
+            )
         )
         is_greedy_or_beam = (
             self._get_generation_mode(generation_config, assistant_model) == GenerationMode.GREEDY_SEARCH
             or self._get_generation_mode(generation_config, assistant_model) == GenerationMode.BEAM_SEARCH
         )
         model_kwargs["bucket_size"] = generation_config.bucket_size if generation_config.static_shapes else -1
+        model_kwargs["bucket_internal"] = generation_config.bucket_internal
         model_kwargs["reduce_recompile"] = (
             generation_config.reduce_recompile if generation_config.reduce_recompile is not None else False
         )
         if model_kwargs["reduce_recompile"]:
             assert generation_config.bucket_size
-        if generation_config.reuse_cache:
+        if generation_config.bucket_internal:
+            assert generation_config.bucket_size >= 0, "bucket_internal and bucket_size flags set together"
+            assert generation_config.reuse_cache, "please set reuse_cache to use bucket_internal"
+        if generation_config.reuse_cache and not generation_config.bucket_internal:
             assert generation_config.bucket_size <= 0, "reuse_cache and bucketing flags set together"
 
         if generation_config.static_shapes:
@@ -708,6 +720,8 @@ class GaudiGenerationMixin(GenerationMixin):
         # determine whether flash attention needs to be used
         model_kwargs["use_flash_attention"] = generation_config.use_flash_attention
         model_kwargs["flash_attention_recompute"] = True if generation_config.flash_attention_recompute else False
+        model_kwargs["flash_attention_causal_mask"] = True if generation_config.flash_attention_causal_mask else False
+        model_kwargs["use_fused_rope"] = False if not generation_config.use_fused_rope else True
 
         if not self.config.is_encoder_decoder:
             calculated_max_length = input_ids.shape[-1]
@@ -722,6 +736,8 @@ class GaudiGenerationMixin(GenerationMixin):
                         token_idx,
                         generation_config.kv_cache_fp8,
                     )
+                    model_kwargs["kv_cache_len"] = calculated_max_length
+
             if self.config.model_type in ["llama"]:
                 if self.config.max_position_embeddings < calculated_max_length:
                     unwrap_deepspeed_model(self).update_sincos_cache(seq_len=calculated_max_length)
@@ -1378,14 +1394,18 @@ class GaudiGenerationMixin(GenerationMixin):
         hb_profer.start()
         this_peer_finished = False  # used by synced_gpus only
         bucket_size = model_kwargs.get("bucket_size", -1)
+        prev_idx = None  # avoiding calculate cache_idx when its value is not changing
+        bucket_internal = model_kwargs.get("bucket_internal", False)
         reduce_recompile = model_kwargs.get("reduce_recompile", False)
 
         prompt_len = input_ids.shape[-1]
-        if bucket_size >= 0:
-            inc = iter(incrementor(bucket_size, prompt_len))
-        if bucket_size > 0:
-            assert "position_ids" not in model_kwargs, "Untested path"
 
+        if not bucket_internal:
+            if bucket_size >= 0:
+                inc = iter(incrementor(bucket_size, prompt_len))
+            if bucket_size > 0:
+                assert "position_ids" not in model_kwargs, "Untested path"
+        greedy_first = True
         while True:
             if lazy_mode:
                 self.htcore_generation.mark_step()
@@ -1401,11 +1421,22 @@ class GaudiGenerationMixin(GenerationMixin):
                     break
 
             if bucket_size > 0:
-                # it will not have been padded if bucket_size > 0
-                params = next(inc)
-                input_ids, model_kwargs = self.update_model_kwargs_for_bucketing(
-                    params, input_ids, model_kwargs, pad_token_id, bucket_size, reduce_recompile
-                )
+                if not bucket_internal:
+                    # it will not have been padded if bucket_size > 0
+                    params = next(inc)
+                    input_ids, model_kwargs = self.update_model_kwargs_for_bucketing(
+                        params, input_ids, model_kwargs, pad_token_id, bucket_size, reduce_recompile
+                    )
+                else:
+                    # Calculate slice idx for kv cache. Breaking down the kv cache in the attention block helps to reduce computation time.
+                    if model_kwargs.get("token_idx") <= (model_kwargs["kv_cache_len"] // bucket_size) * bucket_size:
+                        idx = torch.div(model_kwargs.get("token_idx") - 1, bucket_size, rounding_mode="floor")
+                        if idx != prev_idx:
+                            cache_idx = (idx.item() + 1) * bucket_size
+                            model_kwargs["cache_idx"] = cache_idx
+                            prev_idx = idx
+                    else:
+                        model_kwargs["cache_idx"] = model_kwargs["kv_cache_len"]
 
             # prepare model inputs
             model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
@@ -1495,6 +1526,13 @@ class GaudiGenerationMixin(GenerationMixin):
                 this_peer_finished = True
 
             hb_profer.step()
+
+            if greedy_first:
+                import habana_frameworks.torch.hpu as torch_hpu
+
+                torch_hpu.synchronize()
+                print(f"First Token time(greedy):{time.perf_counter()*1000}")
+                greedy_first = False
 
             if this_peer_finished and not synced_gpus:
                 break
@@ -1714,6 +1752,7 @@ class GaudiGenerationMixin(GenerationMixin):
         hb_profer = HabanaProfile(warmup=profiling_warmup_steps, active=profiling_steps)
         hb_profer.start()
         this_peer_finished = False  # used by synced_gpus only
+        sample_first = True
         # auto-regressive generation
         while True:
             if lazy_mode:
@@ -1813,6 +1852,13 @@ class GaudiGenerationMixin(GenerationMixin):
                 this_peer_finished = True
 
             hb_profer.step()
+
+            if sample_first:
+                import habana_frameworks.torch.hpu as torch_hpu
+
+                torch_hpu.synchronize()
+                print(f"First Token time(sample):{time.perf_counter()*1000}")
+                sample_first = False
 
             if this_peer_finished and not synced_gpus:
                 break

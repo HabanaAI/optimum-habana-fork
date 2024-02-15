@@ -156,6 +156,23 @@ class ModelArguments:
             )
         },
     )
+    flash_attention_causal_mask: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Whether to enable causal mask in Habana flash attention for fine-tuning."
+                " It is applicable only when use_flash_attention is True.",
+            )
+        },
+    )
+    use_fused_rope: bool = field(
+        default=True,
+        metadata={
+            "help": (
+                "Whether to use Habana fused-rope for fine-tuning. The current support is limited to Llama only.",
+            )
+        },
+    )
     load_meta_device: bool = field(
         default=False,
         metadata={
@@ -537,6 +554,9 @@ def main():
         if model_args.use_flash_attention:
             model.generation_config.use_flash_attention = True
             model.generation_config.flash_attention_recompute = model_args.flash_attention_recompute
+            model.generation_config.flash_attention_causal_mask = model_args.flash_attention_causal_mask
+        if not model_args.use_fused_rope:
+            model.generation_config.use_fused_rope = False
 
     if hasattr(model.generation_config, "pad_token_id") and model.generation_config.pad_token_id is not None:
         tokenizer.pad_token_id = model.generation_config.pad_token_id

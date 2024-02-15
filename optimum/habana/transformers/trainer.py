@@ -874,6 +874,10 @@ class GaudiTrainer(Trainer):
                             inputs["use_flash_attention"] = True
                         if self.model.generation_config.flash_attention_recompute:
                             inputs["flash_attention_recompute"] = True
+                        if self.model.generation_config.flash_attention_causal_mask:
+                            inputs["flash_attention_causal_mask"] = True
+                        if not self.model.generation_config.use_fused_rope:
+                            inputs["use_fused_rope"] = False
 
                 # TODO: keep syncs for fast DDP?
                 with self.accelerator.accumulate(model):
@@ -1421,7 +1425,7 @@ class GaudiTrainer(Trainer):
         if self.args.n_gpu > 1:
             loss = loss.mean()  # mean() to average on multi-gpu parallel training
 
-        if self.args.pipelining_fwd_bwd:
+        if self.args.use_lazy_mode and self.args.pipelining_fwd_bwd:
             self.htcore.mark_step()
 
         self.accelerator.backward(loss)
@@ -1626,6 +1630,10 @@ class GaudiTrainer(Trainer):
                         inputs["use_flash_attention"] = True
                     if self.model.generation_config.flash_attention_recompute:
                         inputs["flash_attention_recompute"] = True
+                    if self.model.generation_config.flash_attention_causal_mask:
+                        inputs["flash_attention_causal_mask"] = True
+                    if not self.model.generation_config.use_fused_rope:
+                        inputs["use_fused_rope"] = False
 
             # Prediction step
             loss, logits, labels = self.prediction_step(model, inputs, prediction_loss_only, ignore_keys=ignore_keys)
