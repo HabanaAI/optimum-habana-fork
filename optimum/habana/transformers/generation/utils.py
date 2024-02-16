@@ -1531,6 +1531,8 @@ class GaudiGenerationMixin(GenerationMixin):
                     if prev_idx != idx:
                         model_kwargs["cache_idx"] = (idx + 1) * bucket_size
                         prev_idx = idx
+                        if model_kwargs["use_hpu_graphs"]:
+                            self.clear_cache()
                 else:
                     model_kwargs["cache_idx"] = model_kwargs["kv_cache_len"]
 
