@@ -273,7 +273,7 @@ class GenerationTesterMixin:
 
         kwargs = {}
         model_kwargs = {"attention_mask": attention_mask} if attention_mask is not None else {}
-
+        model.generation_config.static_shapes = False
         output_generate = model.generate(
             input_ids,
             do_sample=False,
@@ -333,6 +333,7 @@ class GenerationTesterMixin:
         torch.manual_seed(0)
         model_kwargs = {"attention_mask": attention_mask} if attention_mask is not None else {}
         self._update_default_model_kwargs(model_kwargs)
+        model.generation_config.static_shapes = False
         output_generate = model.generate(
             input_ids,
             do_sample=True,
@@ -402,6 +403,7 @@ class GenerationTesterMixin:
     ):
         model_kwargs = {"attention_mask": attention_mask} if attention_mask is not None else {}
         self._update_default_model_kwargs(model_kwargs)
+        model.generation_config.static_shapes = False
         output_generate = model.generate(
             input_ids,
             do_sample=False,
@@ -599,6 +601,7 @@ class GenerationTesterMixin:
     ):
         model_kwargs = {"attention_mask": attention_mask} if attention_mask is not None else {}
         self._update_default_model_kwargs(model_kwargs)
+        model.generation_config.static_shapes = False
         output_generate = model.generate(
             input_ids,
             do_sample=False,
@@ -675,6 +678,7 @@ class GenerationTesterMixin:
         kwargs = {}
         model_kwargs = {"attention_mask": attention_mask} if attention_mask is not None else {}
         self._update_default_model_kwargs(model_kwargs)
+        model.generation_config.static_shapes = False
         output_generate = model.generate(
             input_ids,
             do_sample=False,
@@ -1609,6 +1613,7 @@ class GenerationTesterMixin:
             config.use_cache = True
             config.is_decoder = True
             model = model_class(config).to(torch_device).eval()
+            model.generation_config.static_shapes = False
             output_assisted = model.generate(
                 input_ids,
                 attention_mask=attention_mask,
@@ -1947,7 +1952,8 @@ class GenerationTesterMixin:
 
         for idx, iter_hidden_states in enumerate(hidden_states):
             seq_len = min_length + idx if not use_cache else 1
-            if iter_hidden_states[0].shape[-2] == max_length:
+            #if iter_hidden_states[0].shape[-2] == max_length:
+            if config.static_shapes:
                 seq_len = max_length
             expected_shape = (batch_size * num_beam_groups, seq_len, config.hidden_size)
             # check hidden size
