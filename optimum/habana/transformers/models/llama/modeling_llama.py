@@ -18,12 +18,16 @@ from transformers.models.llama.modeling_llama import (
 
 try:
     from habana_frameworks.torch.hpex.kernels import RotaryPosEmbeddingHelperV2 as FusedRoPE
+
+    has_fused_rope = True
 except ImportError:
     print("Not using HPU fused kernel for apply_rotary_pos_emb")
     FusedRoPE = None
 
 try:
     from habana_frameworks.torch.hpex.normalization import FusedRMSNorm as FusedRMSNorm
+
+    has_fused_rms_norm = True
 except ImportError:
     print("Not using HPU fused kernel for RMSNorm")
     FusedRMSNorm = None
@@ -60,7 +64,7 @@ def gaudi_llama_rmsnorm_forward(self, hidden_states):
     The only differences are:
         - override RMSNorm with Habana fused RMSNorm
     """
-    if hidden_states.device.type == "hpu" and FusedRMSNorm:
+    if hidden_states.device.type == "hpu" and has_fused_rms_norm:
         # mixed dtypes are not good for FusedRMSNorm, both inputs need to have same dtype
         if hidden_states.dtype != self.weight.dtype:
             orig_dtype = hidden_states.dtype
@@ -865,7 +869,7 @@ class GaudiLlamaForCausalLM(LlamaForCausalLM):
 
 
 def apply_customized_rope(q, k, cos, sin, position_ids, use_fused_rope=True):
-    if q.device.type == "hpu" and FusedRoPE and use_fused_rope:
+    if q.device.type == "hpu" and has_fused_rope and use_fused_rope:
         # TODO: remove `.clone()` when SynapseAI v1.15 is released
         return FusedRoPE.apply(q, cos.clone(), sin.clone(), position_ids), FusedRoPE.apply(
             k, cos.clone(), sin.clone(), position_ids
