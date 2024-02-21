@@ -29,6 +29,7 @@ try:
 
     has_fused_rms_norm = True
 except ImportError:
+    has_fused_rms_norm = False
     print("Not using HPU fused kernel for RMSNorm")
 
 try:
