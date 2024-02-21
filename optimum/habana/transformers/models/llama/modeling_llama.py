@@ -21,8 +21,8 @@ try:
 
     has_fused_rope = True
 except ImportError:
+    has_fused_rope = False
     print("Not using HPU fused kernel for apply_rotary_pos_emb")
-    FusedRoPE = None
 
 try:
     from habana_frameworks.torch.hpex.normalization import FusedRMSNorm as FusedRMSNorm
@@ -30,7 +30,6 @@ try:
     has_fused_rms_norm = True
 except ImportError:
     print("Not using HPU fused kernel for RMSNorm")
-    FusedRMSNorm = None
 
 try:
     from habana_frameworks.torch.hpex.kernels import FusedSDPA
