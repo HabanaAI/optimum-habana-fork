@@ -277,6 +277,13 @@ def main():
     args = setup_parser(parser)
     model, tokenizer, generation_config = initialize_model(args, logger)
 
+    # Enable hpu dynamic shape
+    try:
+        import habana_frameworks.torch.hpu as hthpu
+        hthpu.enable_dynamic_shape()
+    except ImportError:
+        print("habana_frameworks could not be loaded")
+
     use_lazy_mode = True
     if args.torch_compile and model.config.model_type == "llama":
         use_lazy_mode = False
@@ -361,7 +368,10 @@ def main():
                     truncation=True,
                 )
             else:
-                input_tokens = tokenizer.batch_encode_plus(input_sentences, return_tensors="pt", padding=True)
+                if args.batch_size == 1:
+                    input_tokens = tokenizer.batch_encode_plus(input_sentences, return_tensors="pt")
+                else:
+                    input_tokens = tokenizer.batch_encode_plus(input_sentences, return_tensors="pt", padding=True)
 
             if size is not None:
                 input_tokens = adjust_batch(input_tokens, size)
@@ -621,9 +631,6 @@ def main():
         import habana_quantization_toolkit
 
         habana_quantization_toolkit.finish_measurements(model)
-    if args.const_serialization_path and os.path.isdir(args.const_serialization_path):
-        import shutil
-        shutil.rmtree(args.const_serialization_path)
 
 
 if __name__ == "__main__":
