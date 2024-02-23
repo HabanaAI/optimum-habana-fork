@@ -48,7 +48,8 @@ python run_summarization.py \
     --pad_to_max_length \
     --save_strategy epoch \
     --throughput_warmup_steps 3 \
-    --bf16
+    --bf16 \
+    --adjust_throughput True
 ```
 
 Only T5 models `t5-small`, `t5-base`, `t5-large`, `t5-3b` and `t5-11b` must use an additional argument: `--source_prefix "summarize: "`.
@@ -80,7 +81,8 @@ python run_summarization.py \
     --ignore_pad_token_for_loss False \
     --pad_to_max_length \
     --throughput_warmup_steps 3 \
-    --bf16
+    --bf16 \
+    --adjust_throughput True
 ```
 
 The task of summarization also supports custom CSV and JSONLINES formats.
@@ -166,7 +168,8 @@ python ../gaudi_spawn.py \
     --pad_to_max_length \
     --save_strategy epoch \
     --throughput_warmup_steps 3 \
-    --bf16
+    --bf16 \
+    --adjust_throughput True
 ```
 
 
@@ -199,7 +202,8 @@ PT_HPU_MAX_COMPOUND_OP_SIZE=512 python ../gaudi_spawn.py \
     --throughput_warmup_steps 3 \
     --gradient_checkpointing \
     --adam_epsilon 1e-08 --logging_steps 1 \
-    --deepspeed ds_flan_t5_z3_config_bf16.json
+    --deepspeed ds_flan_t5_z3_config_bf16.json \
+    --adjust_throughput True
 ```
 
 You can look at the [documentation](https://huggingface.co/docs/optimum/habana/usage_guides/deepspeed) for more information about how to use DeepSpeed in Optimum Habana.
