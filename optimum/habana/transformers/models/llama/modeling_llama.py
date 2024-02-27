@@ -599,6 +599,7 @@ class GaudiLlamaModel(LlamaModel):
         flash_attention_causal_mask: Optional[bool] = False,
         cache_idx: int = None,
         use_fused_rope: Optional[bool] = True,
+        lazy_mode: Optional[bool] = True,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         """
         Copied from LlamaModel.forward: https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py
@@ -609,6 +610,7 @@ class GaudiLlamaModel(LlamaModel):
         - add new args use_flash_attention
         - add new arg flash_attention_recompute
         - add new arg flash_attention_causal_mask
+        - add new arg lazy_mode
         """
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -684,7 +686,8 @@ class GaudiLlamaModel(LlamaModel):
         all_self_attns = () if output_attentions else None
         next_decoder_cache = () if not use_new_cache else None
 
-        htcore.mark_step()
+        if lazy_mode:
+            htcore.mark_step()
         for layer_idx, decoder_layer in enumerate(self.layers):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
@@ -796,6 +799,7 @@ class GaudiLlamaForCausalLM(LlamaForCausalLM):
         flash_attention_causal_mask: Optional[bool] = False,
         cache_idx: int = None,
         use_fused_rope: Optional[bool] = True,
+        lazy_mode: Optional[bool] = True,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -821,6 +825,7 @@ class GaudiLlamaForCausalLM(LlamaForCausalLM):
             flash_attention_causal_mask=flash_attention_causal_mask,
             cache_idx=cache_idx,
             use_fused_rope=use_fused_rope,
+            lazy_mode=lazy_mode,
         )
         hidden_states = outputs[0]
         _, seq_len, _ = hidden_states.shape
@@ -934,6 +939,7 @@ class GaudiLlamaForCausalLM(LlamaForCausalLM):
                 "flash_attention_recompute": kwargs.get("flash_attention_recompute"),
                 "flash_attention_causal_mask": kwargs.get("flash_attention_causal_mask"),
                 "cache_idx": kwargs.get("cache_idx"),
+                "lazy_mode": kwargs.get("lazy_mode"),
             }
         )
         return model_inputs
