@@ -1179,16 +1179,16 @@ def main(args):
                         accelerator.save_state(save_path)
                         logger.info(f"Saved state to {save_path}")
 
-            if (global_step - 1) % args.logging_step == 0 or global_step == args.max_train_steps: #YSY
-                train_loss_scalar = train_loss.item()
-                accelerator.log({"train_loss": train_loss_scalar}, step=global_step)
+                if (global_step - 1) % args.logging_step == 0 or global_step == args.max_train_steps: #YSY
+                    train_loss_scalar = train_loss.item()
+                    accelerator.log({"train_loss": train_loss_scalar}, step=global_step)
 
-                if args.gradient_accumulation_steps > 1:
-                    logs = {"step_loss": loss.item(), "lr": lr_scheduler.get_last_lr()[0], "mem_used":torch.cuda.memory.memory_allocated()}
-                else:
-                    logs = {"step_loss": train_loss_scalar, "lr": lr_scheduler.get_last_lr()[0], "mem_used":torch.cuda.memory.memory_allocated()}
-                progress_bar.set_postfix(**logs)
-            train_loss.zero_()
+                    if args.gradient_accumulation_steps > 1:
+                        logs = {"step_loss": loss.item(), "lr": lr_scheduler.get_last_lr()[0], "mem_used":torch.cuda.memory.memory_allocated()}
+                    else:
+                        logs = {"step_loss": train_loss_scalar, "lr": lr_scheduler.get_last_lr()[0], "mem_used":torch.cuda.memory.memory_allocated()}
+                    progress_bar.set_postfix(**logs)
+                train_loss.zero_()
 
             if global_step >= args.max_train_steps:
                 break

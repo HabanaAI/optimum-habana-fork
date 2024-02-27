@@ -53,6 +53,7 @@ from torchvision import transforms
 from torchvision.transforms.functional import crop
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer, PretrainedConfig
+from transformers.trainer_utils import enable_full_determinism
 
 from optimum.habana import GaudiConfig
 from optimum.habana.accelerate import GaudiAccelerator
@@ -244,7 +245,7 @@ def parse_args(input_args=None):
         default=None,
         help="The directory where the downloaded models and datasets will be stored.",
     )
-    parser.add_argument("--seed", type=int, default=42, help="A seed for reproducible training.")
+    parser.add_argument("--seed", type=int, default=None, help="A seed for reproducible training.")
     parser.add_argument(
         "--resolution",
         type=int,
@@ -521,6 +522,11 @@ def parse_args(input_args=None):
         type=int,
         help="Print the loss for every logging_step.",
     )
+    parser.add_argument(
+        "--full_determinism",
+        action="store_true",
+        help="For deterministic run with seed enabled."
+    )
 
     if input_args is not None:
         args = parser.parse_args(input_args)
@@ -666,7 +672,10 @@ def main(args):
 
     # If passed along, set the training seed now.
     if args.seed is not None:
-        set_seed(args.seed)
+        if args.full_determinism:
+            enable_full_determinism(args.seed)
+        else:
+            set_seed(args.seed)
 
     # Handle the repository creation
     if accelerator.is_main_process:
