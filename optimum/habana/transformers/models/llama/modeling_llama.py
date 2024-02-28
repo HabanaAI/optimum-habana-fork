@@ -686,9 +686,10 @@ class GaudiLlamaModel(LlamaModel):
         all_self_attns = () if output_attentions else None
         next_decoder_cache = () if not use_new_cache else None
 
-        if lazy_mode:
-            htcore.mark_step()
         for layer_idx, decoder_layer in enumerate(self.layers):
+            if lazy_mode:
+                htcore.mark_step()
+
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
