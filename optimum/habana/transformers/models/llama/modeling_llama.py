@@ -551,8 +551,12 @@ class GaudiLlamaDecoderLayer(LlamaDecoderLayer):
     def post_attn_pre_mlp(self, hidden_states, residual):
         hidden_states = self.self_attn.post_attn_forward(hidden_states)
 
-        residual.add_(hidden_states)
-        hidden_states = residual
+        if self.training:
+            hidden_states = hidden_states + residual
+            residual = hidden_states
+        else:
+            residual.add_(hidden_states)
+            hidden_states = residual
 
         hidden_states = self.post_attention_layernorm(hidden_states)
 
@@ -562,8 +566,11 @@ class GaudiLlamaDecoderLayer(LlamaDecoderLayer):
     def post_mlp(self, hidden_states, residual):
         hidden_states = self.mlp.post_mlp_forward(hidden_states)
 
-        residual.add_(hidden_states)
-        hidden_states = residual
+        if self.training:
+            hidden_states = hidden_states + residual
+        else:
+            residual.add_(hidden_states)
+            hidden_states = residual
 
         return hidden_states
 
