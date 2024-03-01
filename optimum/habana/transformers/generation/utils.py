@@ -1414,6 +1414,7 @@ class GaudiGenerationMixin(GenerationMixin):
                 )
 
             # prepare model inputs
+            model_kwargs["lazy_mode"] = lazy_mode
             model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
 
             hpu_graphs_kwargs = self._get_hpu_graphs_kwargs(model_kwargs)
@@ -1494,8 +1495,6 @@ class GaudiGenerationMixin(GenerationMixin):
                     if prev_idx != idx:
                         model_kwargs["cache_idx"] = (idx + 1) * bucket_size
                         prev_idx = idx
-                        if model_kwargs["use_hpu_graphs"]:
-                            self.clear_cache()
                 else:
                     model_kwargs["cache_idx"] = model_kwargs["kv_cache_len"]
 
@@ -1524,8 +1523,6 @@ class GaudiGenerationMixin(GenerationMixin):
             if this_peer_finished and not synced_gpus:
                 break
 
-        if model_kwargs["use_hpu_graphs"]:
-            self.clear_cache()
         hb_profer.stop()
         if streamer is not None:
             streamer.end()
@@ -1760,6 +1757,7 @@ class GaudiGenerationMixin(GenerationMixin):
                     break
 
             # prepare model inputs
+            model_kwargs["lazy_mode"] = lazy_mode
             model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
 
             hpu_graphs_kwargs = self._get_hpu_graphs_kwargs(model_kwargs)
@@ -2196,6 +2194,7 @@ class GaudiGenerationMixin(GenerationMixin):
                     params, input_ids, model_kwargs, pad_token_id, bucket_size, reduce_recompile
                 )
 
+            model_kwargs["lazy_mode"] = lazy_mode
             model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
 
             hpu_graphs_kwargs = self._get_hpu_graphs_kwargs(model_kwargs)
@@ -2927,6 +2926,7 @@ class GaudiGenerationMixin(GenerationMixin):
                 if this_peer_finished_flag.item() == 0.0:
                     break
 
+            model_kwargs["lazy_mode"] = lazy_mode
             model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
 
             hpu_graphs_kwargs = self._get_hpu_graphs_kwargs(model_kwargs)
