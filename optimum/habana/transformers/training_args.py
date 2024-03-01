@@ -283,6 +283,14 @@ class GaudiTrainingArguments(TrainingArguments):
         },
     )
 
+    attn_implementation: Optional[str] = field(
+        default="eager",
+        metadata={
+            "help": "choose whether to use torch scale dot product attention or not. Note this is not same as HPU FusedSDPA",
+            "choices": ["eager", "sdpa"],
+        },
+    )
+
     def __post_init__(self):
         if self.use_hpu_graphs:
             warnings.warn(
