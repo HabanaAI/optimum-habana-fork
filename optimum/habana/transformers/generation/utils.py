@@ -735,7 +735,9 @@ class GaudiGenerationMixin(GenerationMixin):
         # if generation_config.bucket_size <= 0, padding is handled by the generating fn (like greedy_search)
         if generation_config.static_shapes and generation_config.bucket_size > 0:
             assert (
-                generation_mode == GenerationMode.GREEDY_SEARCH or generation_mode == GenerationMode.SAMPLE or generation_mode == GenerationMode.BEAM_SEARCH
+                generation_mode == GenerationMode.GREEDY_SEARCH
+                or generation_mode == GenerationMode.SAMPLE
+                or generation_mode == GenerationMode.BEAM_SEARCH
             ), "generation_config.bucket_size > 0 supported only for greedy mode"
 
         if streamer is not None and (generation_config.num_beams > 1):
