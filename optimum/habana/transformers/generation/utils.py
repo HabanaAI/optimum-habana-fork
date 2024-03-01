@@ -735,7 +735,7 @@ class GaudiGenerationMixin(GenerationMixin):
         # if generation_config.bucket_size <= 0, padding is handled by the generating fn (like greedy_search)
         if generation_config.static_shapes and generation_config.bucket_size > 0:
             assert (
-                generation_mode == GenerationMode.GREEDY_SEARCH or generation_mode == GenerationMode.BEAM_SEARCH
+                generation_mode == GenerationMode.GREEDY_SEARCH or generation_mode == GenerationMode.SAMPLE
             ), "generation_config.bucket_size > 0 supported only for greedy mode"
 
         if streamer is not None and (generation_config.num_beams > 1):
@@ -1740,6 +1740,9 @@ class GaudiGenerationMixin(GenerationMixin):
         hb_profer = HabanaProfile(warmup=profiling_warmup_steps, active=profiling_steps)
         hb_profer.start()
         this_peer_finished = False  # used by synced_gpus only
+        bucket_size = model_kwargs.get("bucket_size", -1)
+        prev_idx = -1  # avoiding calculate cache_idx when its value is not changing
+        bucket_internal = model_kwargs.get("bucket_internal", None)
         sample_first = True
         # auto-regressive generation
         while True:
@@ -1759,6 +1762,19 @@ class GaudiGenerationMixin(GenerationMixin):
             # prepare model inputs
             model_kwargs["lazy_mode"] = lazy_mode
             model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
+
+            if bucket_size > 0 and bucket_internal:
+                # Calculate slice idx for kv cache during the decode phase.
+                # Breaking down the kv cache in the attention block helps to reduce computation time.
+                if model_kwargs.get("token_idx_cpu") <= (model_kwargs["kv_cache_len"] // bucket_size) * bucket_size:
+                    idx = (model_kwargs.get("token_idx_cpu") - 1) // bucket_size
+                    if prev_idx != idx:
+                        model_kwargs["cache_idx"] = (idx + 1) * bucket_size
+                        prev_idx = idx
+                        if model_kwargs["use_hpu_graphs"]:
+                            self.clear_cache()
+                else:
+                    model_kwargs["cache_idx"] = model_kwargs["kv_cache_len"]
 
             hpu_graphs_kwargs = self._get_hpu_graphs_kwargs(model_kwargs)
 
