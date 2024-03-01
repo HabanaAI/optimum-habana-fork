@@ -522,11 +522,6 @@ def parse_args(input_args=None):
         type=int,
         help="Print the loss for every logging_step.",
     )
-    parser.add_argument(
-        "--full_determinism",
-        action="store_true",
-        help="For deterministic run with seed enabled."
-    )
 
     if input_args is not None:
         args = parser.parse_args(input_args)
@@ -672,10 +667,8 @@ def main(args):
 
     # If passed along, set the training seed now.
     if args.seed is not None:
-        if args.full_determinism:
-            enable_full_determinism(args.seed)
-        else:
-            set_seed(args.seed)
+        set_seed(args.seed)
+        torch.use_deterministic_algorithms(True)
 
     # Handle the repository creation
     if accelerator.is_main_process:

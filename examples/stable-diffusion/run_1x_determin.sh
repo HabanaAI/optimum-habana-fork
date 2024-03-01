@@ -5,8 +5,7 @@ python train_text_to_image_sdxl.py \
   --resolution 512 \
   --crop_resolution 512 \
   --center_crop \
-  --random_flip \
-  --proportion_empty_prompts=0.2 \
+  --proportion_empty_prompts=0 \
   --train_batch_size 16 \
   --max_train_steps 2500 \
   --learning_rate 1e-05 \
@@ -16,11 +15,11 @@ python train_text_to_image_sdxl.py \
   --output_dir sdxl-pokemon-model \
   --gaudi_config_name Habana/stable-diffusion \
   --throughput_warmup_steps 3 \
-  --dataloader_num_workers 8 \
   --bf16 \
   --use_hpu_graphs_for_training \
   --use_hpu_graphs_for_inference \
   --validation_prompt="a robotic cat with wings" \
   --validation_epochs 48 \
   --checkpointing_steps 2500 \
-  --logging_step 10 2>&1 | tee log_1x_r512.txt
+  --logging_step 10 \
+  --seed 42 2>&1 | tee log_1x_r512.txt
