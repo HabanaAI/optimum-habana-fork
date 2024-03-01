@@ -23,7 +23,6 @@ from ...modeling_attn_mask_utils import (
     _gaudi_prepare_4d_causal_attention_mask,
 )
 
-import habana_frameworks.torch.core as htcore
 
 try:
     from habana_frameworks.torch.hpex.kernels import RotaryPosEmbeddingHelperV2 as FusedRoPE
@@ -693,7 +692,7 @@ class GaudiLlamaModel(LlamaModel):
             htcore.mark_step()
 
         for layer_idx, decoder_layer in enumerate(self.layers):
-            if  torch.distributed.is_initialized() == False:
+            if lazy_mode and torch.distributed.is_initialized() == False:
                 htcore.mark_step()
 
             if output_hidden_states:
