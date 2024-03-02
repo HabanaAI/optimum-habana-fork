@@ -283,10 +283,11 @@ class GaudiTrainingArguments(TrainingArguments):
         },
     )
 
+    # Use this to override default attn_implementation in transformers
     attn_implementation: Optional[str] = field(
         default="eager",
         metadata={
-            "help": "choose whether to use torch scale dot product attention or not. Note this is not same as HPU FusedSDPA",
+            "help": "choose whether to use scale dot product attention (SDPA) or not.",
             "choices": ["eager", "sdpa"],
         },
     )
