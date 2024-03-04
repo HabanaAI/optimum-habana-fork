@@ -27,9 +27,11 @@ import shutil
 import time
 from pathlib import Path
 
+import accelerate
 import datasets
 import diffusers
 import habana_frameworks.torch.core as htcore
+import habana_frameworks.torch as htorch
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -49,6 +51,7 @@ from diffusers.training_utils import EMAModel, compute_snr
 from diffusers.utils import check_min_version, is_wandb_available
 from diffusers.utils.torch_utils import is_compiled_module
 from huggingface_hub import create_repo, upload_folder
+from packaging import version
 from torchvision import transforms
 from torchvision.transforms.functional import crop
 from tqdm.auto import tqdm
@@ -65,7 +68,7 @@ if is_wandb_available():
     import wandb
 
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
-check_min_version("0.23.1")
+check_min_version("0.26.0")
 
 logger = get_logger(__name__, log_level="INFO")
 
@@ -404,14 +407,6 @@ def parse_args(input_args=None):
         "More details here: https://arxiv.org/abs/2303.09556.",
     )
     parser.add_argument("--use_ema", action="store_true", help="Whether to use EMA model.")
-    parser.add_argument(
-        "--allow_tf32",
-        action="store_true",
-        help=(
-            "Whether or not to allow TF32 on Ampere GPUs. Can be used to speed up training. For more information, see"
-            " https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices"
-        ),
-    )
     parser.add_argument(
         "--dataloader_num_workers",
         type=int,
@@ -930,40 +925,40 @@ def main(args):
         )
         ema_unet = EMAModel(ema_unet.parameters(), model_cls=UNet2DConditionModel, model_config=ema_unet.config)
 
-    ## `accelerate` 0.16.0 will have better support for customized saving
-    # if version.parse(accelerate.__version__) >= version.parse("0.16.0"):
-    #    # create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a nice format
-    #    def save_model_hook(models, weights, output_dir):
-    #        if accelerator.is_main_process:
-    #            if args.use_ema:
-    #                ema_unet.save_pretrained(os.path.join(output_dir, "unet_ema"))
+    # `accelerate` 0.16.0 will have better support for customized saving
+    if version.parse(accelerate.__version__) >= version.parse("0.16.0"):
+       # create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a nice format
+       def save_model_hook(models, weights, output_dir):
+           if accelerator.is_main_process:
+               if args.use_ema:
+                   ema_unet.save_pretrained(os.path.join(output_dir, "unet_ema"))
 
-    #            for i, model in enumerate(models):
-    #                model.save_pretrained(os.path.join(output_dir, "unet"))
+               for i, model in enumerate(models):
+                   model.save_pretrained(os.path.join(output_dir, "unet"))
 
-    #                # make sure to pop weight so that corresponding model is not saved again
-    #                weights.pop()
+                   # make sure to pop weight so that corresponding model is not saved again
+                   weights.pop()
 
-    #    def load_model_hook(models, input_dir):
-    #        if args.use_ema:
-    #            load_model = EMAModel.from_pretrained(os.path.join(input_dir, "unet_ema"), UNet2DConditionModel)
-    #            ema_unet.load_state_dict(load_model.state_dict())
-    #            ema_unet.to(accelerator.device)
-    #            del load_model
+       def load_model_hook(models, input_dir):
+           if args.use_ema:
+               load_model = EMAModel.from_pretrained(os.path.join(input_dir, "unet_ema"), UNet2DConditionModel)
+               ema_unet.load_state_dict(load_model.state_dict())
+               ema_unet.to(accelerator.device)
+               del load_model
 
-    #        for i in range(len(models)):
-    #            # pop models so that they are not loaded again
-    #            model = models.pop()
+           for i in range(len(models)):
+               # pop models so that they are not loaded again
+               model = models.pop()
 
-    #            # load diffusers style into model
-    #            load_model = UNet2DConditionModel.from_pretrained(input_dir, subfolder="unet")
-    #            model.register_to_config(**load_model.config)
+               # load diffusers style into model
+               load_model = UNet2DConditionModel.from_pretrained(input_dir, subfolder="unet")
+               model.register_to_config(**load_model.config)
 
-    #            model.load_state_dict(load_model.state_dict())
-    #            del load_model
+               model.load_state_dict(load_model.state_dict())
+               del load_model
 
-    #    accelerator.register_save_state_pre_hook(save_model_hook)
-    #    accelerator.register_load_state_pre_hook(load_model_hook)
+       accelerator.register_save_state_pre_hook(save_model_hook)
+       accelerator.register_load_state_pre_hook(load_model_hook)
 
     
     # Scheduler and math around the number of training steps.
@@ -1062,7 +1057,6 @@ def main(args):
         disable=not accelerator.is_local_main_process,
     )
 
-    import habana_frameworks.torch as htorch
     t0 = None
     t_start = time.perf_counter()
     train_loss = torch.tensor(0, dtype=torch.float, device='hpu')
@@ -1195,7 +1189,7 @@ def main(args):
                 global_step += 1
 
                 if accelerator.is_main_process:
-                    if global_step % args.checkpointing_steps == 0:
+                    if args.checkpointing_steps is not None and global_step % args.checkpointing_steps == 0:
                         # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
                         if args.checkpoints_total_limit is not None:
                             checkpoints = os.listdir(args.output_dir)
