@@ -13,7 +13,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Fine-tuning script for Stable Diffusion XL for text2image."""
+"""
+Fine-tuning script for Stable Diffusion models for text2image.
+Adapted from the following sources:
+https://github.com/huggingface/diffusers/blob/v0.25.1/examples/text_to_image/train_text_to_image_sdxl.py
+"""
 
 import argparse
 import functools
