@@ -115,7 +115,7 @@ image.save("cat-backpack.png")
 ```
 
 
-## Fine-Tuning
+## Fine-Tuning for SDXL
 
 The `train_text_to_image_sdxl.py` script shows how to implement the fine-tuning of Stable Diffusion models on Habana Gaudi.
 
@@ -126,8 +126,7 @@ Install the requirements:
 pip install -r requirements.txt
 ```
 
-### Example for SDXL
-1x fine-tuning of SDXL model using:
+### Single-card Training
 
 ```bash
 python train_text_to_image_sdxl.py \
@@ -159,7 +158,7 @@ python train_text_to_image_sdxl.py \
 ```
 
 
-8x fine-tuning of SDXL model using:
+### Multi-card Training
 ```bash
 PT_HPU_RECIPE_CACHE_CONFIG=/tmp/stdxl_recipe_cache,True,1024  \
 python ../gaudi_spawn.py --world_size 8 --use_mpi train_text_to_image_sdxl.py \
@@ -186,4 +185,28 @@ python ../gaudi_spawn.py --world_size 8 --use_mpi train_text_to_image_sdxl.py \
   --use_hpu_graphs_for_inference \
   --validation_prompt="a robotic cat with wings" \
   --validation_epochs 48
-  ```
+```
+
+### Single-card Training on Gaudi1
+```bash
+PT_HPU_MAX_COMPOUND_OP_SIZE=5 python train_text_to_image_sdxl.py \
+  --pretrained_model_name_or_path stabilityai/stable-diffusion-xl-base-1.0 \
+  --pretrained_vae_model_name_or_path stabilityai/sdxl-vae \
+  --dataset_name lambdalabs/pokemon-blip-captions \
+  --resolution 512 \
+  --center_crop \
+  --random_flip \
+  --proportion_empty_prompts=0.2 \
+  --train_batch_size 1 \
+  --gradient_accumulation_steps 4 \
+  --max_train_steps 3000 \
+  --learning_rate 1e-05 \
+  --max_grad_norm 1 \
+  --lr_scheduler constant \
+  --lr_warmup_steps 0 \
+  --output_dir sdxl-pokemon-model \
+  --gaudi_config_name Habana/stable-diffusion \
+  --throughput_warmup_steps 3 \
+  --bf16
+```
+

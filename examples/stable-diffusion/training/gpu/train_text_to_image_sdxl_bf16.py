@@ -462,7 +462,7 @@ def parse_args(input_args=None):
     )
     parser.add_argument("--noise_offset", type=float, default=0, help="The scale of noise offset.")
 
-    parser.add_argument( #YSY
+    parser.add_argument(
         "--image_save_dir",
         type=str,
         default="./stable-diffusion-generated-images",
@@ -522,7 +522,6 @@ def parse_args(input_args=None):
 
 # Adapted from pipelines.StableDiffusionXLPipeline.encode_prompt
 def encode_prompt(batch, text_encoders, tokenizers, proportion_empty_prompts, caption_column, is_train=True):
-    # print("### YSY - encode_prompt")
     prompt_embeds_list = []
     prompt_batch = batch[caption_column]
 
@@ -555,26 +554,25 @@ def encode_prompt(batch, text_encoders, tokenizers, proportion_empty_prompts, ca
             # We are only ALWAYS interested in the pooled output of the final text encoder
             pooled_prompt_embeds = prompt_embeds[0]
             # prompt_embeds = prompt_embeds.hidden_states[-2]
-            prompt_embeds = prompt_embeds[-1][-2] #YSY
+            prompt_embeds = prompt_embeds[-1][-2]
             bs_embed, seq_len, _ = prompt_embeds.shape
             prompt_embeds = prompt_embeds.view(bs_embed, seq_len, -1)
             prompt_embeds_list.append(prompt_embeds)
 
     prompt_embeds = torch.concat(prompt_embeds_list, dim=-1)
     pooled_prompt_embeds = pooled_prompt_embeds.view(bs_embed, -1)
-    #map creates cache in cpu so need to change tensor to float32 #YSY
+    #map creates cache in cpu so need to change tensor to float32
     return {"prompt_embeds": prompt_embeds.to(torch.float32), "pooled_prompt_embeds": pooled_prompt_embeds.to(torch.float32)}
 
 
-def compute_vae_encodings(pixel_values, vae): #YSY
-    # print("### YSY - compute_vae_encodings")
+def compute_vae_encodings(pixel_values, vae):
     pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
     pixel_values = pixel_values.to(vae.device, dtype=vae.dtype)
 
     with torch.no_grad():
         model_input = vae.encode(pixel_values).latent_dist.sample()
     model_input = model_input * vae.config.scaling_factor
-    return model_input #YSY
+    return model_input
 
 
 def generate_timestep_weights(args, num_timesteps):
@@ -654,7 +652,7 @@ def main(args):
     # If passed along, set the training seed now.
     if args.seed is not None:
         set_seed(args.seed)
-        # torch.use_deterministic_algorithms(True) #YSY
+        # torch.use_deterministic_algorithms(True)
 
     # Handle the repository creation
     if accelerator.is_main_process:
@@ -701,7 +699,7 @@ def main(args):
     )
     # For mixed precision training we cast all non-trainable weigths to half-precision
     # as these weights are only used for inference, keeping weights in full precision is not required.
-    weight_dtype = torch.float32 #YSY
+    weight_dtype = torch.float32
     if accelerator.mixed_precision == "fp16":
         weight_dtype = torch.float16
     elif accelerator.mixed_precision == "bf16":
@@ -723,7 +721,7 @@ def main(args):
         subfolder="unet",
         revision=args.revision,
         variant=args.variant,
-        torch_dtype=weight_dtype #YSY
+        torch_dtype=weight_dtype
     )
 
     # Freeze vae and text encoders.
@@ -877,7 +875,6 @@ def main(args):
     tokenizers = [tokenizer_one, tokenizer_two]
 
     def preprocess_train(examples):
-        # print("### YSY - preprocess_train")
         images = [image.convert("RGB") for image in examples[image_column]]
         # image aug
         original_sizes = []
@@ -886,7 +883,7 @@ def main(args):
         for image in images:
             original_sizes.append((image.height, image.width))
             image = train_resize(image)
-            if args.crop_resolution < args.resolution: #YSY
+            if args.crop_resolution < args.resolution:
                 if args.center_crop:
                     y1 = max(0, int(round((image.height - args.resolution) / 2.0)))
                     x1 = max(0, int(round((image.width - args.resolution) / 2.0)))
@@ -937,14 +934,14 @@ def main(args):
                                           new_fingerprint=new_fingerprint)
 
     def collate_fn(examples):
-        pixel_values = torch.stack([example["pixel_values"].clone().detach() for example in examples]) #YSY
+        pixel_values = torch.stack([example["pixel_values"].clone().detach() for example in examples])
         original_sizes = [example["original_sizes"] for example in examples]
         crop_top_lefts = [example["crop_top_lefts"] for example in examples]
         prompt_embeds = torch.stack([torch.tensor(example["prompt_embeds"]) for example in examples])
         pooled_prompt_embeds = torch.stack([torch.tensor(example["pooled_prompt_embeds"]) for example in examples])
 
         return {
-            "pixel_values": pixel_values, #YSY
+            "pixel_values": pixel_values,
             "prompt_embeds": prompt_embeds,
             "pooled_prompt_embeds": pooled_prompt_embeds,
             "original_sizes": original_sizes,
@@ -1053,19 +1050,19 @@ def main(args):
         disable=not accelerator.is_local_main_process,
     )
 
-    t0 = None #YSY
+    t0 = None
     t_start = time.perf_counter()
-    train_loss = torch.tensor(0, dtype=torch.float, device='cuda') #YSY
+    train_loss = torch.tensor(0, dtype=torch.float, device='cuda')
     for epoch in range(first_epoch, args.num_train_epochs):
         # train_loss = 0.0
         train_loss.zero_()
         for step, batch in enumerate(train_dataloader):
-            if t0 is None and global_step == args.throughput_warmup_steps: #YSY
+            if t0 is None and global_step == args.throughput_warmup_steps:
                 t0 = time.perf_counter()
 
             with accelerator.accumulate(unet):
                 # Move compute_vae_encoding here to reflect the transformed image input
-                model_input = compute_vae_encodings(batch['pixel_values'], vae) #YSY
+                model_input = compute_vae_encodings(batch['pixel_values'], vae)
                 # Sample noise that we'll add to the latents
                 noise = torch.randn_like(model_input)
                 if args.noise_offset:
@@ -1117,7 +1114,7 @@ def main(args):
                     prompt_embeds,
                     added_cond_kwargs=unet_added_conditions,
                     return_dict=False,
-                )[0] #.sample #YSY
+                )[0] #.sample
 
                 # Get the target for loss depending on the prediction type
                 if args.prediction_type is not None:
@@ -1156,7 +1153,7 @@ def main(args):
 
                 # Gather the losses across all processes for logging (if we use distributed training).
                 avg_loss = accelerator.gather(loss.repeat(args.train_batch_size)).mean()
-                train_loss += avg_loss / args.gradient_accumulation_steps #YSY  #avg_loss.item()
+                train_loss += avg_loss / args.gradient_accumulation_steps
 
                 # Backpropagate
                 accelerator.backward(loss)
@@ -1213,7 +1210,7 @@ def main(args):
                 break
 
         if accelerator.is_main_process:
-            if args.validation_prompt is not None and (epoch+1) % args.validation_epochs == 0: #YSY
+            if args.validation_prompt is not None and (epoch+1) % args.validation_epochs == 0:
                 logger.info(
                     f"Running validation... \n Generating {args.num_validation_images} images with prompt:"
                     f" {args.validation_prompt}."
@@ -1272,13 +1269,13 @@ def main(args):
                 del pipeline
                 torch.cuda.empty_cache()
 
-    duration = time.perf_counter() - t0 #YSY
+    duration = time.perf_counter() - t0
     ttt = time.perf_counter() - t_start
     throughput = (args.max_train_steps - args.throughput_warmup_steps) * total_batch_size / duration
 
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
-        logger.info(f"Throughput = {throughput} samples/s") #YSY
+        logger.info(f"Throughput = {throughput} samples/s")
         logger.info(f"Train runtime = {duration} seconds")
         logger.info(f"Total Train runtime = {ttt} seconds")
         metrics = {
@@ -1318,7 +1315,7 @@ def main(args):
         if args.validation_prompt and args.num_validation_images > 0:
             pipeline = pipeline.to(accelerator.device)
             generator = torch.Generator(device=accelerator.device).manual_seed(args.seed) if args.seed else None
-            with torch.cuda.amp.autocast(): #YSY
+            with torch.cuda.amp.autocast():
                 images = [
                     pipeline(args.validation_prompt, num_inference_steps=25, generator=generator).images[0]
                     for _ in range(args.num_validation_images)

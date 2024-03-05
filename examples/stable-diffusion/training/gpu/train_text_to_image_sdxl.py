@@ -461,7 +461,7 @@ def parse_args(input_args=None):
         "--enable_xformers_memory_efficient_attention", action="store_true", help="Whether or not to use xformers."
     )
     parser.add_argument("--noise_offset", type=float, default=0, help="The scale of noise offset.")
-    parser.add_argument( #YSY
+    parser.add_argument(
         "--image_save_dir",
         type=str,
         default="./stable-diffusion-generated-images",
@@ -708,7 +708,7 @@ def main(args):
         subfolder="unet",
         revision=args.revision,
         variant=args.variant,
-        # torch_dtype=weight_dtype #YSY
+        torch_dtype=weight_dtype
     )
 
     # Freeze vae and text encoders.
@@ -720,7 +720,7 @@ def main(args):
 
     # Move unet, vae and text_encoder to device and cast to weight_dtype
     # The VAE is in float32 to avoid NaN losses.
-    vae.to(accelerator.device, dtype=torch.float32) #YSY
+    vae.to(accelerator.device, dtype=torch.float32)
     text_encoder_one.to(accelerator.device, dtype=weight_dtype)
     text_encoder_two.to(accelerator.device, dtype=weight_dtype)
 
@@ -1039,13 +1039,13 @@ def main(args):
         disable=not accelerator.is_local_main_process,
     )
 
-    t0 = None #YSY
+    t0 = None
     t_start = time.perf_counter()
-    train_loss = torch.tensor(0, dtype=torch.float, device='cuda') #YSY
+    train_loss = torch.tensor(0, dtype=torch.float, device='cuda')
     for epoch in range(first_epoch, args.num_train_epochs):
         train_loss.zero_()
         for step, batch in enumerate(train_dataloader):
-            if t0 is None and global_step == args.throughput_warmup_steps: #YSY
+            if t0 is None and global_step == args.throughput_warmup_steps:
                 t0 = time.perf_counter()
 
             with accelerator.accumulate(unet):
@@ -1135,7 +1135,7 @@ def main(args):
 
                 # Gather the losses across all processes for logging (if we use distributed training).
                 avg_loss = accelerator.gather(loss.repeat(args.train_batch_size)).mean()
-                train_loss += avg_loss / args.gradient_accumulation_steps #YSY  #avg_loss.item()
+                train_loss += avg_loss / args.gradient_accumulation_steps
 
                 # Backpropagate
                 accelerator.backward(loss)
@@ -1150,7 +1150,7 @@ def main(args):
             if accelerator.sync_gradients:
                 progress_bar.update(1)
                 global_step += 1
-                # accelerator.log({"train_loss": train_loss}, step=global_step) #YSY
+                # accelerator.log({"train_loss": train_loss}, step=global_step)
                 # train_loss = 0.0
 
                 if accelerator.is_main_process:
@@ -1179,7 +1179,7 @@ def main(args):
                         accelerator.save_state(save_path)
                         logger.info(f"Saved state to {save_path}")
 
-                if (global_step - 1) % args.logging_step == 0 or global_step == args.max_train_steps: #YSY
+                if (global_step - 1) % args.logging_step == 0 or global_step == args.max_train_steps:
                     train_loss_scalar = train_loss.item()
                     accelerator.log({"train_loss": train_loss_scalar}, step=global_step)
 
@@ -1194,7 +1194,7 @@ def main(args):
                 break
 
         if accelerator.is_main_process:
-            if args.validation_prompt is not None and (epoch+1) % args.validation_epochs == 0: #YSY
+            if args.validation_prompt is not None and (epoch+1) % args.validation_epochs == 0:
                 logger.info(
                     f"Running validation... \n Generating {args.num_validation_images} images with prompt:"
                     f" {args.validation_prompt}."
@@ -1253,13 +1253,13 @@ def main(args):
                 del pipeline
                 torch.cuda.empty_cache()
 
-    duration = time.perf_counter() - t0 #YSY
+    duration = time.perf_counter() - t0
     ttt = time.perf_counter() - t_start
     throughput = (args.max_train_steps - args.throughput_warmup_steps) * total_batch_size / duration
 
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
-        logger.info(f"Throughput = {throughput} samples/s") #YSY
+        logger.info(f"Throughput = {throughput} samples/s")
         logger.info(f"Train runtime = {duration} seconds")
         logger.info(f"Total Train runtime = {ttt} seconds")
         metrics = {
@@ -1305,7 +1305,7 @@ def main(args):
                     for _ in range(args.num_validation_images)
                 ]
             # Save images in the specified directory if not None and if they are in PIL format
-            if args.image_save_dir is not None: #YSY
+            if args.image_save_dir is not None:
                 if args.output_type == "pil":
                     image_save_dir = Path(args.image_save_dir)
                     image_save_dir.mkdir(parents=True, exist_ok=True)
