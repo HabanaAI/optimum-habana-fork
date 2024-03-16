@@ -1025,8 +1025,8 @@ class GaudiTrainer(Trainer):
         train_loss = self._total_loss_scalar / self.state.global_step
 
         # Warmup steps are removed from the calculation of speed metrics
-        num_samples_for_speed_metrics = num_train_samples - args.throughput_warmup_steps * total_train_batch_size
-        num_steps_for_speed_metrics = self.state.max_steps - args.throughput_warmup_steps
+        num_samples_for_speed_metrics = (total_batched_samples - args.throughput_warmup_steps) * total_train_batch_size
+        num_steps_for_speed_metrics = total_batched_samples- args.throughput_warmup_steps
         metrics = speed_metrics(
             "train",
             start_time,
