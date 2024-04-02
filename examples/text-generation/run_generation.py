@@ -279,6 +279,7 @@ def main():
 
     use_lazy_mode = True
     if args.torch_compile and model.config.model_type == "llama":
+        torch._C._set_autograd_fallback_mode("nothing")
         use_lazy_mode = False
 
     import habana_frameworks.torch.hpu as torch_hpu
