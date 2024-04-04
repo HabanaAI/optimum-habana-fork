@@ -51,6 +51,7 @@ except ImportError:
     FusedSDPA = None
 
 import habana_frameworks.torch.core as htcore
+fast_softmax_mode = 'None'
 
 
 
@@ -384,9 +385,10 @@ class GaudiLlamaAttention(nn.Module):
             else:
                 # first token
                 if flash_attention_causal_mask:
+                    global fast_softmax_mode
                     # causal masking on first token requires inputs to be of the same lenght
                     with ht.sdp_kernel(enable_recompute=flash_attention_recompute):
-                        attn_output = FusedSDPA.apply(query_states, key_states, value_states, None, 0.0, True, None)
+                        attn_output = FusedSDPA.apply(query_states, key_states, value_states, None, 0.0, True, None, fast_softmax_mode)
                 else:
                     with ht.sdp_kernel(enable_recompute=flash_attention_recompute):
                         attn_output = FusedSDPA.apply(
@@ -886,6 +888,9 @@ class GaudiLlamaForCausalLM(LlamaForCausalLM):
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        if self.generation_config.flash_attention_fast_softmax is True:
+            global fast_softmax_mode
+            fast_softmax_mode = 'fast'
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs = self.model(
             input_ids=input_ids,
