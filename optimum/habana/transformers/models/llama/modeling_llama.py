@@ -42,11 +42,11 @@ except ImportError:
 
 try:
     from habana_frameworks.torch.hpex.kernels import FusedSDPA
-    fast_softmax_mode = 'None'
 except ImportError:
     print("Not using HPU fused scaled dot-product attention kernel.")
     FusedSDPA = None
 
+fast_softmax_mode = 'None'
 
 def update(prev, cur, dim, idx, inp_seq_len):
     orig_cur = cur
@@ -868,7 +868,7 @@ class GaudiLlamaForCausalLM(LlamaForCausalLM):
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-        if self.generation_config.flash_attention_fast_softmax_mode == 'fast':
+        if self.generation_config.flash_attention_fast_softmax is True:
             global fast_softmax_mode
             fast_softmax_mode = 'fast'
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
