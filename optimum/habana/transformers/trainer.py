@@ -1147,6 +1147,21 @@ class GaudiTrainer(Trainer):
             # reset tr_loss to zero
             tr_loss -= tr_loss
             logs["loss"] = round(tr_loss_scalar / (self.state.global_step - self._globalstep_last_logged), 4)
+
+            # This grad_norm block was outside of _maybe_log_save_evaluate method causing perf degradataion.
+            # Moving it here so the grad tensor is only copied when it's needed.
+            if is_accelerate_available() and self.accelerator.distributed_type == GaudiDistributedType.DEEPSPEED:
+                grad_norm = model.get_global_grad_norm()
+            else:
+                grad_norm = (
+                    _grad_norm.item()
+                    if (_grad_norm is not None and self.accelerator.distributed_type != GaudiDistributedType.FSDP)
+                    else None
+                )
+
+            if grad_norm is not None:
+                logs["grad_norm"] = grad_norm
+
             logs["learning_rate"] = self._get_learning_rate()
 
             self._total_loss_scalar += tr_loss_scalar
