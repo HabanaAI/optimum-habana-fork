@@ -574,19 +574,12 @@ class GaudiLlamaDecoderLayer(LlamaDecoderLayer):
                     output_pre_attn,
                     residual,
                 )
-        # self.self_attn.attention_all_reduce(output_pre_attn)
-        # output_post_attn_pre_mlp, residual_mlp = self.post_attn_pre_mlp(output_pre_attn, residual)
         self.mlp.mlp_all_reduce(output_post_attn_pre_mlp)
-        # self._gradient_checkpointing_func(
-        #     self.mlp.mlp_all_reduce.__call__,
-        #     output_post_attn_pre_mlp,
-        # )
         output_post_mlp = self._gradient_checkpointing_func(
                     self.post_mlp.__call__,
                     output_post_attn_pre_mlp,
                     residual_mlp,
                 )[0]
-        # output_post_mlp = self.post_mlp(output_post_attn_pre_mlp, residual_mlp)
 
         outputs = (output_post_mlp,)
 
