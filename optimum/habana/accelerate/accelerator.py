@@ -83,7 +83,14 @@ from .utils import (
 
 if is_fp8_available():
     import habana_frameworks.torch.hpex.experimental.transformer_engine as te
-    from habana_frameworks.torch.hpex.experimental.transformer_engine.distributed import activation_checkpointing
+
+    try:
+        from habana_frameworks.torch.hpex.experimental.transformer_engine.distributed import activation_checkpointing
+        has_activation_checkpointing_module = True
+
+    except ImportError:
+        warnings.warn(f"Warning! Failed to import TE activation_checkpointing")
+        has_activation_checkpointing_module = False
 
 logger = get_logger(__name__)
 
@@ -104,6 +111,8 @@ class SwitchableForwardMaker:
 
     @staticmethod
     def convert(module, fp8_recipe_handler, use_activation_checkpointing=False):
+        if not has_activation_checkpointing_module:
+            raise ImportError(f"Could not import activation checkpointing module")
         SwitchableForwardMaker(module, fp8_recipe_handler, use_activation_checkpointing)
 
 class GaudiAccelerator(Accelerator):
