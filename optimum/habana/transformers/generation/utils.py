@@ -178,7 +178,6 @@ class GaudiGenerationMixin(GenerationMixin):
             for i in range(len(model_kwargs["past_key_values"])):
                 for j in range(len(model_kwargs["past_key_values"][i])):
                     if torch.is_tensor(model_kwargs["past_key_values"][i][j]):
-                        #print(f"PAD KV Cache by {pad_amount} tokens")
                         model_kwargs["past_key_values"][i][j] = torch.nn.functional.pad(model_kwargs["past_key_values"][i][j], (0, 0, 0, pad_amount))
                         if model_kwargs.get("lazy_mode" , False):
                             self.htcore_generation.mark_step()
@@ -188,7 +187,6 @@ class GaudiGenerationMixin(GenerationMixin):
             for i in range(len(model_kwargs["past_key_values"])):
                 for j in range(len(model_kwargs["past_key_values"][i])):
                     if torch.is_tensor(model_kwargs["past_key_values"][i][j]):
-                        #print("Delete KV cache")
                         t = model_kwargs["past_key_values"][i][j]
                         del t
                         model_kwargs["past_key_values"][i][j] = None
