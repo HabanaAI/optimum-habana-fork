@@ -1559,9 +1559,8 @@ class GaudiGenerationMixin(GenerationMixin):
                 self._pad_past_key_values(model_kwargs)
                 model_kwargs["pad_done"] = True
 
-        if os.environ.get('PT_HPUGRAPH_DISABLE_TENSOR_CACHE') == '1' and model_kwargs.get("use_hpu_graphs", False) \
-            and not model_kwargs.get("reuse_cache", False) and bucket_internal \
-            and model_kwargs.get("limit_hpu_graphs", False):
+        if model_kwargs.get("use_hpu_graphs", False) and model_kwargs.get("limit_hpu_graphs", False) \
+            and not model_kwargs.get("reuse_cache", False) and bucket_internal:
             # Clear HPU graphs input tensors of the decode phase after the full generation while loop
             print("CLEAR HPU GRAPH INPUTS OF DECODE PHASE")
             self.clear_inputs()
