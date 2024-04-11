@@ -397,7 +397,7 @@ class GaudiAccelerator(Accelerator):
         elif self.state.is_fp8_enabled:
             model = self.wrap_fp8(model)
             for _layer in model.base_model.model.model.layers:
-                SwitchableForwardMaker.convert(_layer, self.fp8_recipe_handler, use_activation_checkpointing=True)
+                SwitchableForwardMaker.convert(_layer, self.fp8_recipe_handler, use_activation_checkpointing=model.is_gradient_checkpointing)
             SwitchableForwardMaker.convert(model.base_model.model.lm_head, self.fp8_recipe_handler)
         if (getattr(model, "is_loaded_in_8bit", False) or getattr(model, "is_loaded_in_4bit", False)) and getattr(
             model, "hf_device_map", False
@@ -708,7 +708,7 @@ class GaudiAccelerator(Accelerator):
 
             if self.state.is_fp8_enabled:
                 for _layer in engine.module.base_model.model.model.layers:
-                    SwitchableForwardMaker.convert(_layer, self.fp8_recipe_handler, use_activation_checkpointing=True)
+                    SwitchableForwardMaker.convert(_layer, self.fp8_recipe_handler, use_activation_checkpointing=engine.module.is_gradient_checkpointing)
                 SwitchableForwardMaker.convert(engine.module.base_model.model.lm_head, self.fp8_recipe_handler)
 
             self._models.append(engine)
