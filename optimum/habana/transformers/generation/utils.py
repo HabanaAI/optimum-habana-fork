@@ -1831,7 +1831,6 @@ class GaudiGenerationMixin(GenerationMixin):
                 )
 
             # prepare model inputs
-            model_kwargs["lazy_mode"] = lazy_mode
             model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
 
             hpu_graphs_kwargs = self._get_hpu_graphs_kwargs(model_kwargs)
