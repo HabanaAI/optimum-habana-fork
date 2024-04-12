@@ -47,6 +47,14 @@ from ...modeling_attn_mask_utils import (
 import habana_frameworks.torch.core as htcore
 
 try:
+    from habana_frameworks.torch.hpex.kernels import RotaryPosEmbeddingHelperV2 as FusedRoPE
+
+    has_fused_rope = True
+except ImportError:
+    has_fused_rope = False
+    print("Not using HPU fused kernel for apply_rotary_pos_emb")
+
+try:
     from habana_frameworks.torch.hpex.normalization import FusedRMSNorm as FusedRMSNorm
 except ImportError:
     print("Not using HPU fused kernel for RMSNorm")
