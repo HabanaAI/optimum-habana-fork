@@ -607,7 +607,10 @@ class GaudiLlamaDecoderLayer(LlamaDecoderLayer):
         cache_idx: int = None,
         use_fused_rope: Optional[bool] = True,
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
-        hidden_states = self.input_layernorm(hidden_states)
+        hidden_states = self._gradient_checkpointing_func(
+            self.input_layernorm.__call__,
+            hidden_states,
+            )
         self.self_attn._gradient_checkpointing_func = self._gradient_checkpointing_func
         output_attn, attn_weights, present_key_value = self.self_attn.pre_attn_forward(
             hidden_states,
