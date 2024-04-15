@@ -319,10 +319,7 @@ class GaudiLlamaAttention(LlamaAttention):
 
         if use_flash_attention and FusedSDPA:
             import habana_frameworks.torch.hpu as ht
-            if flash_attention_fast_softmax:
-                softmax_mode='fast'
-            else:
-                softmax_mode='None'
+            softmax_mode = 'fast' if flash_attention_fast_softmax else 'None'
 
             if q_len == 1:
                 # next token
@@ -751,6 +748,7 @@ class GaudiLlamaModel(LlamaModel):
                     use_flash_attention,
                     flash_attention_recompute,
                     flash_attention_causal_mask,
+                    flash_attention_fast_softmax,
                     None,
                     use_fused_rope,
                 )
