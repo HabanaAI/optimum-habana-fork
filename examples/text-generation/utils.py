@@ -100,9 +100,7 @@ def setup_inference(args, model):
     import habana_frameworks.torch.core as htcore
 
     print("Initializing inference mode")
-    const_marking = os.getenv("ENABLE_CONST_MARKING", "True")
-    if const_marking == "True":
-        htcore.hpu_initialize(model, mark_only_scales_as_const=True)
+    htcore.hpu_initialize(model, mark_only_scales_as_const=True)
     return model
 
 def setup_const_serialization(const_serialization_path):
