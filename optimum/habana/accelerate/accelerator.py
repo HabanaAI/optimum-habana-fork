@@ -256,7 +256,7 @@ class GaudiAccelerator(Accelerator):
 
         if self.fp8_recipe_handler is None and self.state.is_fp8_enabled:
             self.fp8_recipe_handler = te.recipe.DelayedScaling(
-                fp8_format=te.recipe.Format.E5M2,
+                fp8_format=te.recipe.Format.HYBRID,
                 margin=0,
                 interval=16,
                 amax_history_len=1,
