@@ -111,6 +111,20 @@ def gaudi_llama_repeat_kv(
 
     return query_states, key_states, value_states, attention_mask
 
+class ModuleFusedSDPA(torch.nn.Module):
+    def __init__(self, fusedSDPA, scale, attention_dropout, enable_recompute=False):
+        super().__init__()
+        self._hpu_kernel_fsdpa = fusedSDPA
+        self.scale = scale
+        self.attention_dropout = attention_dropout
+        self.enable_recompute = enable_recompute
+
+    def forward(self, query, key, value, attn_mask, dropout_p, is_causal, scale, fast_softmax_mode):
+        from habana_frameworks.torch.hpex.experimental.transformer_engine import FusedAttention
+        if isinstance(self._hpu_kernel_fsdpa, FusedAttention):
+            return self._hpu_kernel_fsdpa(query, key, value, attn_mask, is_causal, fast_softmax_mode)
+        else:
+            return self._hpu_kernel_fsdpa.apply(query, key, value, attn_mask, dropout_p, is_causal, scale, fast_softmax_mode)
 
 class Matmul(torch.nn.Module):
     def __init__(self):
@@ -205,6 +219,7 @@ class GaudiLlamaAttention(nn.Module):
         self.v_cache = KVCache()
         self.inp_seq_len = -1
         self.norm_factor = 1.0 / math.sqrt(self.head_dim)
+        self.fused_scaled_dot_product_attention = ModuleFusedSDPA(FusedSDPA, scale=self.norm_factor, attention_dropout=self.attention_dropout, enable_recompute=False) if FusedSDPA else None
 
     def _init_rope(self):
         if self.config.rope_scaling is None:
@@ -376,25 +391,29 @@ class GaudiLlamaAttention(nn.Module):
         if use_flash_attention and FusedSDPA:
             import habana_frameworks.torch.hpu as ht
 
+            query_states, key_states, value_states, attention_mask = gaudi_llama_repeat_kv(
+                query_states, key_states, value_states, attention_mask, self.num_key_value_groups
+            )
+
+            global fast_softmax_mode
             if q_len == 1:
                 # next token
                 with ht.sdp_kernel(enable_recompute=False):
-                    attn_output = FusedSDPA.apply(
-                        query_states, key_states, value_states, attention_mask, 0.0, False, None
+                    attn_output = self.fused_scaled_dot_product_attention(
+                        query_states, key_states, value_states, attention_mask, 0.0, False, None, fast_softmax_mode
                     )
             else:
                 # first token
                 if flash_attention_causal_mask:
-                    global fast_softmax_mode
                     # causal masking on first token requires inputs to be of the same lenght
                     with ht.sdp_kernel(enable_recompute=flash_attention_recompute):
-                        attn_output = FusedSDPA.apply(query_states, key_states, value_states, None, 0.0, True, None, fast_softmax_mode)
+                        attn_output = self.fused_scaled_dot_product_attention(query_states, key_states, value_states, None, 0.0, True, None, fast_softmax_mode)
                 else:
                     with ht.sdp_kernel(enable_recompute=flash_attention_recompute):
-                        attn_output = FusedSDPA.apply(
+                        attn_output = self.fused_scaled_dot_product_attention(
                             query_states, key_states, value_states, attention_mask, 0.0, False, None
                         )
-
+            attn_output = attn_output.reshape(bsz, -1, q_len, self.head_dim)
         else:
             query_states, key_states, value_states, attention_mask = gaudi_llama_repeat_kv(
                 query_states, key_states, value_states, attention_mask, self.num_key_value_groups
