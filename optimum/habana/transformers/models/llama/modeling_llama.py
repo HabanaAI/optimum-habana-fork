@@ -52,6 +52,7 @@ except ImportError:
 
 import habana_frameworks.torch.core as htcore
 fast_softmax_mode = 'None'
+flash_attention_in_fp8 = 'None'
 
 
 
@@ -391,29 +392,47 @@ class GaudiLlamaAttention(nn.Module):
         if use_flash_attention and FusedSDPA:
             import habana_frameworks.torch.hpu as ht
 
-            query_states, key_states, value_states, attention_mask = gaudi_llama_repeat_kv(
-                query_states, key_states, value_states, attention_mask, self.num_key_value_groups
-            )
+            global flash_attention_in_fp8
+            if flash_attention_in_fp8 is True:
+                query_states, key_states, value_states, attention_mask = gaudi_llama_repeat_kv(
+                    query_states, key_states, value_states, attention_mask, self.num_key_value_groups
+                )
 
             global fast_softmax_mode
             if q_len == 1:
                 # next token
                 with ht.sdp_kernel(enable_recompute=False):
-                    attn_output = self.fused_scaled_dot_product_attention(
-                        query_states, key_states, value_states, attention_mask, 0.0, False, None, fast_softmax_mode
-                    )
+                    if flash_attention_in_fp8 is True:
+                        attn_output = self.fused_scaled_dot_product_attention(
+                            query_states, key_states, value_states, attention_mask, 0.0, False, None, fast_softmax_mode
+                        )
+                    else:
+                        attn_output = FusedSDPA.apply(
+                            query_states, key_states, value_states, attention_mask, 0.0, False, None, fast_softmax_mode
+                        )
             else:
                 # first token
                 if flash_attention_causal_mask:
                     # causal masking on first token requires inputs to be of the same lenght
                     with ht.sdp_kernel(enable_recompute=flash_attention_recompute):
-                        attn_output = self.fused_scaled_dot_product_attention(query_states, key_states, value_states, None, 0.0, True, None, fast_softmax_mode)
+                        if flash_attention_in_fp8 is True:
+                            attn_output = self.fused_scaled_dot_product_attention(query_states, key_states, value_states, None, 0.0, True, None, fast_softmax_mode)
+                        else:
+                            attn_output = FusedSDPA.apply(query_states, key_states, value_states, None, 0.0, True, None, fast_softmax_mode)
                 else:
                     with ht.sdp_kernel(enable_recompute=flash_attention_recompute):
-                        attn_output = self.fused_scaled_dot_product_attention(
-                            query_states, key_states, value_states, attention_mask, 0.0, False, None
-                        )
-            attn_output = attn_output.reshape(bsz, -1, q_len, self.head_dim)
+                        if flash_attention_in_fp8 is True:
+                            attn_output = self.fused_scaled_dot_product_attention(
+                                query_states, key_states, value_states, attention_mask, 0.0, False, None, fast_softmax_mode
+                            )
+                        else:
+                            attn_output = FusedSDPA.apply(
+                                query_states, key_states, value_states, attention_mask, 0.0, False, None, fast_softmax_mode
+                            )
+
+            if flash_attention_in_fp8 is True:
+                attn_output = attn_output.reshape(bsz, -1, q_len, self.head_dim)
+
         else:
             query_states, key_states, value_states, attention_mask = gaudi_llama_repeat_kv(
                 query_states, key_states, value_states, attention_mask, self.num_key_value_groups
@@ -910,6 +929,9 @@ class GaudiLlamaForCausalLM(LlamaForCausalLM):
         if self.generation_config.flash_attention_fast_softmax is True:
             global fast_softmax_mode
             fast_softmax_mode = 'fast'
+        if self.generation_config.flash_attention_fp8 is True:
+            global flash_attention_in_fp8
+            flash_attention_in_fp8 = True
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs = self.model(
             input_ids=input_ids,
