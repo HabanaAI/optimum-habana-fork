@@ -245,6 +245,11 @@ def setup_parser(parser):
         help="Whether to enable Habana Flash Attention in causal mode on first token generation.",
     )
     parser.add_argument(
+        "--flash_attention_fast_softmax",
+        action="store_true",
+        help="Whether to enable Habana Flash Attention in fast softmax mode.",
+    )
+    parser.add_argument(
         "--book_source",
         action="store_true",
         help="Whether to use project Guttenberg books data as input. Usefull for testing large sequence lenghts.",
@@ -277,8 +282,7 @@ def setup_parser(parser):
 
     args.quant_config = os.getenv("QUANT_CONFIG", "")
     if args.quant_config == "" and args.disk_offload:
-        raise parser.error("--bf16 is not supported with --disk_offload")
-
+        print("WARNING: --disk_offload was tested only with fp8, it may not work with full precision. If error raises try to remove the --disk_offload flag.")
     return args
 
 

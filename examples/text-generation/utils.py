@@ -368,11 +368,14 @@ def setup_generation_config(args, model, tokenizer):
     generation_config.use_flash_attention = args.use_flash_attention
     generation_config.flash_attention_recompute = args.flash_attention_recompute
     generation_config.flash_attention_causal_mask = args.flash_attention_causal_mask
+    generation_config.flash_attention_fast_softmax = args.flash_attention_fast_softmax
     return generation_config
 
 
 def initialize_model(args, logger):
     init_start = time.perf_counter()
+    if args.batch_size == 1 and args.limit_hpu_graphs:
+        args.limit_hpu_graphs = False
     setup_distributed(args)
     override_prints(args.global_rank == 0 or args.verbose_workers, logger)
     setup_env(args)
