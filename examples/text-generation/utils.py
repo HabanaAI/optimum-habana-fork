@@ -382,7 +382,7 @@ def initialize_model(args, logger):
     setup_device(args)
     set_seed(args.seed)
     get_repo_root(args.model_name_or_path, local_rank=args.local_rank, token=args.token)
-    use_deepspeed = args.world_size > 0
+    use_deepspeed = args.world_size > 1
     if use_deepspeed or args.bf16:
         model_dtype = torch.bfloat16
     else:
