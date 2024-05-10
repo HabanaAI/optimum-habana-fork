@@ -407,7 +407,7 @@ class GaudiLlamaAttention(LlamaAttention):
             # to avoid making past key values as persistent output tensors of HPU graphs.
             past_key_value = (past_key_value[0].shape, past_key_value[1].shape)
 
-        return attn_output, attn_weights, past_key_value
+        return attn_output + 0, attn_weights, past_key_value
 
     def attention_all_reduce(self, attn_output):
         if hasattr(self.o_proj, "all_reduce"):
