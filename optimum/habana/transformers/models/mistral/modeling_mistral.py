@@ -19,6 +19,7 @@
 # limitations under the License.
 """PyTorch Mistral model."""
 
+import os
 import math
 from typing import List, Optional, Tuple, Union
 
@@ -34,9 +35,7 @@ from transformers.models.mistral.modeling_mistral import (
     MistralAttention,
     MistralDecoderLayer,
     MistralForCausalLM,
-    MistralMLP,
     MistralModel,
-    MistralRMSNorm,
     apply_rotary_pos_emb,
 )
 from transformers.utils import logging
@@ -46,7 +45,6 @@ from optimum.habana.transformers.models.modeling_all_models import KVCache
 from ...modeling_attn_mask_utils import (
     _gaudi_prepare_4d_causal_attention_mask,
 )
-
 
 try:
     from habana_frameworks.torch.hpex.kernels import RotaryPosEmbeddingHelperV2 as FusedRoPE
@@ -68,6 +66,15 @@ except ImportError:
     print("Not using HPU fused scaled dot-product attention kernel.")
     FusedSDPA = None
 
+#  FusedScaledDotProductAttention
+class ModuleFusedSDPA(torch.nn.Module):
+    def __init__(self, fusedSDPA):
+        super().__init__()
+        self._hpu_kernel_fsdpa = fusedSDPA
+
+    def forward(self, query, key, value, attn_mask, dropout_p, is_casual, scale):
+        return  self._hpu_kernel_fsdpa.apply(query, key, value, attn_mask, dropout_p, is_casual, scale)
+
 class Matmul(torch.nn.Module):
     def __init__(self):
         super().__init__()
@@ -79,7 +86,29 @@ class Matmul(torch.nn.Module):
 logger = logging.get_logger(__name__)
 
 
-# Copied from transformers.models.llama.modeling_llama.repeat_kv
+def gaudi_mistral_rmsnorm_forward(self, hidden_states):
+    """
+    Copied from MistralRMSNorm.forward: https://github.com/huggingface/transformers/blob/main/src/transformers/models/mistral/modeling_mistral.py
+    The only differences are:
+        - override RMSNorm with Habana fused RMSNorm
+    """
+    if hidden_states.device.type == "hpu" and FusedRMSNorm:
+        # mixed dtypes are not good for FusedRMSNorm, both inputs need to have same dtype
+        if hidden_states.dtype != self.weight.dtype:
+            orig_dtype = hidden_states.dtype
+            hidden_states = FusedRMSNorm.apply(hidden_states.to(self.weight.dtype), self.weight, self.variance_epsilon)
+            return hidden_states.to(orig_dtype)
+        else:
+            hidden_states = FusedRMSNorm.apply(hidden_states, self.weight, self.variance_epsilon)
+            return hidden_states
+    else:
+        input_dtype = hidden_states.dtype
+        hidden_states = hidden_states.to(torch.float32)
+        variance = hidden_states.pow(2).mean(-1, keepdim=True)
+        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+        return self.weight * hidden_states.to(input_dtype)
+
+
 def gaudi_mistral_repeat_kv(
     query_states: torch.Tensor,
     key_states: torch.Tensor,
@@ -114,38 +143,6 @@ def gaudi_mistral_repeat_kv(
     return query_states, key_states, value_states, attention_mask
 
 
-def update_sincos_cache(self, seq_len):
-    # Call rotary emb forward() to update cos/sin cache when infering more than self.max_position_embeddings
-    # This helps in avoiding creation of these caches during actual model forward pass and
-    # reduce memory consumption and improve performance.
-    if seq_len > self.max_position_embeddings:
-        self.max_position_embeddings = seq_len
-        _, _ = self.rotary_emb(self.k_proj.weight, seq_len=seq_len)
-
-
-def gaudi_mistral_rmsnorm_forward(self, hidden_states):
-    """
-    Copied from MistralRMSNorm.forward: https://github.com/huggingface/transformers/blob/main/src/transformers/models/mistral/modeling_mistral.py
-    The only differences are:
-        - override RMSNorm with Habana fused RMSNorm
-    """
-    if hidden_states.device.type == "hpu" and FusedRMSNorm:
-        # mixed dtypes are not good for FusedRMSNorm, both inputs need to have same dtype
-        if hidden_states.dtype != self.weight.dtype:
-            orig_dtype = hidden_states.dtype
-            hidden_states = FusedRMSNorm.apply(hidden_states.to(self.weight.dtype), self.weight, self.variance_epsilon)
-            return hidden_states.to(orig_dtype)
-        else:
-            hidden_states = FusedRMSNorm.apply(hidden_states, self.weight, self.variance_epsilon)
-            return hidden_states
-    else:
-        input_dtype = hidden_states.dtype
-        hidden_states = hidden_states.to(torch.float32)
-        variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
-        return self.weight * hidden_states.to(input_dtype)
-
-
 class GaudiMistralAttention(MistralAttention):
     def __init__(self, config: MistralConfig, layer_idx: Optional[int] = None):
         super().__init__(config, layer_idx)
@@ -153,6 +150,7 @@ class GaudiMistralAttention(MistralAttention):
         self.v_cache = KVCache()
         self.matmul_qk = Matmul()
         self.matmul_av = Matmul()
+        self.fused_scaled_dot_product_attention = ModuleFusedSDPA(FusedSDPA) if FusedSDPA else None
         self.inp_seq_len = -1
         self.norm_factor = 1.0 / math.sqrt(self.head_dim)
 
@@ -162,6 +160,14 @@ class GaudiMistralAttention(MistralAttention):
         dtype = self.config.torch_dtype
         self.k_cache.allocate(inp_seq_len, dtype, device, cache_shape)
         self.v_cache.allocate(inp_seq_len, dtype, device, cache_shape)
+
+    def update_sincos_cache(self, seq_len):
+        # Call rotary emb forward() to update cos/sin cache when infering more than self.max_position_embeddings
+        # This helps in avoiding creation of these caches during actual model forward pass and
+        # reduce memory consumption and improve performance.
+        if seq_len > self.max_position_embeddings:
+            self.max_position_embeddings = seq_len
+            _, _ = self.rotary_emb(self.k_proj.weight, seq_len=seq_len)
 
     def reorder(self, tensor, beam_idx, dim_a, dim_b):
         updated = tensor.index_select(0, beam_idx)
@@ -176,6 +182,14 @@ class GaudiMistralAttention(MistralAttention):
         self.reorder(self.k_cache.cache, beam_idx, seq_length, head_dim)
         self.reorder(self.v_cache.cache, beam_idx, seq_length, head_dim)
         return (self.k_cache.cache.shape, self.v_cache.cache.shape)
+
+    def update_sincos_cache(self, seq_len):
+        # Call rotary emb forward() to update cos/sin cache when infering more than self.max_position_embeddings
+        # This helps in avoiding creation of these caches during actual model forward pass and
+        # reduce memory consumption and improve performance.
+        if seq_len > self.max_position_embeddings:
+            self.max_position_embeddings = seq_len
+            _, _ = self.rotary_emb(self.k_proj.weight, seq_len=seq_len)
 
     def forward(
         self,
@@ -263,8 +277,9 @@ class GaudiMistralAttention(MistralAttention):
             import habana_frameworks.torch.hpu as ht
             if q_len == 1:
                 # next token
-                with ht.sdp_kernel(enable_recompute=False):
-                    attn_output = FusedSDPA.apply(
+                use_recompute = True if os.getenv("QUANT_CONFIG", "") else False
+                with ht.sdp_kernel(enable_recompute=use_recompute):#False):
+                    attn_output = self.fused_scaled_dot_product_attention(
                         query_states, key_states, value_states, attention_mask, 0.0, False, None
                     )
             else:
@@ -272,10 +287,10 @@ class GaudiMistralAttention(MistralAttention):
                 if flash_attention_causal_mask:
                     # causal masking on first token requires inputs to be of the same length
                     with ht.sdp_kernel(enable_recompute=flash_attention_recompute):
-                        attn_output = FusedSDPA.apply(query_states, key_states, value_states, None, 0.0, True, None)
+                        attn_output = self.fused_scaled_dot_product_attention(query_states, key_states, value_states, None, 0.0, True, None)
                 else:
                     with ht.sdp_kernel(enable_recompute=flash_attention_recompute):
-                        attn_output = FusedSDPA.apply(
+                        attn_output = self.fused_scaled_dot_product_attention(
                             query_states, key_states, value_states, attention_mask, 0.0, False, None
                         )
         else:
@@ -333,13 +348,7 @@ class GaudiMistralAttention(MistralAttention):
 class GaudiMistralDecoderLayer(MistralDecoderLayer):
     def __init__(self, config: MistralConfig, layer_idx: int):
         super().__init__(config, layer_idx)
-        self.hidden_size = config.hidden_size
-
         self.self_attn = GaudiMistralAttention(config, layer_idx)
-
-        self.mlp = MistralMLP(config)
-        self.input_layernorm = MistralRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = MistralRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def allocate_kv_cache(self, batch_size, max_seq_len, inp_seq_len):
         self.self_attn.allocate_kv_cache(batch_size, max_seq_len, inp_seq_len)
@@ -421,6 +430,10 @@ class GaudiMistralModel(MistralModel):
     def reorder_kv_cache(self, beam_idx: torch.LongTensor):
         return tuple(layer.reorder_kv_cache(beam_idx) for layer in self.layers)
 
+    def update_sincos_cache(self, seq_len):
+        for layer in self.layers:
+            layer.update_sincos_cache(seq_len)
+
     def forward(
         self,
         input_ids: torch.LongTensor = None,
@@ -476,16 +489,12 @@ class GaudiMistralModel(MistralModel):
         past_key_values_length = 0
         use_legacy_cache = True
         use_new_cache = False
-        if past_key_values is not None and use_cache:
-            if reuse_cache:
-                # past_seen_tokens = past_key_values[0][0][2]
-                pass
-            else:
-                if use_new_cache:
-                    use_legacy_cache = not isinstance(past_key_values, Cache)
-                    if use_legacy_cache:
-                        past_key_values = DynamicCache.from_legacy_cache(past_key_values)
-                    past_key_values_length = past_key_values.get_usable_length(seq_length)
+        if past_key_values is not None and use_cache and not reuse_cache:
+            if use_new_cache:
+                use_legacy_cache = not isinstance(past_key_values, Cache)
+                if use_legacy_cache:
+                    past_key_values = DynamicCache.from_legacy_cache(past_key_values)
+                past_key_values_length = past_key_values.get_usable_length(seq_length)
 
         if position_ids is None:
             device = input_ids.device if input_ids is not None else inputs_embeds.device
@@ -535,6 +544,7 @@ class GaudiMistralModel(MistralModel):
                 and (torch.distributed.is_initialized() is False or torch.distributed.get_world_size() == 1)
             ):
                 htcore.mark_step()
+
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
@@ -685,11 +695,11 @@ class GaudiMistralForCausalLM(MistralForCausalLM):
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
             # Flatten the tokens
-            loss_fct = CrossEntropyLoss()
             shift_logits = shift_logits.view(-1, self.config.vocab_size)
             shift_labels = shift_labels.view(-1)
-            # Enable model parallelism
+            # Ensure tensors are on the same device
             shift_labels = shift_labels.to(shift_logits.device)
+            loss_fct = CrossEntropyLoss()
             loss = loss_fct(shift_logits, shift_labels)
 
         if not return_dict:
