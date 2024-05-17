@@ -49,6 +49,11 @@ try:
 except ImportError:
     print("Not using HPU fused scaled dot-product attention kernel.")
     FusedSDPA = None
+try:
+    from habana_frameworks.torch.hpex.experimental.transformer_engine import FusedAttention
+except ImportError:
+    print("Not using HPU fused SDPA in FP8")
+    FusedAttention = None
 
 import habana_frameworks.torch.core as htcore
 fast_softmax_mode = 'None'
@@ -220,7 +225,7 @@ class GaudiLlamaAttention(nn.Module):
         self.v_cache = KVCache()
         self.inp_seq_len = -1
         self.norm_factor = 1.0 / math.sqrt(self.head_dim)
-        self.fused_scaled_dot_product_attention = ModuleFusedSDPA(FusedSDPA, scale=self.norm_factor, attention_dropout=self.attention_dropout, enable_recompute=False) if FusedSDPA else None
+        self.fused_scaled_dot_product_attention = (ModuleFusedSDPA(FusedSDPA, scale=self.norm_factor, attention_dropout=self.attention_dropout, enable_recompute=False) if FusedSDPA else None) if FusedAttention else None
 
     def _init_rope(self):
         if self.config.rope_scaling is None:
