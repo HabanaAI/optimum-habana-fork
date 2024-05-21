@@ -367,10 +367,40 @@ def setup_generation_config(args, model, tokenizer):
     generation_config.flash_attention_fast_softmax = args.flash_attention_fast_softmax
     return generation_config
 
+def exclude_hpu_graph_configs(args):
+    # Excluded configs for batch size 1 for hpu graph
+    if args.batch_size == 1 and args.limit_hpu_graphs:
+        if args.quant_config:
+            if (args.max_new_tokens == 32768 and args.max_input_tokens == 16384 \
+                                                  and args.world_size == 4) or  \
+               (args.max_new_tokens == 32896 and args.max_input_tokens == 32768 \
+                                                     and args.world_size == 8)  :
+                return False
+        else:
+            if (args.max_new_tokens == 16384 and args.max_input_tokens == 8192  \
+                                                  and args.world_size == 2) or  \
+               (args.max_new_tokens == 16384 and args.max_input_tokens == 8192  \
+                                                  and args.world_size == 4) or  \
+               (args.max_new_tokens == 32768 and args.max_input_tokens == 16384 \
+                                                  and args.world_size == 4) or  \
+               (args.max_new_tokens == 32768 and args.max_input_tokens == 16384 \
+                                                  and args.world_size == 8) or  \
+               (args.max_new_tokens == 32896 and args.max_input_tokens == 32768 \
+                                                  and args.world_size == 4) or  \
+               (args.max_new_tokens == 32896 and args.max_input_tokens == 32768 \
+                                                  and args.world_size == 8) or  \
+               (args.max_new_tokens == 8192 and args.max_input_tokens == 4096   \
+                                                  and args.world_size == 2) or  \
+               (args.max_new_tokens == 33792 and args.max_input_tokens == 32768 \
+                                                     and args.world_size == 4)  :
+                return False
+        return True
+    else:
+        return False
 
 def initialize_model(args, logger):
     init_start = time.perf_counter()
-    if args.batch_size == 1 and args.limit_hpu_graphs:
+    if exclude_hpu_graph_configs(args):
         args.limit_hpu_graphs = False
     setup_distributed(args)
     override_prints(args.global_rank == 0 or args.verbose_workers, logger)
