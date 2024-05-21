@@ -367,10 +367,20 @@ def setup_generation_config(args, model, tokenizer):
     generation_config.flash_attention_fast_softmax = args.flash_attention_fast_softmax
     return generation_config
 
+def excluded_seq(args):
+    # Excluded sequence for batch size 1
+    if args.batch_size == 1:
+        if args.max_new_tokens >= 8192:
+            return False
+        if args.max_input_tokens == 4096 and args.world_size == 2:
+            return False
+        return True
+    else:
+        return False
 
 def initialize_model(args, logger):
     init_start = time.perf_counter()
-    if args.batch_size == 1 and args.limit_hpu_graphs:
+    if excluded_seq(args) and args.limit_hpu_graphs:
         args.limit_hpu_graphs = False
     setup_distributed(args)
     override_prints(args.global_rank == 0 or args.verbose_workers, logger)
