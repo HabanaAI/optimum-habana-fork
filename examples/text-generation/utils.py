@@ -407,6 +407,12 @@ def exclude_hpu_graph_configs(args):
                                                   and args.world_size == 8) or  \
                (args.max_new_tokens == 1024  and args.max_input_tokens == 1024  \
                                                   and args.world_size == 8) or  \
+               (args.max_new_tokens == 128   and args.max_input_tokens == 32768 \
+                                                  and args.world_size == 8) or  \
+               (args.max_new_tokens == 8129  and args.max_input_tokens == 8129  \
+                                                  and args.world_size == 2) or  \
+               (args.max_new_tokens == 4096  and args.max_input_tokens == 4096  \
+                                                  and args.world_size == 2) or  \
                (args.max_new_tokens == 33792 and args.max_input_tokens == 32768 \
                                                      and args.world_size == 4)  :
                 return False
