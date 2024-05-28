@@ -377,49 +377,8 @@ def exclude_hpu_graph_configs(args):
         if "falcon-180B" in args.model_name_or_path or \
            "falcon-180b" in args.model_name_or_path:
             return False
-        if args.quant_config:
-            if (args.max_new_tokens == 32768 and args.max_input_tokens == 16384 \
-                                                  and args.world_size == 4) or  \
-               (args.max_new_tokens == 32896 and args.max_input_tokens == 32768 \
-                                                     and args.world_size == 8)  :
-                return False
-        else:
-            if (args.max_new_tokens == 128 and args.max_input_tokens == 32768   \
-                                                  and args.world_size == 4) or  \
-               (args.max_new_tokens == 16384 and args.max_input_tokens == 8192  \
-                                                  and args.world_size == 2) or  \
-               (args.max_new_tokens == 16384 and args.max_input_tokens == 8192  \
-                                                  and args.world_size == 4) or  \
-               (args.max_new_tokens == 32768 and args.max_input_tokens == 16384 \
-                                                  and args.world_size == 4) or  \
-               (args.max_new_tokens == 32768 and args.max_input_tokens == 16384 \
-                                                  and args.world_size == 8) or  \
-               (args.max_new_tokens == 32896 and args.max_input_tokens == 32768 \
-                                                  and args.world_size == 4) or  \
-               (args.max_new_tokens == 32896 and args.max_input_tokens == 32768 \
-                                                  and args.world_size == 8) or  \
-               (args.max_new_tokens == 8192 and args.max_input_tokens == 4096   \
-                                                  and args.world_size == 2) or  \
-               (args.max_new_tokens == 8192 and args.max_input_tokens == 8192   \
-                                                  and args.world_size == 4) or  \
-               (args.max_new_tokens == 16384 and args.max_input_tokens == 16384 \
-                                                  and args.world_size == 4) or  \
-               (args.max_new_tokens == 1024  and args.max_input_tokens == 1024  \
-                                                  and args.world_size == 4) or  \
-               (args.max_new_tokens == 8192 and args.max_input_tokens == 8192   \
-                                                  and args.world_size == 8) or  \
-               (args.max_new_tokens == 16384 and args.max_input_tokens == 16384 \
-                                                  and args.world_size == 8) or  \
-               (args.max_new_tokens == 1024  and args.max_input_tokens == 1024  \
-                                                  and args.world_size == 8) or  \
-               (args.max_new_tokens == 128   and args.max_input_tokens == 32768 \
-                                                  and args.world_size == 8) or  \
-               (args.max_new_tokens == 8129  and args.max_input_tokens == 8129  \
-                                                  and args.world_size == 2) or  \
-               (args.max_new_tokens == 4096  and args.max_input_tokens == 4096  \
-                                                  and args.world_size == 2) or  \
-               (args.max_new_tokens == 33792 and args.max_input_tokens == 32768 \
-                                                     and args.world_size == 4)  :
+        if (args.world_size == 4 or args.world_size == 8 or args.world_size == 2):
+            if (args.max_input_tokens >= 4096 and args.max_new_tokens >= 128:
                 return False
         return True
     else:
