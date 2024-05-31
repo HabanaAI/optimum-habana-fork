@@ -16,6 +16,7 @@
 import functools
 
 import torch
+from optimum.habana.transformers.models.llama.modeling_llama import ModuleFusedSDPA
 
 
 has_transformer_engine = False
@@ -75,6 +76,10 @@ def _convert_model(model, to_transformer_engine=True, _convert_linear=True):
                 new_module.bias.copy_(module.bias)
 
             setattr(model, name, new_module)
+        elif isinstance(module, ModuleFusedSDPA) and to_transformer_engine:
+            from habana_frameworks.torch.hpex.experimental.transformer_engine import FusedAttention as te_FusedAttention
+            module._hpu_kernel_fsdpa = te_FusedAttention(scale=module.scale, attention_dropout=module.attention_dropout, enable_recompute=False)
+            setattr(model, name, module)
         else:
             _convert_model(module, to_transformer_engine=to_transformer_engine, _convert_linear=_convert_linear)
 

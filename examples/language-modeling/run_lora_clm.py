@@ -158,6 +158,14 @@ class ModelArguments:
             )
         },
     )
+    flash_attention_fp8: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Whether to enable flash attention in FP8."
+            )
+        },
+    )
     use_fused_rope: bool = field(
         default=True,
         metadata={
@@ -587,6 +595,7 @@ def main():
             model.generation_config.use_flash_attention = True
             model.generation_config.flash_attention_recompute = model_args.flash_attention_recompute
             model.generation_config.flash_attention_causal_mask = model_args.flash_attention_causal_mask
+            model.generation_config.flash_attention_fp8 = model_args.flash_attention_fp8
         if not model_args.use_fused_rope:
             model.generation_config.use_fused_rope = False
 

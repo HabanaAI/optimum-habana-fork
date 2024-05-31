@@ -37,6 +37,8 @@ class GaudiGenerationConfig(GenerationConfig):
         Whether to enable causal_mask if use Habana flash attention.
     flash_attention_fast_softmax_mode (`bool`, *optional*):
         Whether to use fast softmax with reduced precision if use Habana flash attention.
+    flash_attention_fp8 (`bool`, *optional*):
+        Whether to use flash attention in FP8.
     """
 
     def __init__(self, **kwargs):
@@ -54,4 +56,5 @@ class GaudiGenerationConfig(GenerationConfig):
         self.flash_attention_recompute = kwargs.get("flash_attention_recompute", None)
         self.flash_attention_causal_mask = kwargs.get("flash_attention_causal_mask", None)
         self.flash_attention_fast_softmax = kwargs.get("flash_attention_fast_softmax", None)
+        self.flash_attention_fp8 = kwargs.get("flash_attention_fp8", None)
         self.use_fused_rope = kwargs.get("use_fused_rope", None)
