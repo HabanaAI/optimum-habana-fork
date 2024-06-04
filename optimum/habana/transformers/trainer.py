@@ -157,6 +157,13 @@ OPTIMIZER_NAME_BIN = "optimizer.bin"
 SCHEDULER_NAME = "scheduler.pt"
 SCALER_NAME = "scaler.pt"
 
+if os.environ.get("TP_MODEL_PARAM_DUMP_ENABLE",'0') == '1':
+    path = os.environ['PYTORCH_MODULES_ROOT_PATH']
+    tools_path = os.path.join(path, 'tools')
+    if os.path.exists(path) is False or os.path.exists(tools_path) is False:
+        raise Exception("path for 'tools' NOT found")
+    sys.path.insert(0, path)
+    from tools import *
 
 class GaudiTrainer(Trainer):
     """
@@ -277,6 +284,9 @@ class GaudiTrainer(Trainer):
         warnings.filterwarnings(
             "ignore", message="User provided device_type of 'cuda', but CUDA is not available. Disabling"
         )
+        if os.environ.get("TP_MODEL_PARAM_DUMP_ENABLE",'0') == '1':
+            print("SBS Enabled")
+            self.trainMetaData = TrainMetaData(self.model, args.device)
 
     def _move_model_to_device(self, model, device):
         model = model.to(device)
@@ -878,6 +888,9 @@ class GaudiTrainer(Trainer):
 
             step = -1
             for step, inputs in enumerate(epoch_iterator):
+                if os.environ.get("TP_MODEL_PARAM_DUMP_ENABLE",'0') == '1':
+                    tp_probe_tensors_iteration_start(model, args.device, None, None, self.trainMetaData.ParamsDump, False)
+
                 if (
                     args.throughput_warmup_steps > 0
                     and (args.throughput_warmup_steps * args.gradient_accumulation_steps)
@@ -1006,6 +1019,10 @@ class GaudiTrainer(Trainer):
                 hb_profiler.step()
                 if self.control.should_epoch_stop or self.control.should_training_stop:
                     break
+                if os.environ.get("TP_MODEL_PARAM_DUMP_ENABLE",'0') == '1':
+                    tp_probe_tensors_iteration_end(model, args.device, tr_loss_step, tr_loss_step.item(), self.trainMetaData.ParamsDump, False)
+                    self.trainMetaData.increment_train_step()
+
             if step < 0:
                 logger.warning(
                     "There seems to be not a single sample in your epoch_iterator, stopping training at step"
