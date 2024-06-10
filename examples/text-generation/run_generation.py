@@ -30,7 +30,7 @@ import pandas as pd
 import struct
 import contextlib
 import torch
-from utils import adjust_batch, count_hpu_graphs, initialize_model
+from utils import adjust_batch, count_hpu_graphs, initialize_model, finalize_quantization
 
 from optimum.habana.utils import get_hpu_memory_stats
 
@@ -44,6 +44,22 @@ logger = logging.getLogger(__name__)
 
 
 def setup_parser(parser):
+    class StoreTrueFalseAction(argparse.Action):
+        def __call__(self, parser, namespace, values, option_string=None):
+            if isinstance(values, bool) or values is None:
+                # Flag passed without any value -> set to True
+                setattr(namespace, self.dest, True)
+            else:
+                # Flag passed with value -> pattern match and set accordingly
+                value_str = values.lower()
+                if value_str in ('true', '1', 'yes'):
+                    setattr(namespace, self.dest, True)
+                elif value_str in ('false', '0', 'no'):
+                    setattr(namespace, self.dest, False)
+                else:
+                    raise ValueError(f"Invalid value for {option_string}: {values}")
+
+
     # Arguments management
     parser.add_argument("--device", "-d", type=str, choices=["hpu"], help="Device to run", default="hpu")
     parser.add_argument(
@@ -132,6 +148,12 @@ def setup_parser(parser):
         default=0,
         type=int,
         help="Number of steps to capture for profiling.",
+    )
+    parser.add_argument(
+        "--profiling_record_shapes",
+        default=False,
+        type=bool,
+        help="Record shapes when enabling profiling.",
     )
     parser.add_argument(
         "--prompt",
@@ -231,23 +253,34 @@ def setup_parser(parser):
 
     parser.add_argument(
         "--use_flash_attention",
-        action="store_true",
-        help="Whether to enable Habana Flash Attention, provided that the model supports it.",
+        nargs='?',
+        const=True,
+        default=False,
+        action=StoreTrueFalseAction,
+        help="Whether to enable Habana Flash Attention, provided that the model supports it."
     )
     parser.add_argument(
         "--flash_attention_recompute",
-        action="store_true",
-        help="Whether to enable Habana Flash Attention in recompute mode on first token generation. This gives an opportunity of splitting graph internally which helps reduce memory consumption.",
+        nargs='?',
+        const=True,
+        default=False,
+        action=StoreTrueFalseAction,
+        help="Whether to enable Habana Flash Attention in recompute mode on first token generation. This gives an opportunity of splitting graph internally which helps reduce memory consumption."
     )
     parser.add_argument(
         "--flash_attention_causal_mask",
-        action="store_true",
-        help="Whether to enable Habana Flash Attention in causal mode on first token generation.",
+        nargs='?',
+        const=True,
+        default=False,
+        action=StoreTrueFalseAction,
+        help="Whether to enable Habana Flash Attention in causal mode on first token generation."
     )
     parser.add_argument(
         "--flash_attention_fast_softmax",
-        action="store_true",
-        help="Whether to enable Habana Flash Attention in fast softmax mode.",
+        nargs='?',
+        const=None,  # Default value handled post-parsing
+        action=StoreTrueFalseAction,
+        help="Whether to enable Habana Flash Attention in fast softmax mode."
     )
     parser.add_argument(
         "--book_source",
@@ -262,16 +295,16 @@ def setup_parser(parser):
     parser.add_argument("--temperature", default=1.0, type=float, help="Temperature value for text generation")
     parser.add_argument("--top_p", default=1.0, type=float, help="Top_p value for generating text via sampling")
     parser.add_argument(
-        '--const_serialization_path',
-        '--csp',
+        "--const_serialization_path",
+        "--csp",
         type=str,
-        help="Path to serialize const params. Const params will be held on disk memory instead of being allocated on host memory.")
+        help="Path to serialize const params. Const params will be held on disk memory instead of being allocated on host memory.",
+    )
     parser.add_argument(
         "--disk_offload",
         action="store_true",
         help="Whether to enable device map auto. In case no space left on cpu, weights will be offloaded to disk.",
     )
-
     args = parser.parse_args()
 
     if args.torch_compile:
@@ -279,6 +312,9 @@ def setup_parser(parser):
 
     if not args.use_hpu_graphs:
         args.limit_hpu_graphs = False
+
+    if args.flash_attention_fast_softmax is None:
+        args.flash_attention_fast_softmax = args.use_flash_attention
 
     args.quant_config = os.getenv("QUANT_CONFIG", "")
     if args.quant_config == "" and args.disk_offload:
@@ -345,6 +381,7 @@ def main():
                 hpu_graphs=args.use_hpu_graphs,
                 profiling_steps=args.profiling_steps,
                 profiling_warmup_steps=args.profiling_warmup_steps,
+                profiling_record_shapes=args.profiling_record_shapes,
             ).cpu()
             outputs = outputs.tolist()
             for i in range(len(outputs)):
@@ -548,6 +585,7 @@ def main():
                 hpu_graphs=args.use_hpu_graphs,
                 profiling_steps=args.profiling_steps,
                 profiling_warmup_steps=args.profiling_warmup_steps,
+                profiling_record_shapes=args.profiling_record_shapes,
             ).cpu()
             outputs = tokenizer.batch_decode(output_tokens, skip_special_tokens=True)
             duration = time.perf_counter() - t0
@@ -731,6 +769,7 @@ def main():
                 hpu_graphs=args.use_hpu_graphs,
                 profiling_steps=args.profiling_steps,
                 profiling_warmup_steps=args.profiling_warmup_steps,
+                profiling_record_shapes=args.profiling_record_shapes,
             ).cpu()
             return prompt, outputs
 
@@ -788,11 +827,10 @@ def main():
             print(f"Graph compilation duration          = {compilation_duration} seconds")
         print(separator)
     if args.quant_config:
-        import habana_quantization_toolkit
-
-        habana_quantization_toolkit.finish_measurements(model)
+        finalize_quantization(model)
     if args.const_serialization_path and os.path.isdir(args.const_serialization_path):
         import shutil
+
         shutil.rmtree(args.const_serialization_path)
 
 

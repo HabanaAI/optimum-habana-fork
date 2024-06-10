@@ -229,6 +229,11 @@ python ../gaudi_spawn.py \
     --bf16
 ```
 
+### Training in torch.compile mode 
+RoBERTa-Large model training in [torch.compile](pytorch.org/tutorials/intermediate/torch_compile_tutorial.html) mode is enabled by applying the following changes to your command,  
+a) Set the following environment variables `PT_HPU_LAZY_MODE=0` and `PT_ENABLE_INT64_SUPPORT=1`.
+b) Run the above commands with `--model_name_or_path roberta-large`, `--use_lazy_mode False` and add `--torch_compile`, `--torch_compile_backend hpu_backend` and remove `--use_hpu_graphs_for_inference` flags.
+
 
 ## Pretraining
 
@@ -558,6 +563,46 @@ python3 ../gaudi_spawn.py --use_deepspeed  --world_size 8  run_lora_clm.py \
   --validation_split_percentage 4 \
   --use_flash_attention True \
   --flash_attention_causal_mask True
+```
+
+- Multi-card finetuning of Llama2-70B with FSDP and LoRA:
+
+```bash
+LOWER_LIST=ops_bf16.txt PT_HPU_LAZY_MODE=0 \
+python3 ../gaudi_spawn.py --world_size 8 --use_mpi run_lora_clm.py \
+  --model_name_or_path meta-llama/Llama-2-70b-hf \
+  --dataset_name tatsu-lab/alpaca \
+  --bf16 True \
+  --output_dir ./lora_out \
+  --max_seq_len 2048 \
+  --gradient_checkpointing \
+  --per_device_train_batch_size 5 \
+  --save_strategy no \
+  --learning_rate 0.0004 \
+  --warmup_ratio 0.03 \
+  --lr_scheduler_type "constant" \
+  --logging_steps 1 \
+  --dataset_concatenation \
+  --do_train \
+  --use_habana \
+  --throughput_warmup_steps 3 \
+  --lora_rank 4 \
+  --lora_target_modules "q_proj" "v_proj" "k_proj" "o_proj" \
+  --attn_softmax_bf16 True \
+  --validation_split_percentage 4 \
+  --use_lazy_mode False \
+  --fsdp_config fsdp_config.json \
+  --fsdp auto_wrap \
+  --num_train_epochs 2 \
+  --evaluation_strategy epoch \
+  --per_device_eval_batch_size 1 \
+  --eval_delay 2 \
+  --do_eval \
+  --pipelining_fwd_bwd False \
+  --use_fused_rope False \
+  --torch_compile_backend hpu_backend \
+  --torch_compile \
+  --gradient_accumulation_steps 2
 ```
 
 - Multi-card finetuning of Falcon-180B:

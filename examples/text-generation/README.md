@@ -28,7 +28,7 @@ pip install -r requirements.txt
 
 Then, if you plan to use [DeepSpeed-inference](https://docs.habana.ai/en/latest/PyTorch/DeepSpeed/Inference_Using_DeepSpeed.html) (e.g. to use BLOOM/BLOOMZ), you should install DeepSpeed as follows:
 ```bash
-pip install git+https://github.com/HabanaAI/DeepSpeed.git@1.14.0
+pip install git+https://github.com/HabanaAI/DeepSpeed.git@1.15.0
 ```
 
 
@@ -154,7 +154,9 @@ python ../gaudi_spawn.py --use_deepspeed --world_size 8 run_generation.py \
 --use_hpu_graphs \
 --use_kv_cache \
 --batch_size 1 \
---do_sample
+--do_sample \
+--use_flash_attention \
+--flash_attention_causal_mask
 ```
 
 > To be able to run gated models like [StarCoder](https://huggingface.co/bigcode/starcoder), you should:
@@ -254,7 +256,10 @@ QUANT_CONFIG=./quantization_config/maxabs_measure.json python ../gaudi_spawn.py 
 --use_hpu_graphs \
 --trim_logits \
 --use_kv_cache \
---reuse_cache \
+--bucket_size=128 \
+--bucket_internal \
+--use_flash_attention \
+--flash_attention_recompute \
 --bf16 \
 --batch_size 1
 ```
@@ -269,7 +274,10 @@ QUANT_CONFIG=./quantization_config/maxabs_quant.json python ../gaudi_spawn.py \
 --use_hpu_graphs \
 --trim_logits \
 --use_kv_cache \
---reuse_cache \
+--bucket_size=128 \
+--bucket_internal \
+--use_flash_attention \
+--flash_attention_recompute \
 --bf16 \
 --batch_size 1 \
 ```
@@ -284,8 +292,10 @@ QUANT_CONFIG=./quantization_config/maxabs_quant.json python ../gaudi_spawn.py \
 --trim_logits \
 --use_kv_cache \
 --reuse_cache \
+--use_flash_attention \
+--flash_attention_recompute \
 --bf16 \
---batch_size 277 \
+--batch_size 350 \
 --max_new_tokens 2048 \
 --max_input_tokens 2048 \
 --limit_hpu_graphs \
@@ -347,6 +357,18 @@ QUANT_CONFIG=./quantization_config/maxabs_quant.json python ../gaudi_spawn.py \
 --reuse_cache \
 --trim_logits \
 ```
+
+### Running FP8 models on single device
+
+Some bf16 models don't fit on one card due to hpu memory limitation, but in fp8 precision they do fit.
+As measurement is being calculated in bf16 precision, to be able to run fp8 model on single card you should use `unify_measurements` script.
+More information on usage of the unifier script can be found in fp8 Habana docs: https://docs.habana.ai/en/latest/PyTorch/Inference_on_PyTorch/Inference_Using_FP8.html
+
+### CPU memory reduction on single card
+
+Some models can fit on HPU DRAM but can't fit on the CPU RAM.
+When we run a model on single card and don't use deepspeed the `--disk_offload` flag allows to offload weights to disk during model quantization in HQT. When this flag is mentioned, during the quantization process, each weight first is loaded from disk to CPU RAM, when brought to HPU DRAM and quantized there. This way not all the model is on the CPU RAM but only one weight each time.
+To enable this weights offload mechanism, add `--disk_offload` flag to the topology command line.
 
 ### Using Habana Flash Attention
 
