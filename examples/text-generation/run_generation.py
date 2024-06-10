@@ -291,14 +291,6 @@ def main():
     args = setup_parser(parser)
     model, tokenizer, generation_config = initialize_model(args, logger)
 
-    # Enable hpu dynamic shape
-    if int(os.getenv("ENABLE_HPU_DYNAMIC_SHAPE", 0)) == 1:
-        try:
-            import habana_frameworks.torch.hpu as hthpu
-            hthpu.enable_dynamic_shape()
-        except ImportError:
-            print("habana_frameworks could not be loaded")
-
     use_lazy_mode = True
     if args.torch_compile and model.config.model_type == "llama":
         use_lazy_mode = False
