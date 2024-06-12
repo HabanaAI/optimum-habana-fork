@@ -282,6 +282,7 @@ class GaudiLlamaAttention(LlamaAttention):
         self.fused_scaled_dot_product_attention = ModuleFusedSDPA(FusedSDPA) if FusedSDPA else None
         self.inp_seq_len = -1
         self.norm_factor = 1.0 / math.sqrt(self.head_dim)
+        self.use_recompute = True if os.getenv("QUANT_CONFIG", "") else False
 
     def allocate_kv_cache(self, batch_size, max_seq_len, inp_seq_len):
         cache_shape = (batch_size, self.num_key_value_heads, max_seq_len, self.head_dim)
@@ -421,9 +422,8 @@ class GaudiLlamaAttention(LlamaAttention):
 
             if q_len == 1:
                 # next token
-                use_recompute = True if os.getenv("QUANT_CONFIG", "") else False
                 attn_output = self.fused_scaled_dot_product_attention(
-                    query_states, key_states, value_states, attention_mask, 0.0, False, None, softmax_mode, use_recompute
+                    query_states, key_states, value_states, attention_mask, 0.0, False, None, softmax_mode, self.use_recompute
                 )
             else:
                 # first token
