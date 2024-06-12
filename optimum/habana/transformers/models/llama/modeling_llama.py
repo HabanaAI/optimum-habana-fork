@@ -279,7 +279,7 @@ class GaudiLlamaAttention(LlamaAttention):
         self.matmul_av = Matmul()
         self.k_cache = KVCache()
         self.v_cache = KVCache()
-        self.fused_scaled_dot_product_attention = ModuleFusedSDPA(FusedSDPA) if FusedSDPA else None
+        self.fused_scaled_dot_product_attention = ModuleFusedSDPA(FusedSDPA) if has_fused_sdpa else None
         self.inp_seq_len = -1
         self.norm_factor = 1.0 / math.sqrt(self.head_dim)
         self.use_recompute = True if os.getenv("QUANT_CONFIG", "") else False
