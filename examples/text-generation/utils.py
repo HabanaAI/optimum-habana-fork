@@ -161,6 +161,9 @@ def patch_scoped_linear_all_reduce(model):
 
 
 def get_torch_compiled_model(model):
+    #TODO revert cache size setting once fixed in bridge
+    torch._dynamo.config.cache_size_limit = 128
+    torch._dynamo.config.accumulated_cache_size_limit = 1024
     model.model = torch.compile(model.model, backend="hpu_backend", options={"keep_input_mutations": True}, dynamic=False)
     return model
 
