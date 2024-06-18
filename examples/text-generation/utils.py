@@ -463,3 +463,56 @@ def initialize_model(args, logger):
     logger.info(f"device: {args.device}, n_hpu: {args.world_size}, bf16: {model_dtype == torch.bfloat16}")
     logger.info(f"Model initialization took {(init_end - init_start):.3f}s")
     return model, tokenizer, generation_config
+
+
+def load_dataset(args, logger):
+    # Downloading and loading a dataset from the hub.
+    from datasets import load_dataset
+
+    assert not args.simulate_dyn_prompt, "Both dataset_name and simulate_dyn_prompt are set"
+
+    if args.dataset_name == "gsm8k":
+        # config name is needed for gsm8k
+        raw_dataset = load_dataset(args.dataset_name, "main")
+    else:
+        raw_dataset = load_dataset(args.dataset_name)
+
+    if "test" in raw_dataset:
+        split = "test"
+    elif "validation" in raw_dataset:
+        split = "validation"
+    else:
+        split = "train"
+    raw_dataset = (
+        raw_dataset[split]
+        .shuffle()
+        .select(range(args.dataset_max_samples if args.dataset_max_samples > 0 else (raw_dataset[split]).num_rows))
+    )
+
+    if args.column_name is None:
+        # If no column name is given, take the first column that has strings
+        column_name = [key for key in raw_dataset.features.keys() if raw_dataset.features[key].dtype == "string"][
+            0
+        ]
+        logger.info(
+            f"No column name was given so automatically choosing '{column_name}' for prompts. If you would like to use another column of the dataset, you can set the argument `--column_name`."
+        )
+    else:
+        column_name = args.column_name
+
+    return raw_dataset, column_name
+
+
+# The default gsm8k prompt from the CoT paper
+# https://arxiv.org/pdf/2201.11903.pdf page 35.
+# Source: https://colab.research.google.com/github/google-deepmind/gemma/blob/main/colabs/gsm8k_eval.ipynb#scrollTo=iHxQeQ4hEXir
+GSM8K_PREAMBLE = """<s> [INST] You are a math expert. I am going to give you few problems to solve. Provide full response with step by step reasoning followed by the final answer.\n\n"""
+GSM8K_PROMPT_5_SHOT = """Q: There are 15 trees in the grove. Grove workers will plant trees in the grove today. After they are done, there will be 21 trees. How many trees did the grove workers plant today? A: [/INST] We start with 15 trees. Later we have 21 trees. The difference must be the number of trees they planted. So, they must have planted 21 - 15 = 6 trees. The answer is 6.</s> [INST] Q: If there are 3 cars in the parking lot and 2 more cars arrive, how many cars are in the parking lot?
+A: [/INST] There are 3 cars in the parking lot already. 2 more arrive. Now there are 3 + 2 = 5 cars. The answer is 5.</s> [INST] Q: Leah had 32 chocolates and her sister had 42. If they ate 35, how many pieces do they have left in total?
+A: [/INST] Leah had 32 chocolates and Leah's sister had 42. That means there were originally 32 + 42 = 74 chocolates. 35 have been eaten. So in total they still have 74 - 35 = 39 chocolates. The answer is 39.</s> [INST] Q: Jason had 20 lollipops. He gave Denny some lollipops. Now Jason has 12 lollipops. How many lollipops did Jason give to Denny?
+A: [/INST] Jason had 20 lollipops. Since he only has 12 now, he must have given the rest to Denny. The number of lollipops he has given to Denny must have been 20 - 12 = 8 lollipops. The answer is 8.</s> [INST] Q: Shawn has five toys. For Christmas, he got two toys each from his mom and dad. How many toys does he have now?
+A: [/INST] He has 5 toys. He got 2 from mom, so after that he has 5 + 2 = 7 toys. Then he got 2 more from dad, so in total he has 7 + 2 = 9 toys. The answer is 9.</s>[INST] Q: """
+
+
+def adjust_gsm8k_prompt(prompts):
+    return [GSM8K_PREAMBLE + GSM8K_PROMPT_5_SHOT + prompt + "\nA: [/INST]" for prompt in prompts]
