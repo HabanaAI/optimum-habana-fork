@@ -23,17 +23,18 @@ import json
 import logging
 import math
 import os
+import struct
 import time
 from itertools import cycle
 from pathlib import Path
+
 import pandas as pd
-import struct
-import contextlib
 import torch
-from utils import adjust_batch, count_hpu_graphs, initialize_model, finalize_quantization
-
 from optimum.habana.utils import get_hpu_memory_stats
+from torch.utils.data import DataLoader
 
+from utils import (adjust_batch, adjust_gsm8k_prompt, count_hpu_graphs,
+                   finalize_quantization, initialize_model, load_dataset)
 
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
@@ -337,6 +338,10 @@ def main():
         use_lazy_mode = False
 
     import habana_frameworks.torch.hpu as torch_hpu
+
+    duration = 0
+    compilation_duration = 0
+    throughput = 0
     if args.dataset_name == "openorca":
         # Benchmark over the prompts below
         def get_ds(args):
@@ -482,19 +487,6 @@ def main():
             with open(output_dir / "accuracy.json", "w") as outfile:
                 outfile.write(json.dumps(acc_file))
 
-        stats = f"Throughput (including tokenization) = {throughput} tokens/second"
-        stats = stats + f"\nNumber of HPU graphs                = {count_hpu_graphs()}"
-        separator = "-" * len(stats)
-        print()
-        print("Stats:")
-        print(separator)
-        print(stats)
-        mem = get_hpu_memory_stats()
-        for k, v in mem.items():
-            print("{:35} = {} GB".format(k[:-5].replace("_", " ").capitalize(), v))
-        print(f"Graph compilation duration          = {compilation_duration} seconds")
-        print(separator)
-        print()
     elif args.dataset_name is None:
         # Benchmark over the prompts below
         if args.prompt:
@@ -671,73 +663,12 @@ def main():
             with (output_dir / "results.json").open("w", encoding="utf-8") as f:
                 json.dump(results, f, ensure_ascii=False, indent=4)
 
-        stats = f"Throughput (including tokenization) = {throughput} tokens/second"
-        stats = stats + f"\nNumber of HPU graphs                = {count_hpu_graphs()}"
-        separator = "-" * len(stats)
-        print()
-        print("Stats:")
-        print(separator)
-        print(stats)
-        mem = get_hpu_memory_stats()
-        for k, v in mem.items():
-            print("{:35} = {} GB".format(k[:-5].replace("_", " ").capitalize(), v))
-        print(f"Graph compilation duration          = {compilation_duration} seconds")
-        print(separator)
-        print()
     else:
         # Downloading and loading a dataset from the hub.
-        from datasets import load_dataset
-        from torch.utils.data import DataLoader
-
-        assert args.simulate_dyn_prompt == "", "Both dataset_name and simulate_dyn_prompt are set"
-
-        raw_dataset = load_dataset(args.dataset_name)
-        if "test" in raw_dataset:
-            split = "test"
-        elif "validation" in raw_dataset:
-            split = "validation"
-        else:
-            split = "train"
-        raw_dataset = (
-            raw_dataset[split]
-            .shuffle()
-            .select(range(args.dataset_max_samples if args.dataset_max_samples > 0 else (raw_dataset[split]).num_rows))
-        )
-
-        if args.column_name is None:
-            # If no column name is given, take the first column that has strings
-            column_name = [key for key in raw_dataset.features.keys() if raw_dataset.features[key].dtype == "string"][
-                0
-            ]
-            logger.info(
-                f"No column name was given so automatically choosing '{column_name}' for prompts. If you would like to use another column of the dataset, you can set the argument `--column_name`."
-            )
-        else:
-            column_name = args.column_name
-
-        # Remove unused columns
-        raw_dataset = raw_dataset.remove_columns([name for name in raw_dataset.column_names if name != column_name])
+        raw_dataset, column_name = load_dataset(args, logger)
 
         # Set the prompt length to args.max_input_tokens if > 0 else (if 0 truncate to 16, otherwise use full length)
         prompt_length = args.max_input_tokens if args.max_input_tokens > 0 else (-1, 16)[args.max_input_tokens == 0]
-
-        def preprocess_function(examples):
-            # Tokenize the texts
-            return tokenizer(
-                examples[column_name],
-                padding="max_length",
-                max_length=prompt_length if prompt_length > 0 else None,
-                truncation=prompt_length > 0,
-            )
-
-        raw_dataset = raw_dataset.map(
-            preprocess_function,
-            batched=True,
-            desc="Running tokenizer on dataset",
-        )
-        # After tokenization, we can remove the column of interest
-        raw_dataset = raw_dataset.remove_columns([column_name])
-        raw_dataset.set_format(type="torch")
 
         if prompt_length <= 0:
             # Todo please check if this collate function is suitable for your model
@@ -758,10 +689,23 @@ def main():
         else:
             collate_fn = None
 
-        dataloader = DataLoader(raw_dataset, batch_size=args.batch_size, collate_fn=collate_fn)
+        dataloader = DataLoader(
+            raw_dataset, batch_size=args.batch_size, collate_fn=collate_fn
+        )
 
         def generate_dataset(batch):
-            prompt = tokenizer.batch_decode(batch["input_ids"], skip_special_tokens=True)
+            prompts = batch[column_name]
+            if args.dataset_name == "gsm8k":
+                prompts = adjust_gsm8k_prompt(prompts)
+
+            # Tokenize inputs
+            batch = tokenizer.batch_encode_plus(
+                prompts,
+                return_tensors="pt",
+                padding="max_length",
+                max_length=prompt_length if prompt_length > 0 else None,
+                truncation=prompt_length > 0,
+            )
             # Move inputs to target device(s)
             for t in batch:
                 if torch.is_tensor(batch[t]):
@@ -776,7 +720,10 @@ def main():
                 profiling_warmup_steps=args.profiling_warmup_steps,
                 profiling_record_shapes=args.profiling_record_shapes,
             ).cpu()
-            return prompt, outputs
+            # Remove input prompt from output
+            if prompt_length > 0:
+                outputs = outputs[:, prompt_length:]
+            return tokenizer.batch_decode(outputs, skip_special_tokens=False)
 
         # warmup
         if prompt_length > 0:
@@ -796,43 +743,58 @@ def main():
             compilation_duration = time.perf_counter() - t0
             HabanaProfile.enable()
 
+        results = []
         total_new_tokens_generated = 0
-        duration = 0
         separator = "-" * 50
         logger.info("Running generate dataset...")
         t_start = time.time()
         for i, batch in enumerate(dataloader):
-            t0 = time.perf_counter()
-            prompt, outputs = generate_dataset(batch)
-            duration += time.perf_counter() - t0
+            outputs = generate_dataset(batch)
             total_new_tokens_generated += args.batch_size * args.max_new_tokens
-            print(separator)
-            print(f"Batch n°{i+1}")
-            print(f"Input: {prompt[:args.batch_size]}")
-            print(
-                f"Output: {tokenizer.batch_decode(outputs, skip_special_tokens=True)[:args.batch_size*args.num_return_sequences]}"
-            )
-            print(separator)
-        t_end = time.time()
+            if args.output_dir is not None:
+                for j in range(args.batch_size):
+                    idx = i * args.batch_size + j
+                    results.append(
+                        {"idx": idx, "output": outputs[j]} | \
+                            {key: value[j] for key, value in batch.items()}
+                    )
+                pass
+            else:
+                print(separator)
+                print(f"Batch n°{i+1}")
+                print(f"Input: {batch[column_name]}")
+                print(f"Output: {outputs}")
+                print(separator)
 
+        duration = time.time() - t_start
         throughput = total_new_tokens_generated / duration
-        # Print Stats
 
-        stats = f"Throughput (including tokenization) = {throughput} tokens/second"
-        separator = "-" * len(stats)
-        print()
-        print("Stats:")
-        print(separator)
-        print(stats)
-        print("Total runtime for dataset:", t_end - t_start)
-        mem = get_hpu_memory_stats()
-        for k, v in mem.items():
-            print("{:35} = {} GB".format(k[:-5].replace("_", " ").capitalize(), v))
-        if prompt_length > 0:
-            print(f"Graph compilation duration          = {compilation_duration} seconds")
-        print(separator)
+        if args.output_dir is not None and args.global_rank == 0:
+            output_dir = Path(args.output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            df = pd.DataFrame.from_dict(results)
+            df.to_pickle(output_dir / "outputs.pkl")
+
+    # Print Stats
+    stats = f"Throughput (including tokenization) = {throughput} tokens/second"
+    stats = stats + f"\nNumber of HPU graphs                = {count_hpu_graphs()}"
+    separator = "-" * len(stats)
+    print()
+    print("Stats:")
+    print(separator)
+    print(stats)
+    mem = get_hpu_memory_stats()
+    for k, v in mem.items():
+        print("{:35} = {} GB".format(k[:-5].replace("_", " ").capitalize(), v))
+    print(f"Graph compilation duration          = {compilation_duration} seconds")
+    print(f"Generation duration                 = {duration} seconds")
+    print(separator)
+    print()
+
     if args.quant_config:
         finalize_quantization(model)
+
     if args.const_serialization_path and os.path.isdir(args.const_serialization_path):
         import shutil
 
