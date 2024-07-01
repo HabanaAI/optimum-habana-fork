@@ -103,13 +103,17 @@ def setup_inference(args, model):
     htcore.hpu_initialize(model, mark_only_scales_as_const=True)
     return model
 
+
 def setup_const_serialization(const_serialization_path):
     import uuid
+
     const_serialization_path = os.path.join(const_serialization_path + uuid.uuid4().hex)
     os.makedirs(const_serialization_path)
     from habana_frameworks.torch.hpu import enable_const_section_serialization
+
     print("Serializing const params to {}".format(const_serialization_path))
     enable_const_section_serialization(const_serialization_path, True)
+
 
 def setup_env(args):
     # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
@@ -126,8 +130,7 @@ def setup_env(args):
         os.environ.setdefault("PT_HPU_LAZY_ACC_PAR_MODE", "0")
         os.environ.setdefault("PT_HPU_ENABLE_LAZY_COLLECTIVES", "true")
 
-    if args.use_hpu_graphs and args.limit_hpu_graphs and not args.reuse_cache \
-        and args.bucket_internal:
+    if args.use_hpu_graphs and args.limit_hpu_graphs and not args.reuse_cache and args.bucket_internal:
         # Based upon above conditions and below env variable,
         # we can call HPU graphs clear_inputs().
         os.environ.setdefault("PT_HPUGRAPH_DISABLE_TENSOR_CACHE", "1")
@@ -167,14 +170,16 @@ def get_torch_compiled_model(model):
 
 def setup_quantization(model, args):
     if os.getenv("USE_INC", ""):
-        from neural_compressor.torch import FP8QuantConfig, convert, prepare
-        config = FP8QuantConfig.from_json_file(args.quant_config)
-        if config.calibrate:
+        from neural_compressor.torch.quantization import FP8Config, convert, prepare
+
+        config = FP8Config.from_json_file(args.quant_config)
+        if config.measure:
             model = prepare(model, config)
         elif config.quantize:
             model = convert(model, config)
     else:
         import habana_quantization_toolkit
+
         habana_quantization_toolkit.prep_model(model)
 
     return model
@@ -182,10 +187,12 @@ def setup_quantization(model, args):
 
 def finalize_quantization(model):
     if os.getenv("USE_INC", ""):
-        from neural_compressor.torch import finalize_calibration
+        from neural_compressor.torch.quantization import finalize_calibration
+
         finalize_calibration(model)
     else:
         import habana_quantization_toolkit
+
         habana_quantization_toolkit.finish_measurements(model)
 
 
@@ -194,17 +201,34 @@ def setup_model(args, model_dtype, model_kwargs, logger):
 
     if args.disk_offload:
         from accelerate import infer_auto_device_map, init_empty_weights
+
         config = AutoConfig.from_pretrained(args.model_name_or_path)
         with init_empty_weights():
             model = AutoModelForCausalLM.from_config(config)
         max_memory = {"cpu": "10GiB"}
         device_map = infer_auto_device_map(model, max_memory=max_memory, dtype=model_dtype)
-        model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path, device_map=device_map, offload_folder="/tmp/offload_folder/", offload_state_dict=True, torch_dtype=model_dtype, **model_kwargs)  
+        model = AutoModelForCausalLM.from_pretrained(
+            args.model_name_or_path,
+            device_map=device_map,
+            offload_folder="/tmp/offload_folder/",
+            offload_state_dict=True,
+            torch_dtype=model_dtype,
+            **model_kwargs,
+        )
+    elif args.gptq:
+        from transformers import GPTQConfig
+
+        quantization_config = GPTQConfig(bits=4, use_exllama=False)
+        model = AutoModelForCausalLM.from_pretrained(
+            args.model_name_or_path, torch_dtype=model_dtype, quantization_config=quantization_config, **model_kwargs
+        )
     else:
         if args.peft_model is not None:
             model = peft_model(args, model_dtype, logger, **model_kwargs)
         else:
-            model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path, torch_dtype=model_dtype, **model_kwargs)
+            model = AutoModelForCausalLM.from_pretrained(
+                args.model_name_or_path, torch_dtype=model_dtype, **model_kwargs
+            )
     if args.quant_config:
         model = setup_quantization(model, args)
 
@@ -218,7 +242,7 @@ def setup_model(args, model_dtype, model_kwargs, logger):
         else:
             model = wrap_in_hpu_graph(model)
 
-    if args.torch_compile and model.config.model_type == "llama":
+    if args.torch_compile:
         model = get_torch_compiled_model(model)
 
     return model
@@ -282,7 +306,7 @@ def setup_distributed_model(args, model_dtype, model_kwargs, logger):
     if args.quant_config:
         model = setup_quantization(model, args)
 
-    if args.torch_compile and model.config.model_type == "llama":
+    if args.torch_compile:
         model = get_torch_compiled_model(model)
 
     return model
@@ -395,22 +419,23 @@ def setup_generation_config(args, model, tokenizer):
     generation_config.flash_attention_fast_softmax = args.flash_attention_fast_softmax
     return generation_config
 
+
 def exclude_hpu_graph_configs(args):
     # Excluded configs for batch size 1 for hpu graph
     if args.batch_size == 1 and args.limit_hpu_graphs:
-        if "falcon-180B" in args.model_name_or_path or \
-           "falcon-180b" in args.model_name_or_path:
+        if "falcon-180B" in args.model_name_or_path or "falcon-180b" in args.model_name_or_path:
             return False
-        if (args.world_size == 2 or args.world_size == 4 or args.world_size == 8):
+        if args.world_size == 2 or args.world_size == 4 or args.world_size == 8:
             if args.quant_config:
-                if (args.max_input_tokens >= 8192 and args.max_new_tokens >= 128):
+                if args.max_input_tokens >= 8192 and args.max_new_tokens >= 128:
                     return False
             else:
-                if (args.max_input_tokens >= 4096 and args.max_new_tokens >= 128):
+                if args.max_input_tokens >= 4096 and args.max_new_tokens >= 128:
                     return False
         return True
     else:
         return False
+
 
 def initialize_model(args, logger):
     init_start = time.perf_counter()

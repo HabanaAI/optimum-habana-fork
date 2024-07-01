@@ -337,19 +337,21 @@ def gaudi_mixtral_decoder_layer_forward(
     output_router_logits: Optional[bool] = False,
     use_cache: Optional[bool] = False,
     token_idx: Optional[torch.Tensor] = None,
+    lazy_mode: Optional[bool] = True,
     **kwargs,
 ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
     """
     Copied from MixtralDecoderLayer.forward: https://github.com/huggingface/transformers/blob/v4.37.0/src/transformers/models/mixtral/modeling_mixtral.py
     The only differences are:
     - add new args token_idx
+    - add new args lazy_mode
     """
     if "padding_mask" in kwargs:
         warnings.warn(
             "Passing `padding_mask` is deprecated and will be removed in v4.37. Please make sure use `attention_mask` instead.`"
         )
-
-    htcore.mark_step()
+    if lazy_mode:
+        htcore.mark_step()
     residual = hidden_states
 
     hidden_states = self.input_layernorm(hidden_states)
@@ -365,14 +367,16 @@ def gaudi_mixtral_decoder_layer_forward(
         token_idx=token_idx,
     )
     hidden_states = residual + hidden_states
-    htcore.mark_step()
+    if lazy_mode:
+        htcore.mark_step()
 
     # Fully Connected
     residual = hidden_states
     hidden_states = self.post_attention_layernorm(hidden_states)
     hidden_states, router_logits = self.block_sparse_moe(hidden_states)
     hidden_states = residual + hidden_states
-    htcore.mark_step()
+    if lazy_mode:
+        htcore.mark_step()
 
     outputs = (hidden_states,)
 
@@ -401,6 +405,7 @@ def gaudi_mixtral_model_forward(
     output_router_logits: Optional[bool] = None,
     return_dict: Optional[bool] = None,
     token_idx: Optional[torch.Tensor] = None,
+    lazy_mode: Optional[bool] = True,
 ) -> Union[Tuple, MoeModelOutputWithPast]:
     """
     Copied from MixtralModel.forward: https://github.com/huggingface/transformers/blob/v4.37.0/src/transformers/models/mixtral/modeling_mixtral.py#L1069
@@ -519,6 +524,7 @@ def gaudi_mixtral_model_forward(
                 output_router_logits=output_router_logits,
                 use_cache=use_cache,
                 token_idx=token_idx,
+                lazy_mode=lazy_mode,
             )
 
         hidden_states = layer_outputs[0]
@@ -581,6 +587,7 @@ class GaudiMixtralForCausalLM(MixtralForCausalLM):
         output_router_logits: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         token_idx: Optional[torch.Tensor] = None,
+        lazy_mode: Optional[bool] = True,
     ) -> Union[Tuple, MoeCausalLMOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_router_logits = (
@@ -605,6 +612,7 @@ class GaudiMixtralForCausalLM(MixtralForCausalLM):
             output_router_logits=output_router_logits,
             return_dict=return_dict,
             token_idx=token_idx,
+            lazy_mode=lazy_mode,
         )
 
         hidden_states = outputs[0]
@@ -713,6 +721,7 @@ class GaudiMixtralForCausalLM(MixtralForCausalLM):
                 "use_cache": kwargs.get("use_cache"),
                 "attention_mask": attention_mask,
                 "token_idx": token_idx,
+                "lazy_mode": kwargs.get("lazy_mode"),
             }
         )
         return model_inputs

@@ -164,14 +164,16 @@ class GaudiGenerationMixin(GenerationMixin):
         return hpu_graphs_kwargs
 
     def _pad_past_key_values(self, model_kwargs):
-        pad_amount = model_kwargs.get("kv_cache_pad_len" , 0)
+        pad_amount = model_kwargs.get("kv_cache_pad_len", 0)
         print(f"PAD KV Cache by {pad_amount} tokens")
         if model_kwargs["past_key_values"]:
             for i in range(len(model_kwargs["past_key_values"])):
                 for j in range(len(model_kwargs["past_key_values"][i])):
                     if torch.is_tensor(model_kwargs["past_key_values"][i][j]):
-                        model_kwargs["past_key_values"][i][j] = torch.nn.functional.pad(model_kwargs["past_key_values"][i][j], (0, 0, 0, pad_amount))
-                        if model_kwargs.get("lazy_mode" , False):
+                        model_kwargs["past_key_values"][i][j] = torch.nn.functional.pad(
+                            model_kwargs["past_key_values"][i][j], (0, 0, 0, pad_amount)
+                        )
+                        if model_kwargs.get("lazy_mode", False):
                             self.htcore_generation.mark_step()
 
     def _remove_past_key_values(self, model_kwargs):
@@ -370,20 +372,32 @@ class GaudiGenerationMixin(GenerationMixin):
                         assert False, "Unknown case, please handle, or dont use bucketing"
 
                 new_kv = [None for i in range(len(model_kwargs["past_key_values"]))]
-                for i in range(len(model_kwargs["past_key_values"])):
-                    tmp_lst = [None for j in range(len(model_kwargs["past_key_values"][i]))]
-                    for j in range(len(model_kwargs["past_key_values"][i])):
-                        pad_tuple = create_pad_arg(pad_amount, i, j)
-                        # Different models might have different shapes of kv-cache
-                        # create_pad_arg handles them on a per-model basis
-                        # This is a necessary (but not sufficient) condition: what ever dimension we are padding, should be a multiple of bucket_size
-                        # This check is added in case we get a new model with a new kv-cache structure, and we attempt to pad some wrong dimension
-                        assert model_kwargs["past_key_values"][i][j].shape[-(len(pad_tuple) // 2)] % bucket_size == 0
-                        tmp_lst[j] = torch.nn.functional.pad(
-                            model_kwargs["past_key_values"][i][j], pad_tuple, value=pad_token_id
+                if self.config.model_type == "gpt_bigcode" and model_kwargs["past_key_values"][0][0].dim() == 2:
+                    # GPT_BIGCODE's kv cache is list of tensors.
+                    new_kv = [None for i in range(len(model_kwargs["past_key_values"]))]
+                    for i in range(len(model_kwargs["past_key_values"])):
+                        pad = (0, 0, 0, pad_amount)
+                        new_kv[i] = torch.nn.functional.pad(
+                            model_kwargs["past_key_values"][i], pad, value=pad_token_id
                         )
-                    new_kv[i] = tuple(tmp_lst)
-                model_kwargs["past_key_values"] = tuple(new_kv)
+                    model_kwargs["past_key_values"] = list(new_kv)
+                else:
+                    for i in range(len(model_kwargs["past_key_values"])):
+                        tmp_lst = [None for j in range(len(model_kwargs["past_key_values"][i]))]
+                        for j in range(len(model_kwargs["past_key_values"][i])):
+                            pad_tuple = create_pad_arg(pad_amount, i, j)
+                            # Different models might have different shapes of kv-cache
+                            # create_pad_arg handles them on a per-model basis
+                            # This is a necessary (but not sufficient) condition: what ever dimension we are padding, should be a multiple of bucket_size
+                            # This check is added in case we get a new model with a new kv-cache structure, and we attempt to pad some wrong dimension
+                            assert (
+                                model_kwargs["past_key_values"][i][j].shape[-(len(pad_tuple) // 2)] % bucket_size == 0
+                            )
+                            tmp_lst[j] = torch.nn.functional.pad(
+                                model_kwargs["past_key_values"][i][j], pad_tuple, value=pad_token_id
+                            )
+                        new_kv[i] = tuple(tmp_lst)
+                    model_kwargs["past_key_values"] = tuple(new_kv)
 
         if "token_idx" not in model_kwargs:
             model_kwargs["token_idx"] = torch.tensor(params["token_idx"], device=self.device)
@@ -758,7 +772,9 @@ class GaudiGenerationMixin(GenerationMixin):
         model_kwargs["use_flash_attention"] = generation_config.use_flash_attention
         model_kwargs["flash_attention_recompute"] = True if generation_config.flash_attention_recompute else False
         model_kwargs["flash_attention_causal_mask"] = True if generation_config.flash_attention_causal_mask else False
-        model_kwargs["flash_attention_fast_softmax"] = True if generation_config.flash_attention_fast_softmax else False
+        model_kwargs["flash_attention_fast_softmax"] = (
+            True if generation_config.flash_attention_fast_softmax else False
+        )
         if not self.config.is_encoder_decoder:
             calculated_max_length = input_ids.shape[-1]
             if not generation_config.static_shapes and generation_config.max_new_tokens is not None:
@@ -1440,7 +1456,9 @@ class GaudiGenerationMixin(GenerationMixin):
         if not ignore_eos:
             unfinished_sequences = torch.ones(input_ids.shape[0], dtype=torch.long, device=input_ids.device)
 
-        hb_profer = HabanaProfile(warmup=profiling_warmup_steps, active=profiling_steps, record_shapes=profiling_record_shapes)
+        hb_profer = HabanaProfile(
+            warmup=profiling_warmup_steps, active=profiling_steps, record_shapes=profiling_record_shapes
+        )
         hb_profer.start()
         this_peer_finished = False  # used by synced_gpus only
         bucket_size = model_kwargs.get("bucket_size", -1)
@@ -1449,7 +1467,7 @@ class GaudiGenerationMixin(GenerationMixin):
         reduce_recompile = model_kwargs.get("reduce_recompile", False)
 
         prompt_len = input_ids.shape[-1]
-        
+
         if not bucket_internal:
             if bucket_size >= 0:
                 inc = iter(incrementor(bucket_size, prompt_len))
@@ -1598,15 +1616,22 @@ class GaudiGenerationMixin(GenerationMixin):
             if this_peer_finished and not synced_gpus:
                 break
 
-            if not model_kwargs.get("pad_done", False) and not model_kwargs.get("reuse_cache", False) \
-                and bucket_internal:
+            if (
+                not model_kwargs.get("pad_done", False)
+                and not model_kwargs.get("reuse_cache", False)
+                and bucket_internal
+            ):
                 # Pad the returned pask key values tensors from prefill phase forward run to maximum length
                 # before starting the decode phase.
                 self._pad_past_key_values(model_kwargs)
                 model_kwargs["pad_done"] = True
 
-        if model_kwargs.get("use_hpu_graphs", False) and model_kwargs.get("limit_hpu_graphs", False) \
-            and not model_kwargs.get("reuse_cache", False) and bucket_internal:
+        if (
+            model_kwargs.get("use_hpu_graphs", False)
+            and model_kwargs.get("limit_hpu_graphs", False)
+            and not model_kwargs.get("reuse_cache", False)
+            and bucket_internal
+        ):
             # Clear HPU graphs input tensors of the decode phase after the full generation while loop
             print("CLEAR HPU GRAPH INPUTS OF DECODE PHASE")
             self.clear_inputs()
@@ -1838,7 +1863,9 @@ class GaudiGenerationMixin(GenerationMixin):
         # keep track of which sequences are already finished
         # TODO: no ignore_eos check here since there is a compilation error, will add ignore_eos here if fixed
         unfinished_sequences = torch.ones(input_ids.shape[0], dtype=torch.long, device=input_ids.device)
-        hb_profer = HabanaProfile(warmup=profiling_warmup_steps, active=profiling_steps, record_shapes=profiling_record_shapes)
+        hb_profer = HabanaProfile(
+            warmup=profiling_warmup_steps, active=profiling_steps, record_shapes=profiling_record_shapes
+        )
         hb_profer.start()
         this_peer_finished = False  # used by synced_gpus only
         bucket_size = model_kwargs.get("bucket_size", -1)
@@ -1992,15 +2019,22 @@ class GaudiGenerationMixin(GenerationMixin):
             if this_peer_finished and not synced_gpus:
                 break
 
-            if not model_kwargs.get("pad_done", False) and not model_kwargs.get("reuse_cache", False) \
-                and bucket_internal:
+            if (
+                not model_kwargs.get("pad_done", False)
+                and not model_kwargs.get("reuse_cache", False)
+                and bucket_internal
+            ):
                 # Pad the returned pask key values tensors from prefill phase forward run to maximum length
                 # before starting the decode phase.
                 self._pad_past_key_values(model_kwargs)
                 model_kwargs["pad_done"] = True
 
-        if model_kwargs.get("use_hpu_graphs", False) and model_kwargs.get("limit_hpu_graphs", False) \
-            and not model_kwargs.get("reuse_cache", False) and bucket_internal:
+        if (
+            model_kwargs.get("use_hpu_graphs", False)
+            and model_kwargs.get("limit_hpu_graphs", False)
+            and not model_kwargs.get("reuse_cache", False)
+            and bucket_internal
+        ):
             # Clear HPU graphs input tensors of the decode phase after the full generation while loop
             print("CLEAR HPU GRAPH INPUTS OF DECODE PHASE")
             self.clear_inputs()
@@ -2334,7 +2368,9 @@ class GaudiGenerationMixin(GenerationMixin):
             input_ids = torch.stack(result)
             return input_ids
 
-        hb_profer = HabanaProfile(warmup=profiling_warmup_steps, active=profiling_steps, record_shapes=profiling_record_shapes)
+        hb_profer = HabanaProfile(
+            warmup=profiling_warmup_steps, active=profiling_steps, record_shapes=profiling_record_shapes
+        )
         hb_profer.start()
         this_peer_finished = False  # used by synced_gpus only
 
@@ -3144,7 +3180,9 @@ class GaudiGenerationMixin(GenerationMixin):
         this_peer_finished = False  # used by synced_gpus only
         decoder_prompt_len = input_ids.shape[-1]  # record the prompt length of decoder
 
-        hb_profer = HabanaProfile(warmup=profiling_warmup_steps, active=profiling_steps, record_shapes=profiling_record_shapes)
+        hb_profer = HabanaProfile(
+            warmup=profiling_warmup_steps, active=profiling_steps, record_shapes=profiling_record_shapes
+        )
         hb_profer.start()
         while True:
             if synced_gpus:

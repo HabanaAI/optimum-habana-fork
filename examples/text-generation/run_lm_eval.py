@@ -28,7 +28,7 @@ import lm_eval.tasks
 import torch
 import torch.nn.functional as F
 from run_generation import setup_parser
-from utils import initialize_model, finalize_quantization
+from utils import finalize_quantization, initialize_model
 
 from optimum.habana.utils import get_hpu_memory_stats
 
@@ -81,10 +81,15 @@ class HabanaModelAdapter(lm_eval.base.BaseLM):
                     "reuse_cache": self.options.reuse_cache,
                 }
             )
-        if self.model.config.model_type in ["llama", "mistral"]:
+        if self.model.config.model_type in ["llama", "mistral", "falcon"]:
+            if self.model.config.model_type != "falcon":
+                self.model_inputs.update(
+                    {
+                        "attn_softmax_bf16": self.options.attn_softmax_bf16,
+                    }
+                )
             self.model_inputs.update(
                 {
-                    "attn_softmax_bf16": self.options.attn_softmax_bf16,
                     "use_flash_attention": self.options.use_flash_attention,
                     "flash_attention_recompute": self.options.flash_attention_recompute,
                     "flash_attention_causal_mask": self.options.flash_attention_causal_mask,

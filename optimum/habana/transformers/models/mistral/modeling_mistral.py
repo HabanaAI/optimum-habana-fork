@@ -19,12 +19,13 @@
 # limitations under the License.
 """PyTorch Mistral model."""
 
-import os
 import math
+import os
 from typing import List, Optional, Tuple, Union
 
 import habana_frameworks.torch.core as htcore
 import torch
+import torch.nn.functional as F
 from torch import nn
 from torch.nn import CrossEntropyLoss
 from transformers.cache_utils import Cache, DynamicCache
@@ -46,6 +47,7 @@ from ...modeling_attn_mask_utils import (
     _gaudi_prepare_4d_causal_attention_mask,
 )
 
+
 try:
     from habana_frameworks.torch.hpex.kernels import RotaryPosEmbeddingHelperV2 as FusedRoPE
 
@@ -66,6 +68,9 @@ except ImportError:
     print("Not using HPU fused scaled dot-product attention kernel.")
     FusedSDPA = None
 
+logger = logging.get_logger(__name__)
+
+
 #  FusedScaledDotProductAttention
 class ModuleFusedSDPA(torch.nn.Module):
     def __init__(self, fusedSDPA):
@@ -73,7 +78,8 @@ class ModuleFusedSDPA(torch.nn.Module):
         self._hpu_kernel_fsdpa = fusedSDPA
 
     def forward(self, query, key, value, attn_mask, dropout_p, is_casual, scale):
-        return  self._hpu_kernel_fsdpa.apply(query, key, value, attn_mask, dropout_p, is_casual, scale)
+        return self._hpu_kernel_fsdpa.apply(query, key, value, attn_mask, dropout_p, is_casual, scale)
+
 
 class Matmul(torch.nn.Module):
     def __init__(self):
@@ -83,7 +89,32 @@ class Matmul(torch.nn.Module):
         return torch.matmul(x, y)
 
 
-logger = logging.get_logger(__name__)
+# Copy from GaudiMixtralAttentionLongSequence
+class GaudiMistralAttentionLongSequence:
+    @staticmethod
+    def forward(q, k, v, mask, causal, q_block_size):
+        """
+        Support long sequence at prompt phase
+        """
+        q_len = q.size(-2)
+        q_tiles = (q_len // q_block_size) if (q_len % q_block_size == 0) else math.ceil(q_len / q_block_size)
+        q_padding = q_tiles * q_block_size - q_len
+        q = F.pad(q, (0, 0, 0, q_padding), "constant", 0)
+        if mask is not None:
+            mask = F.pad(mask, (0, 0, 0, q_padding), "constant", -10000.0)
+        attn_output = torch.zeros_like(q)
+
+        for i in range(q_tiles):
+            s, e = i * q_block_size, (i + 1) * q_block_size
+            row_q = q[:, :, s:e, :]
+            row_mask = mask[:, :, s:e, :]
+            row_o = attn_output[:, :, s:e, :]
+            row_o.fill_(FusedSDPA.apply(row_q, k, v, row_mask, 0.0, causal, None))
+
+        if q_padding != 0:
+            attn_output = attn_output[:, :, :-q_padding, :]
+
+        return attn_output
 
 
 def gaudi_mistral_rmsnorm_forward(self, hidden_states):
@@ -153,6 +184,7 @@ class GaudiMistralAttention(MistralAttention):
         self.fused_scaled_dot_product_attention = ModuleFusedSDPA(FusedSDPA) if FusedSDPA else None
         self.inp_seq_len = -1
         self.norm_factor = 1.0 / math.sqrt(self.head_dim)
+        self.block_size = 1024
 
     def allocate_kv_cache(self, batch_size, max_seq_len, inp_seq_len):
         cache_shape = (batch_size, self.num_key_value_heads, max_seq_len, self.head_dim)
@@ -160,14 +192,6 @@ class GaudiMistralAttention(MistralAttention):
         dtype = self.config.torch_dtype
         self.k_cache.allocate(inp_seq_len, dtype, device, cache_shape)
         self.v_cache.allocate(inp_seq_len, dtype, device, cache_shape)
-
-    def update_sincos_cache(self, seq_len):
-        # Call rotary emb forward() to update cos/sin cache when infering more than self.max_position_embeddings
-        # This helps in avoiding creation of these caches during actual model forward pass and
-        # reduce memory consumption and improve performance.
-        if seq_len > self.max_position_embeddings:
-            self.max_position_embeddings = seq_len
-            _, _ = self.rotary_emb(self.k_proj.weight, seq_len=seq_len)
 
     def reorder(self, tensor, beam_idx, dim_a, dim_b):
         updated = tensor.index_select(0, beam_idx)
@@ -273,12 +297,13 @@ class GaudiMistralAttention(MistralAttention):
         else:
             past_key_value = None
 
-        if use_flash_attention and FusedSDPA:
-            import habana_frameworks.torch.hpu as ht
+        import habana_frameworks.torch.hpu as ht
+
+        if FusedSDPA and use_flash_attention:
             if q_len == 1:
                 # next token
                 use_recompute = True if os.getenv("QUANT_CONFIG", "") else False
-                with ht.sdp_kernel(enable_recompute=use_recompute):#False):
+                with ht.sdp_kernel(enable_recompute=use_recompute):  # False):
                     attn_output = self.fused_scaled_dot_product_attention(
                         query_states, key_states, value_states, attention_mask, 0.0, False, None
                     )
@@ -287,12 +312,25 @@ class GaudiMistralAttention(MistralAttention):
                 if flash_attention_causal_mask:
                     # causal masking on first token requires inputs to be of the same length
                     with ht.sdp_kernel(enable_recompute=flash_attention_recompute):
-                        attn_output = self.fused_scaled_dot_product_attention(query_states, key_states, value_states, None, 0.0, True, None)
+                        attn_output = self.fused_scaled_dot_product_attention(
+                            query_states, key_states, value_states, None, 0.0, True, None
+                        )
                 else:
                     with ht.sdp_kernel(enable_recompute=flash_attention_recompute):
                         attn_output = self.fused_scaled_dot_product_attention(
                             query_states, key_states, value_states, attention_mask, 0.0, False, None
                         )
+        elif FusedSDPA and not self.training and q_len == key_states.size(-2) and q_len > 8192:
+            htcore.mark_step()
+            attn_output = GaudiMistralAttentionLongSequence.forward(
+                query_states,
+                key_states,
+                value_states,
+                attention_mask,
+                False,
+                self.block_size,
+            )
+            htcore.mark_step()
         else:
             # repeat k/v heads if n_kv_heads < n_heads
             query_states, key_states, value_states, attention_mask = gaudi_mistral_repeat_kv(
@@ -677,7 +715,6 @@ class GaudiMistralForCausalLM(MistralForCausalLM):
             use_flash_attention=use_flash_attention,
             flash_attention_recompute=flash_attention_recompute,
             flash_attention_causal_mask=flash_attention_causal_mask,
-
         )
         hidden_states = outputs[0]
         _, seq_len, _ = hidden_states.shape

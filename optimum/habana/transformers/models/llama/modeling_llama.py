@@ -1,5 +1,5 @@
-import os
 import math
+import os
 import warnings
 from typing import List, Optional, Tuple, Union
 
@@ -47,6 +47,7 @@ except ImportError:
     FusedSDPA = None
 
 import habana_frameworks.torch.core as htcore
+
 
 def gaudi_llama_rmsnorm_forward(self, hidden_states):
     """
@@ -147,7 +148,7 @@ class ModuleFusedSDPA(torch.nn.Module):
         self._hpu_kernel_fsdpa = fusedSDPA
 
     def forward(self, query, key, value, attn_mask, dropout_p, is_casual, scale, softmax_mode):
-        return  self._hpu_kernel_fsdpa.apply(query, key, value, attn_mask, dropout_p, is_casual, scale, softmax_mode)
+        return self._hpu_kernel_fsdpa.apply(query, key, value, attn_mask, dropout_p, is_casual, scale, softmax_mode)
 
 
 class Matmul(torch.nn.Module):
@@ -278,12 +279,38 @@ class GaudiLlamaAttention(LlamaAttention):
         self.k_cache = KVCache()
         self.v_cache = KVCache()
         self.fused_scaled_dot_product_attention = ModuleFusedSDPA(FusedSDPA) if FusedSDPA else None
+        if config.fused_qkv:
+            self.num_heads = config.num_attention_heads
+            self.head_dim = config.hidden_size // self.num_heads
+            self.dim1 = self.num_heads * self.head_dim
+            self.dim2 = config.num_key_value_heads * self.head_dim
+            self.qkv_proj = torch.nn.Linear(
+                self.hidden_size,
+                self.dim1 + 2 * self.dim2,
+                bias=config.attention_bias,
+            )
+            self.q_proj = None
+            self.k_proj = None
+            self.v_proj = None
         self.inp_seq_len = -1
         self.norm_factor = 1.0 / math.sqrt(self.head_dim)
 
+    def get_k_proj_weight(self):
+        """4bit quantization in GPTQ replaces the k_proj.weight with qweight."""
+        if hasattr(self.k_proj, "qweight"):
+            return self.k_proj.qweight
+        return self.k_proj.weight
+
+    def get_k_proj_weight_dtype(self):
+        """4bit quantization in GPTQ replaces the k_proj.weight with qweight.
+        Scales tensor gets the weight dtype."""
+        if hasattr(self.k_proj, "qweight"):
+            return self.k_proj.scales.dtype
+        return self.k_proj.weight.dtype
+
     def allocate_kv_cache(self, batch_size, max_seq_len, inp_seq_len):
         cache_shape = (batch_size, self.num_key_value_heads, max_seq_len, self.head_dim)
-        device = self.k_proj.weight.device
+        device = self.get_k_proj_weight().device
         dtype = self.config.torch_dtype
         self.k_cache.allocate(inp_seq_len, dtype, device, cache_shape)
         self.v_cache.allocate(inp_seq_len, dtype, device, cache_shape)
@@ -294,7 +321,7 @@ class GaudiLlamaAttention(LlamaAttention):
         # reduce memory consumption and improve performance.
         if seq_len > self.max_position_embeddings:
             self.max_position_embeddings = seq_len
-            _, _ = self.rotary_emb(self.k_proj.weight, seq_len=seq_len)
+            _, _ = self.rotary_emb(self.get_k_proj_weight(), seq_len=seq_len)
 
     def reorder(self, tensor, beam_idx, dim_a, dim_b):
         updated = tensor.index_select(0, beam_idx)
@@ -348,7 +375,7 @@ class GaudiLlamaAttention(LlamaAttention):
             query_slices = self.q_proj.weight.split(
                 (self.num_heads * self.head_dim) // self.config.pretraining_tp, dim=0
             )
-            key_slices = self.k_proj.weight.split(key_value_slicing, dim=0)
+            key_slices = self.get_k_proj_weight().split(key_value_slicing, dim=0)
             value_slices = self.v_proj.weight.split(key_value_slicing, dim=0)
 
             query_states = [F.linear(hidden_states, query_slices[i]) for i in range(self.config.pretraining_tp)]
@@ -361,9 +388,15 @@ class GaudiLlamaAttention(LlamaAttention):
             value_states = torch.cat(value_states, dim=-1)
 
         else:
-            query_states = self.q_proj(hidden_states)
-            key_states = self.k_proj(hidden_states)
-            value_states = self.v_proj(hidden_states)
+            if self.config.fused_qkv:
+                qkv_states = self.qkv_proj(hidden_states)
+                query_states, key_states, value_states = torch.split(
+                    qkv_states, [self.dim1, self.dim2, self.dim2], dim=-1
+                )
+            else:
+                query_states = self.q_proj(hidden_states)
+                key_states = self.k_proj(hidden_states)
+                value_states = self.v_proj(hidden_states)
         query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         # TODO: update when auto mp params is enabled in DeepSpeed (cf. https://github.com/HabanaAI/DeepSpeed/blob/94309c7b5dfc1a69858f5c9f25737b2f81a332a5/deepspeed/module_inject/replace_module.py#L440)
         key_states = key_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
@@ -393,9 +426,11 @@ class GaudiLlamaAttention(LlamaAttention):
                 past_key_value = (self.k_cache.get_shape(), self.v_cache.get_shape())
             else:
                 if past_key_value is None:
-                    past_key = torch.zeros(key_states.shape, dtype=self.k_proj.weight.dtype, device=key_states.device)
+                    past_key = torch.zeros(
+                        key_states.shape, dtype=self.get_k_proj_weight_dtype(), device=key_states.device
+                    )
                     past_value = torch.zeros(
-                        key_states.shape, dtype=self.k_proj.weight.dtype, device=key_states.device
+                        key_states.shape, dtype=self.get_k_proj_weight_dtype(), device=key_states.device
                     )
                     # Return list instead of tuple
                     past_key_value = [past_key, past_value]
@@ -415,7 +450,8 @@ class GaudiLlamaAttention(LlamaAttention):
 
         if use_flash_attention and FusedSDPA:
             import habana_frameworks.torch.hpu as ht
-            softmax_mode = 'fast' if flash_attention_fast_softmax else 'None'
+
+            softmax_mode = "fast" if flash_attention_fast_softmax else "None"
 
             if q_len == 1:
                 # next token
@@ -804,8 +840,11 @@ class GaudiLlamaModel(LlamaModel):
             htcore.mark_step()
 
         for layer_idx, decoder_layer in enumerate(self.layers):
-            if lazy_mode and not self.training and \
-                (torch.distributed.is_initialized() is False or torch.distributed.get_world_size() == 1):
+            if (
+                lazy_mode
+                and not self.training
+                and (torch.distributed.is_initialized() is False or torch.distributed.get_world_size() == 1)
+            ):
                 htcore.mark_step()
 
             if output_hidden_states:
@@ -1000,7 +1039,7 @@ class GaudiLlamaForCausalLM(LlamaForCausalLM):
         past_length = 0
 
         reuse_cache = kwargs.get("reuse_cache")
-        bucket_internal= kwargs.get("bucket_internal")
+        bucket_internal = kwargs.get("bucket_internal")
         if past_key_values is not None:
             if token_idx is not None:
                 input_ids = torch.index_select(input_ids, 1, token_idx - 1)
@@ -1098,11 +1137,14 @@ class GaudiLlamaForCausalLM(LlamaForCausalLM):
 def apply_customized_rope(q, k, cos, sin, position_ids):
     if q.device.type == "hpu" and has_fused_rope:
         # TODO: remove `.clone()` when it is fixed in SynapseAI
-        if k.dtype==torch.bfloat16:
+        if k.dtype == torch.bfloat16:
             return FusedRoPE.apply(
                 q, cos.unsqueeze(0).unsqueeze(0).clone(), sin.unsqueeze(0).unsqueeze(0).clone(), position_ids
             ), FusedRoPE.apply(
-                k, cos.unsqueeze(0).unsqueeze(0).clone().to(torch.bfloat16), sin.unsqueeze(0).unsqueeze(0).clone().to(torch.bfloat16), position_ids
+                k,
+                cos.unsqueeze(0).unsqueeze(0).clone().to(torch.bfloat16),
+                sin.unsqueeze(0).unsqueeze(0).clone().to(torch.bfloat16),
+                position_ids,
             )
         return FusedRoPE.apply(
             q, cos.unsqueeze(0).unsqueeze(0).clone(), sin.unsqueeze(0).unsqueeze(0).clone(), position_ids
