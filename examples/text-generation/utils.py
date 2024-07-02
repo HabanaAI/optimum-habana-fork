@@ -164,6 +164,7 @@ def patch_scoped_linear_all_reduce(model):
 
 
 def get_torch_compiled_model(model):
+    print("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA get_torch_compiled_model called")
     model.model = torch.compile(model.model, backend="hpu_backend", options={"keep_input_mutations": True})
     return model
 

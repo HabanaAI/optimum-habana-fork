@@ -838,6 +838,7 @@ class GaudiLlamaModel(LlamaModel):
 
         if lazy_mode:
             htcore.mark_step()
+        torch._dynamo.graph_break()
 
         for layer_idx, decoder_layer in enumerate(self.layers):
             if (
@@ -845,7 +846,8 @@ class GaudiLlamaModel(LlamaModel):
                 and not self.training
                 and (torch.distributed.is_initialized() is False or torch.distributed.get_world_size() == 1)
             ):
-                htcore.mark_step()
+                # htcore.mark_step()
+                torch._dynamo.graph_break()
 
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
