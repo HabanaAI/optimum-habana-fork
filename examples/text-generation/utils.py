@@ -513,6 +513,13 @@ def exclude_hpu_graph_configs(args):
             else:
                 if args.max_input_tokens >= 4096 and args.max_new_tokens >= 128:
                     return False
+        elif args.world_size == 0:
+            if args.quant_config:
+                if args.max_input_tokens >= 2048 and args.max_new_tokens >= 2048:
+                    return False
+            else:
+                if args.max_input_tokens >= 2048 and args.max_new_tokens >= 2048:
+                    return False
         return True
     else:
         return False
