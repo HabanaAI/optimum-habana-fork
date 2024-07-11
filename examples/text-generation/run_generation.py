@@ -288,6 +288,7 @@ def setup_parser(parser):
         help="Whether to trust the execution of code from datasets/models defined on the Hub. This option should only be set to `True` for repositories you trust and in which you have read the code, as it will execute code present on the Hub on your local machine.",
     )
     parser.add_argument(
+<<<<<<< HEAD
         "--parallel_strategy",
         type=str,
         choices=["tp", "none"],  # Add other strategies as needed
@@ -295,6 +296,12 @@ def setup_parser(parser):
         help="Run multi card with the specified parallel strategy. Choices are 'tp' for Tensor Parallel Strategy or 'none'.",
     )
 
+=======
+        "--run_partial_dataset",
+        action="store_true",
+        help="Run the inference with dataset for specified --n_iterations(default:5)",
+    )
+>>>>>>> 66dfeca3 ([SW-191023][PyTorch][Optimum-Habana-fork]: Add flag to run inference with partial dataset (#281))
     args = parser.parse_args()
 
     if args.torch_compile:
@@ -642,6 +649,8 @@ def main():
                 f"Output: {tokenizer.batch_decode(outputs, skip_special_tokens=True)[:args.batch_size*args.num_return_sequences]}"
             )
             print(separator)
+            if args.run_partial_dataset and args.n_iterations == i + 1:
+                break
         t_end = time.time()
 
         throughput = total_new_tokens_generated / duration
