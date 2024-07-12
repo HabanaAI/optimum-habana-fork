@@ -42,7 +42,7 @@ from transformers import (
 from transformers.trainer_utils import is_main_process
 
 from optimum.habana import GaudiConfig, GaudiTrainer, GaudiTrainingArguments
-from optimum.habana.utils import set_seed
+from optimum.habana.utils import is_gaudi3, set_seed
 
 
 try:
@@ -155,6 +155,14 @@ class ModelArguments:
             "help": (
                 "Whether to enable causal mask in Habana flash attention for fine-tuning."
                 " It is applicable only when use_flash_attention is True."
+            )
+        },
+    )
+    flash_attention_fp8: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Whether to enable flash attention in FP8."
             )
         },
     )
@@ -432,6 +440,7 @@ def main():
         "trust_remote_code": True if model_args.trust_remote_code else None,
         "use_cache": False if training_args.gradient_checkpointing else model_args.use_cache,
         "token": model_args.token,
+        "flash_attention_fp8": model_args.flash_attention_fp8,
     }
     if model_args.config_name:
         config = AutoConfig.from_pretrained(model_args.config_name, **config_kwargs)
@@ -587,6 +596,9 @@ def main():
             model.generation_config.use_flash_attention = True
             model.generation_config.flash_attention_recompute = model_args.flash_attention_recompute
             model.generation_config.flash_attention_causal_mask = model_args.flash_attention_causal_mask
+
+            if model_args.flash_attention_fp8:
+                assert is_gaudi3(), "Flash attention in FP8 is supported only on Gaudi3"
         if not model_args.use_fused_rope:
             model.generation_config.use_fused_rope = False
 

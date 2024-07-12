@@ -266,12 +266,20 @@ def gaudi_llama_repeat_kv(
 
 #  FusedScaledDotProductAttention
 class ModuleFusedSDPA(torch.nn.Module):
-    def __init__(self, fusedSDPA):
+    def __init__(self, fusedSDPA, scale, attention_dropout, enable_recompute, flash_attention_fp8):
         super().__init__()
         self._hpu_kernel_fsdpa = fusedSDPA
+        self.scale = scale
+        self.attention_dropout = attention_dropout
+        self.enable_recompute = enable_recompute
+        self.flash_attention_fp8 = flash_attention_fp8
 
-    def forward(self, query, key, value, attn_mask, dropout_p, is_casual, scale, softmax_mode, recompute_mode, valid_sequence_lengths, padding_side="left"):
-        return  self._hpu_kernel_fsdpa.apply(query, key, value, attn_mask, dropout_p, is_casual, scale, softmax_mode, recompute_mode, valid_sequence_lengths, padding_side)
+    def forward(self, query, key, value, attn_mask, dropout_p, is_causal, scale, softmax_mode, recompute_mode, valid_sequence_lengths, padding_side="left"):
+        from habana_frameworks.torch.hpex.experimental.transformer_engine import FusedAttention as FusedAttentionTE
+        if isinstance(self._hpu_kernel_fsdpa, FusedAttentionTE):
+            return self._hpu_kernel_fsdpa(query, key, value, attn_mask, is_causal, softmax_mode)
+        else:
+            return self._hpu_kernel_fsdpa.apply(query, key, value, attn_mask, dropout_p, is_causal, scale, softmax_mode, recompute_mode, valid_sequence_lengths, padding_side)
 
 
 class Matmul(torch.nn.Module):
@@ -332,7 +340,6 @@ class GaudiLlamaAttention(LlamaAttention):
         self.matmul_av = Matmul()
         self.k_cache = KVCache()
         self.v_cache = KVCache()
-        self.fused_scaled_dot_product_attention = ModuleFusedSDPA(FusedSDPA) if FusedSDPA else None
         if config.fused_qkv:
             self.num_heads = config.num_attention_heads
             self.head_dim = config.hidden_size // self.num_heads
@@ -348,6 +355,13 @@ class GaudiLlamaAttention(LlamaAttention):
             self.v_proj = None
         self.inp_seq_len = -1
         self.norm_factor = 1.0 / math.sqrt(self.head_dim)
+        self.fused_scaled_dot_product_attention = ModuleFusedSDPA(
+            FusedSDPA,
+            scale=self.norm_factor,
+            attention_dropout=self.attention_dropout,
+            enable_recompute=False,
+            flash_attention_fp8=config.flash_attention_fp8,
+        ) if FusedSDPA else None
 
     def get_k_proj_weight(self):
         """4bit quantization in GPTQ replaces the k_proj.weight with qweight."""
@@ -522,26 +536,24 @@ class GaudiLlamaAttention(LlamaAttention):
             past_key_value = None
 
         if use_flash_attention and FusedSDPA:
-            import habana_frameworks.torch.hpu as ht
-
-            softmax_mode = "fast" if flash_attention_fast_softmax else "None"
-
             if q_len == 1:
                 # next token
                 attn_output = self.fused_scaled_dot_product_attention(
-                    query_states, key_states, value_states, attention_mask, 0.0, False, None, softmax_mode, False, None, "None"
+                    query_states, key_states, value_states, attention_mask, 0.0, False, None, "None", False, None, "None"
                 )
             else:
+                softmax_mode = "fast" if flash_attention_fast_softmax else "None"
+
                 # first token
                 if flash_attention_causal_mask:
+                    # causal masking on first token requires inputs to be of the same length
                     attn_output = self.fused_scaled_dot_product_attention(
                         query_states, key_states, value_states, None, 0.0, True, None, softmax_mode, flash_attention_recompute, valid_sequence_lengths, "left"
                     )
                 else:
                     attn_output = self.fused_scaled_dot_product_attention(
-                        query_states, key_states, value_states, attention_mask, 0.0, False, None, softmax_mode,flash_attention_recompute, None, "None"
+                        query_states, key_states, value_states, attention_mask, 0.0, False, None, softmax_mode, flash_attention_recompute, None, "None"
                     )
-
         else:
             query_states, key_states, value_states, attention_mask = gaudi_llama_repeat_kv(
                 query_states, key_states, value_states, attention_mask, self.num_key_value_groups
@@ -596,7 +608,6 @@ class GaudiLlamaAttention(LlamaAttention):
         if hasattr(self.o_proj, "post_all_reduce"):
             self.o_proj.post_all_reduce(attn_output)
         return attn_output
-
 
 class TPGaudiLlamaAttention(GaudiLlamaAttention, TPModule):
     def __init__(
