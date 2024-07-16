@@ -1894,6 +1894,10 @@ class GaudiGenerationMixin(GenerationMixin):
                 self._pad_past_key_values(model_kwargs)
                 model_kwargs["pad_done"] = True
 
+        # Clear cache is both are True
+        if model_kwargs.get("use_hpu_graphs", False) and model_kwargs.get("limit_hpu_graphs", False):
+            self.clear_cache()
+
         if (
             model_kwargs.get("use_hpu_graphs", False)
             and model_kwargs.get("limit_hpu_graphs", False)
