@@ -62,7 +62,6 @@ if is_torch_available():
         CLIPVisionModel,
         CLIPVisionModelWithProjection,
     )
-    from transformers.models.clip.modeling_clip import CLIP_PRETRAINED_MODEL_ARCHIVE_LIST
 
 
 if is_vision_available():
@@ -254,16 +253,16 @@ class CLIPVisionModelTest(ModelTesterMixin, unittest.TestCase):
 
     @slow
     def test_model_from_pretrained(self):
-        for model_name in CLIP_PRETRAINED_MODEL_ARCHIVE_LIST[:1]:
-            model = CLIPVisionModel.from_pretrained(model_name)
-            self.assertIsNotNone(model)
+        model_name = "openai/clip-vit-base-patch32"
+        model = CLIPVisionModel.from_pretrained(model_name)
+        self.assertIsNotNone(model)
 
     @slow
     def test_model_with_projection_from_pretrained(self):
-        for model_name in CLIP_PRETRAINED_MODEL_ARCHIVE_LIST[:1]:
-            model = CLIPVisionModelWithProjection.from_pretrained(model_name)
-            self.assertIsNotNone(model)
-            self.assertTrue(hasattr(model, "visual_projection"))
+        model_name = "openai/clip-vit-base-patch32"
+        model = CLIPVisionModelWithProjection.from_pretrained(model_name)
+        self.assertIsNotNone(model)
+        self.assertTrue(hasattr(model, "visual_projection"))
 
 
 class CLIPTextModelTester:
@@ -419,16 +418,16 @@ class CLIPTextModelTest(ModelTesterMixin, unittest.TestCase):
 
     @slow
     def test_model_from_pretrained(self):
-        for model_name in CLIP_PRETRAINED_MODEL_ARCHIVE_LIST[:1]:
-            model = CLIPTextModel.from_pretrained(model_name)
-            self.assertIsNotNone(model)
+        model_name = "openai/clip-vit-base-patch32"
+        model = CLIPTextModel.from_pretrained(model_name)
+        self.assertIsNotNone(model)
 
     @slow
     def test_model_with_projection_from_pretrained(self):
-        for model_name in CLIP_PRETRAINED_MODEL_ARCHIVE_LIST[:1]:
-            model = CLIPTextModelWithProjection.from_pretrained(model_name)
-            self.assertIsNotNone(model)
-            self.assertTrue(hasattr(model, "text_projection"))
+        model_name = "openai/clip-vit-base-patch32"
+        model = CLIPTextModelWithProjection.from_pretrained(model_name)
+        self.assertIsNotNone(model)
+        self.assertTrue(hasattr(model, "text_projection"))
 
 
 class CLIPModelTester:
@@ -441,6 +440,7 @@ class CLIPModelTester:
         self.parent = parent
         self.text_model_tester = CLIPTextModelTester(parent, **text_kwargs)
         self.vision_model_tester = CLIPVisionModelTester(parent, **vision_kwargs)
+        self.batch_size = self.text_model_tester.batch_size  # need bs for batching_equivalence test
         self.is_training = is_training
 
     def prepare_config_and_inputs(self):
@@ -744,9 +744,9 @@ class CLIPModelTest(ModelTesterMixin, unittest.TestCase):
 
     @slow
     def test_model_from_pretrained(self):
-        for model_name in CLIP_PRETRAINED_MODEL_ARCHIVE_LIST[:1]:
-            model = CLIPModel.from_pretrained(model_name)
-            self.assertIsNotNone(model)
+        model_name = "openai/clip-vit-base-patch32"
+        model = CLIPModel.from_pretrained(model_name)
+        self.assertIsNotNone(model)
 
 
 class CLIPForImageClassificationModelTester(CLIPModelTester):
@@ -846,3 +846,4 @@ class CLIPModelIntegrationTest(unittest.TestCase):
         expected_logits = torch.tensor([[24.5701, 19.3049]], device=torch_device)
 
         self.assertTrue(torch.allclose(outputs.logits_per_image, expected_logits, atol=1e-3))
+

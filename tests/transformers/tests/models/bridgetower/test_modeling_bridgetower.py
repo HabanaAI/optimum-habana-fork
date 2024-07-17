@@ -1,3 +1,4 @@
+
 # coding=utf-8
 # Copyright 2023 The Intel Labs Team Authors, The Microsoft Research Team Authors and HuggingFace Inc. team. All rights reserved.
 #
@@ -12,13 +13,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Testing suite for the PyTorch BridgeTower model."""
+""" Testing suite for the PyTorch BridgeTower model. """
 
 import tempfile
 import unittest
 
 import numpy as np
-import pytest
+
 from transformers import (
     BridgeTowerConfig,
     BridgeTowerTextConfig,
@@ -26,7 +27,7 @@ from transformers import (
     is_torch_available,
     is_vision_available,
 )
-from transformers.testing_utils import require_torch, require_vision, slow
+from transformers.testing_utils import require_torch, require_vision, slow, torch_device
 from transformers.utils import cached_property
 
 from optimum.habana.transformers.modeling_utils import adapt_transformers_to_gaudi
@@ -49,16 +50,17 @@ adapt_transformers_to_gaudi()
 
 if is_torch_available():
     import torch
+
     from transformers import (
         BridgeTowerForContrastiveLearning,
         BridgeTowerForImageAndTextRetrieval,
         BridgeTowerForMaskedLM,
         BridgeTowerModel,
     )
-    from transformers.models.bridgetower.modeling_bridgetower import BRIDGETOWER_PRETRAINED_MODEL_ARCHIVE_LIST
 
 if is_vision_available():
     from PIL import Image
+
     from transformers import BridgeTowerProcessor
 
 
@@ -347,26 +349,23 @@ class BridgeTowerModelTest(ModelTesterMixin, unittest.TestCase):
     def test_config(self):
         self.config_tester.run_common_tests()
 
-    @pytest.mark.skip("Skipped for Gaudi")
     def test_model(self):
         config_and_inputs = self.model_tester.prepare_config_and_inputs()
         self.model_tester.create_and_check_model(*config_and_inputs)
 
-    @pytest.mark.skip("Skipped for Gaudi")
     def test_for_image_and_text_retrieval(self):
         config_and_inputs = self.model_tester.prepare_config_and_inputs()
         self.model_tester.create_and_check_for_image_and_text_retrieval(*config_and_inputs)
 
-    @pytest.mark.skip("Skipped for Gaudi")
     def test_for_masked_language_modeling(self):
         config_and_inputs = self.model_tester.prepare_config_and_inputs()
         self.model_tester.create_and_check_for_masked_language_modeling(*config_and_inputs)
 
     @slow
     def test_model_from_pretrained(self):
-        for model_name in BRIDGETOWER_PRETRAINED_MODEL_ARCHIVE_LIST[:1]:
-            model = BridgeTowerModel.from_pretrained(model_name)
-            self.assertIsNotNone(model)
+        model_name = "BridgeTower/bridgetower-base"
+        model = BridgeTowerModel.from_pretrained(model_name)
+        self.assertIsNotNone(model)
 
     @slow
     def test_save_load_fast_init_from_base(self):
@@ -374,7 +373,6 @@ class BridgeTowerModelTest(ModelTesterMixin, unittest.TestCase):
         super().test_save_load_fast_init_from_base()
 
     # Override as extracting meaningful tensor from output is different for BridgeTower
-    @pytest.mark.skip("Skip for Gaudi")
     def test_save_load(self):
         config, input_dict = self.model_tester.prepare_config_and_inputs_for_common()
         for model_class in self.all_model_classes:
@@ -403,7 +401,6 @@ class BridgeTowerModelTest(ModelTesterMixin, unittest.TestCase):
                 self.assertLessEqual(max_diff, 1e-5)
 
     # Override this as `hidden states output` is different for BridgeTower
-    @pytest.mark.skip("Skipped for Gaudi")
     def test_hidden_states_output(self):
         def check_hidden_states_output(inputs_dict, config, model_class):
             model = model_class(config)
@@ -455,7 +452,6 @@ class BridgeTowerModelTest(ModelTesterMixin, unittest.TestCase):
             check_hidden_states_output(inputs_dict, config, model_class)
 
     # Override as `hidden states output` is different for BridgeTower
-    @pytest.mark.skip("Skipped for Gaudi")
     def test_retain_grad_hidden_states_attentions(self):
         config, inputs_dict = self.model_tester.prepare_config_and_inputs_for_common()
         config.output_hidden_states = True
@@ -589,7 +585,7 @@ class BridgeTowerModelIntegrationTest(unittest.TestCase):
         inputs = inputs.to(torch_device)
         with torch.no_grad():
             outputs = model(**inputs)
-        self.assertAlmostEqual(outputs.loss.item(), 5.73786, places=4)
+        self.assertAlmostEqual(outputs.loss.item(), 5.7373, places=4)
 
     @slow
     def test_constrastive_learning(self):
@@ -664,3 +660,4 @@ class BridgeTowerModelTrainingTest(unittest.TestCase):
             for name, param in model.named_parameters():
                 if self._is_layer_used(model_class, name):
                     self.assertIsNotNone(param.grad, f"Gradients should not be None - got {param.grad} for {name}")
+
