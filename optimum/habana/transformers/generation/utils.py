@@ -1000,6 +1000,7 @@ class GaudiGenerationMixin(GenerationMixin):
         )
         model_kwargs["num_virtual_tokens"] = num_virtual_tokens
 
+        model_kwargs["valid_sequence_lengths"] = generation_config.valid_sequence_lengths
         if not self.config.is_encoder_decoder:
             calculated_max_length = input_ids.shape[-1] + num_virtual_tokens
             if not generation_config.static_shapes and generation_config.max_new_tokens is not None:
