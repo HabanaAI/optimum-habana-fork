@@ -575,6 +575,22 @@ def setup_generation_config(args, model, assistant_model, tokenizer):
 
     return generation_config
 
+def exclude_hpu_graph_configs(args):
+    # Excluded configs for batch size 1 for hpu graph
+    if args.batch_size == 1 and args.limit_hpu_graphs:
+        if "falcon-180B" in args.model_name_or_path or \
+           "falcon-180b" in args.model_name_or_path:
+            return False
+        if (args.world_size == 2 or args.world_size == 4 or args.world_size == 8):
+            if args.quant_config:
+                if (args.max_input_tokens >= 8192 and args.max_new_tokens >= 128):
+                    return False
+            else:
+                if (args.max_input_tokens >= 4096 and args.max_new_tokens >= 128):
+                    return False
+        return True
+    else:
+        return False
 
 def exclude_hpu_graph_configs(args):
     # Excluded configs for batch size 1 for hpu graph
