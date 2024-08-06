@@ -879,6 +879,7 @@ class GaudiGenerationMixin(GenerationMixin):
                     model_kwargs["token_idx_cpu"] = token_idx
                     if generation_config.max_new_tokens is None:
                         generation_config.max_new_tokens = generation_config.max_length - token_idx
+                    model_kwargs["max_new_output_tokens"] = generation_config.max_new_tokens
                     inputs_tensor = torch.nn.functional.pad(
                         inputs_tensor, (0, generation_config.max_new_tokens), value=generation_config.pad_token_id
                     )
@@ -1900,12 +1901,14 @@ class GaudiGenerationMixin(GenerationMixin):
 
         if (
             model_kwargs.get("use_hpu_graphs", False)
-            and model_kwargs.get("limit_hpu_graphs", False)
             and not model_kwargs.get("reuse_cache", False)
             and bucket_internal
         ):
-            # Clear HPU graphs input tensors of the decode phase after the full generation while loop
-            self.clear_inputs()
+            if model_kwargs("max_new_output_tokens") >= 128:
+                # Clear cache after the full generation while loop
+                self.clear_cache()
+            else:
+                self.clear_inputs()
             # Delete past key value tensors
             self._remove_past_key_values(model_kwargs)
 
