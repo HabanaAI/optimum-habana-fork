@@ -293,96 +293,66 @@ def setup_model(args, model_dtype, model_kwargs, logger):
         #     assistant_model = get_torch_compiled_model(assistant_model)
     return model, assistant_model
 
-def setup_distributed_model_tp(args, model_dtype, model_kwargs, logger):
 
-    from optimum.habana.distributed import serialization
+def setup_distributed_model_tp(args, model_dtype, model_kwargs, logger, cache_dir):
     from typing import Any, MutableMapping
 
-    from optimum.habana.distributed import tp_wrapping
-    from optimum.habana.distributed.strategy import DistributedStrategy
-    from torch import nn
-
-    class TensorParallelStrategy(DistributedStrategy):
-        def __init__(self, group=None, from_meta=False):
-            super().__init__(from_meta)
-            assert torch.distributed.is_initialized(), "must initialize a process group"
-            self.group = group if group is not None else torch.distributed.GroupMember.WORLD
-
-        def distribute_module(
-            self, module: nn.Module, final_layers: bool = False
-        ) -> nn.Module:
-            return tp_wrapping.apply_tp(module, self.group)
-
-        def distribute_layer(self, block: nn.Module, layer: int) -> nn.Module:
-            return tp_wrapping.apply_tp(block, layer, self.group)
-
-        def __getstate__(self):
-            state = self.__dict__.copy()
-            state['group'] = None  # Remove ProcessGroup from state
-            return state
-
-        def __setstate__(self, state):
-            self.__dict__.update(state)
-            self.group = None  # Restore to default state or reinitialize
+    from optimum.habana.distributed import serialization
+    from optimum.habana.distributed.strategy import TensorParallelStrategy
 
     logger.info("Multi-device run.")
 
+    assert args.quant_config == "", "Fp8 is not enabled, unset QUANT_CONFIG"
     assert args.assistant_model is None, "Assistant model must be None"
-    
+
     from torch import distributed as dist
-    if args.device == 'hpu':
-        import habana_frameworks.torch.distributed.hccl
-        dist.init_process_group(backend='hccl')
+
+    if args.device == "hpu":
+        dist.init_process_group(backend="hccl")
     else:
-        dist.init_process_group()
-    
+        assert False, "Supports TP only on HPU"
+
     torch._C._distributed_c10d._register_process_group("default", dist.group.WORLD)
     logger.info("Creating Model")
-    config = AutoConfig.from_pretrained(args.model_name_or_path,torch_dtype=model_dtype, **model_kwargs)
-    model_kwargs={}
-    model_kwargs["distributed_strategy"] = TensorParallelStrategy()
+    config = AutoConfig.from_pretrained(args.model_name_or_path, torch_dtype=model_dtype, **model_kwargs)
+    model_kwargs = {}
+    model_kwargs["parallel_strategy"] = TensorParallelStrategy()
     model = AutoModelForCausalLM.from_config(config, torch_dtype=model_dtype, **model_kwargs)
 
     initial_device = torch.device("cpu")
-    source="hf"
-    checkpoint_sharding=None
+    source = "hf"
+    checkpoint_sharding = None
     lazy_sd: MutableMapping[str, Any] = {}
     logger.info("Loading Checkpoints")
     lazy_sd = serialization.load_state_dict(
-        args.model_name_or_path,
+        cache_dir,
         source=source,
-        distributed_strategy=args.distributed_strategy,
+        distributed_strategy=args.parallel_strategy,
         checkpoint_sharding=None,
         initial_device=initial_device,
         rank=args.global_rank,
         world_size=args.world_size,
     )
-    architecture="llama"
+    architecture = "llama"
     if len(lazy_sd):
         serialization.load_state_dict_into_model(
             model,
             lazy_sd,
             architecture,
             source,
-            args.distributed_strategy,
+            args.parallel_strategy,
             checkpoint_sharding,
             initial_device,
             args.local_rank,
             args.world_size,
         )
 
-    if args.quant_config:
-        model = setup_quantization(model, args)
-    
     model = model.eval().to(args.device)
 
     if args.use_hpu_graphs:
         from habana_frameworks.torch.hpu import wrap_in_hpu_graph
 
-        if check_habana_frameworks_version("1.13.0") and model.config.model_type == "falcon":
-            model = wrap_in_hpu_graph(model, hash_with_views=False)
-        else:
-            model = wrap_in_hpu_graph(model)
+        model = wrap_in_hpu_graph(model)
 
     if args.torch_compile and model.config.model_type == "llama":
         model = get_torch_compiled_model(model)
@@ -601,6 +571,7 @@ def setup_generation_config(args, model, assistant_model, tokenizer):
     generation_config.flash_attention_causal_mask = args.flash_attention_causal_mask
     generation_config.flash_attention_fast_softmax = args.flash_attention_fast_softmax
     generation_config.trust_remote_code = args.trust_remote_code
+    setattr(generation_config, 'valid_sequence_lengths', None)
 
     return generation_config
 
@@ -631,7 +602,7 @@ def initialize_model(args, logger):
     setup_env(args)
     setup_device(args)
     set_seed(args.seed)
-    get_repo_root(args.model_name_or_path, local_rank=args.local_rank, token=args.token)
+    cache_dir = get_repo_root(args.model_name_or_path, local_rank=args.local_rank, token=args.token)
     if args.assistant_model is not None:
         get_repo_root(args.assistant_model, local_rank=args.local_rank, token=args.token)
     use_deepspeed = args.world_size > 0
@@ -655,8 +626,9 @@ def initialize_model(args, logger):
     model, assistant_model = (
         setup_model(args, model_dtype, model_kwargs, logger)
         if not use_deepspeed
-        else setup_distributed_model(args, model_dtype, model_kwargs, logger) if not args.distributed_strategy == "tp"
-        else setup_distributed_model_tp(args, model_dtype, model_kwargs, logger)
+        else setup_distributed_model(args, model_dtype, model_kwargs, logger)
+        if not args.parallel_strategy == "tp"
+        else setup_distributed_model_tp(args, model_dtype, model_kwargs, logger, cache_dir)
     )
     tokenizer, model, assistant_model = setup_tokenizer(args, model, assistant_model)
     generation_config = setup_generation_config(args, model, assistant_model, tokenizer)
