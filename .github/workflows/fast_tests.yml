@@ -16,7 +16,7 @@ jobs:
   transformers:
     name: Run tests for optimum.habana.transformers
     runs-on:
-      group: aws-dl1-24xlarge
+      group: Gaudi2D
     steps:
       - name: Checkout
         uses: actions/checkout@v2
@@ -39,7 +39,7 @@ jobs:
   diffusers:
     name: Run tests for optimum.habana.diffusers
     runs-on:
-      group: aws-dl1-24xlarge
+      group: Gaudi2D
     steps:
       - name: Checkout
         uses: actions/checkout@v2
