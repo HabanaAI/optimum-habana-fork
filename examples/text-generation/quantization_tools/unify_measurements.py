@@ -28,8 +28,14 @@ def unify_measurements(
 
     # save all the jsons paths in the given measurement group
     for measurement in measurement_group:
+<<<<<<< HEAD
         measurement_path = find_measurement_path(measurement, measurements_dir_path, scales, groups_size)
         measurements_paths.append(measurement_path)
+=======
+        measurement_path = find_measurement_path(measurement, measurements_dir_path, groups_size)
+        if measurement_path is not None:
+            measurements_paths.append(measurement_path)
+>>>>>>> 8b2aa206 ([SW-205252][SW-204329] fixed measurement path bug)
         group_name += measurement
 
     # save all the jsons content in the given measurement group
