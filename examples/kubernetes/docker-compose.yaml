@@ -8,12 +8,12 @@ services:
         GAUDI_SW_VER: ${GAUDI_SW_VER:-1.22.0}
         OS: ${OS:-ubuntu22.04}
         OPTIMUM_HABANA_VER:  ${OPTIMUM_HABANA_VER:-1.19.0}
-        TORCH_VER: ${TORCH_VER:-2.6.0}
+        TORCH_VER: ${TORCH_VER:-2.7.1}
         REGISTRY: ${REGISTRY}
         REPO: ${REPO}
       context: .
       labels:
-        org.opencontainers.base.name: "vault.habana.ai/gaudi-docker/${GAUDI_SW_VER:-1.22.0}/${OS:-ubuntu22.04}/habanalabs/pytorch-installer-${TORCH_VER:-2.6.0}:latest"
+        org.opencontainers.base.name: "vault.habana.ai/gaudi-docker/${GAUDI_SW_VER:-1.22.0}/${OS:-ubuntu22.04}/habanalabs/pytorch-installer-${TORCH_VER:-2.7.1}:latest"
         org.opencontainers.image.title: "Optimum for Intel® Gaudi® Accelerators"
         org.opencontainers.image.version: gaudi-${GAUDI_SW_VER:-1.22.0}-optimum-habana-${OPTIMUM_HABANA_VER:-1.19.0}
     command: >

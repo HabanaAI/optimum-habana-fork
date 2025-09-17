@@ -37,7 +37,7 @@ automatically download and run the docker. At the time of writing this guide, la
 ```bash
 release=1.22.0
 os=ubuntu22.04
-torch=2.6.0
+torch=2.7.1
 docker_image=vault.habana.ai/gaudi-docker/$release/$os/habanalabs/pytorch-installer-$torch:latest
 ```
 <Tip>
@@ -115,7 +115,7 @@ Microsoft® DeepSpeed. Gaudi-specific fork of the library is maintained by Intel
 
 To install the library compatible with the same Gaudi software release stack, use:
 ```bash
-pip install git+https://github.com/HabanaAI/DeepSpeed.git@1.21.0
+pip install git+https://github.com/HabanaAI/DeepSpeed.git@1.22.0
 ```
 
 With DeepSpeed successfully installed we can now run a distributed GPT-2 inference on an 8 HPU system as follows:
