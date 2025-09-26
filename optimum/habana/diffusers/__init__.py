@@ -38,3 +38,6 @@ from .schedulers import (
     GaudiEulerDiscreteScheduler,
     GaudiFlowMatchEulerDiscreteScheduler,
 )
+from .pipelines.qwenimage.pipeline_qwenimage import GaudiQwenImagePipeline
+from .pipelines.qwenimage.pipeline_qwenimage_edit import GaudiQwenImageEditPipeline
+from .pipelines.qwenimage.pipeline_qwenimage_edit_plus import GaudiQwenImageEditPlusPipeline
