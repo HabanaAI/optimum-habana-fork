@@ -19,12 +19,13 @@ import types
 import numpy as np
 import torch
 from transformers import Qwen2_5_VLForConditionalGeneration, Qwen2Tokenizer, Qwen2VLProcessor
-
+import torch.nn.functional as F
 from diffusers.image_processor import PipelineImageInput
 from diffusers.loaders import QwenImageLoraLoaderMixin
 from diffusers.models import AutoencoderKLQwenImage, QwenImageTransformer2DModel
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 from diffusers.utils import logging, replace_example_docstring
+from diffusers.utils.torch_utils import randn_tensor
 from diffusers.pipelines.qwenimage.pipeline_output import QwenImagePipelineOutput
 from diffusers.pipelines.qwenimage.pipeline_qwenimage_edit_plus import QwenImageEditPlusPipeline
 from diffusers.pipelines.qwenimage.pipeline_qwenimage_edit_plus import calculate_dimensions,retrieve_timesteps,calculate_shift
@@ -33,8 +34,11 @@ from ....utils import HabanaProfile
 from ..pipeline_utils import GaudiDiffusionPipeline
 from ...models.attention_processor import GaudiQwenDoubleStreamAttnProcessor2_0
 from ...models.qwenimage_transformer import QwenImageTransformer2DModelGaudi
+from ...models.autoencoders.autoencoder_kl_qwenimage import QwenImageEncoder3dForwardGaudi,QwenImageDecoder3dForwardGaudi
 from ....transformers.gaudi_configuration import GaudiConfig
-
+import habana_frameworks.torch as ht
+import habana_frameworks.torch.core as htcore
+        
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 EXAMPLE_DOC_STRING = """
@@ -117,15 +121,107 @@ class GaudiQwenImageEditPlusPipeline(GaudiDiffusionPipeline, QwenImageEditPlusPi
         self.transformer.forward = types.MethodType(QwenImageTransformer2DModelGaudi, self.transformer)
         for block in self.transformer.transformer_blocks:
             block.attn.processor = GaudiQwenDoubleStreamAttnProcessor2_0(is_training)
+        self.vae.decoder.forward = types.MethodType(QwenImageDecoder3dForwardGaudi, self.vae.decoder)
+        self.vae.encoder.forward = types.MethodType(QwenImageEncoder3dForwardGaudi, self.vae.encoder)
           
             
         if use_hpu_graphs:
             from habana_frameworks.torch.hpu import wrap_in_hpu_graph
-            #transformer = wrap_in_hpu_graph(transformer)
+            #self.transformer = wrap_in_hpu_graph(self.transformer)
             for block in self.transformer.transformer_blocks:
                 block = wrap_in_hpu_graph(block)
+            
+            # self.text_encoder = wrap_in_hpu_graph(self.text_encoder)
                 
 
+    def prepare_latents(
+        self,
+        images,
+        batch_size,
+        num_channels_latents,
+        height,
+        width,
+        dtype,
+        device,
+        generator,
+        latents=None,
+    ):
+        # VAE applies 8x compression on images but we must also account for packing which requires
+        # latent height and width to be divisible by 2.
+        height = 2 * (int(height) // (self.vae_scale_factor * 2))
+        width = 2 * (int(width) // (self.vae_scale_factor * 2))
+
+        shape = (batch_size, 1, num_channels_latents, height, width)
+        
+        image_latents = None
+        if images is not None:
+            if not isinstance(images, list):
+                images = [images]
+            all_image_latents = []
+            for image in images:
+                image = image.to(device=device, dtype=dtype)
+                
+                if image.shape[1] != self.latent_channels:
+                    #padding
+                    buckets_list = [832,1024,1280,1504]
+                    _,_,_,h,w = image.shape
+                    h_pad = -1
+                    w_pad = -1 
+                    for bucket in buckets_list:
+                        if h_pad >=0 and w_pad >=0:
+                            break
+                        if h <= bucket and h_pad == -1:
+                            h_pad = bucket - h
+                        if w <= bucket and w_pad == -1:
+                            w_pad = bucket - w
+                    if h_pad < 0:
+                        h_pad = 0
+                    if w_pad < 0:
+                        w_pad = 0                    
+                    image = F.pad(image,(0,w_pad,0,h_pad), "constant", 0)
+                    down_sample_scales = 2 ** (len(self.vae.encoder.dim_mult) - 1)
+                    h_out = int(h/down_sample_scales)
+                    w_out = int(w/down_sample_scales)
+
+                    htcore.mark_step()
+                    image_latents = self._encode_vae_image(image=image, generator=generator)
+                    htcore.mark_step()
+                    #remove padding
+                    image_latents = image_latents[:,:,:,:h_out,:w_out]
+                    
+                else:
+                    image_latents = image
+                if batch_size > image_latents.shape[0] and batch_size % image_latents.shape[0] == 0:
+                    # expand init_latents for batch_size
+                    additional_image_per_prompt = batch_size // image_latents.shape[0]
+                    image_latents = torch.cat([image_latents] * additional_image_per_prompt, dim=0)
+                elif batch_size > image_latents.shape[0] and batch_size % image_latents.shape[0] != 0:
+                    raise ValueError(
+                        f"Cannot duplicate `image` of batch size {image_latents.shape[0]} to {batch_size} text prompts."
+                    )
+                else:
+                    image_latents = torch.cat([image_latents], dim=0)                                               
+
+                image_latent_height, image_latent_width = image_latents.shape[3:]
+                image_latents = self._pack_latents(
+                    image_latents, batch_size, num_channels_latents, image_latent_height, image_latent_width
+                )
+                all_image_latents.append(image_latents)
+            image_latents = torch.cat(all_image_latents, dim=1)
+
+        if isinstance(generator, list) and len(generator) != batch_size:
+            raise ValueError(
+                f"You have passed a list of generators of length {len(generator)}, but requested an effective batch"
+                f" size of {batch_size}. Make sure the batch size matches the length of the generators."
+            )
+        if latents is None:
+            latents = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
+            latents = self._pack_latents(latents, batch_size, num_channels_latents, height, width)
+        else:
+            latents = latents.to(device=device, dtype=dtype)
+
+        return latents, image_latents
+    
     @torch.no_grad()
     @replace_example_docstring(EXAMPLE_DOC_STRING)
     def __call__(
@@ -244,8 +340,6 @@ class GaudiQwenImageEditPlusPipeline(GaudiDiffusionPipeline, QwenImageEditPlusPi
             [`~pipelines.qwenimage.QwenImagePipelineOutput`] if `return_dict` is True, otherwise a `tuple`. When
             returning a tuple, the first element is a list with the generated images.
         """
-        import habana_frameworks.torch as ht
-        import habana_frameworks.torch.core as htcore
         
         image_size = image[-1].size if isinstance(image, list) else image.size
         calculated_width, calculated_height = calculate_dimensions(1024 * 1024, image_size[0] / image_size[1])
@@ -284,6 +378,7 @@ class GaudiQwenImageEditPlusPipeline(GaudiDiffusionPipeline, QwenImageEditPlusPi
             batch_size = prompt_embeds.shape[0]
 
         device = self._execution_device
+        
         # 3. Preprocess image
         if image is not None and not (isinstance(image, torch.Tensor) and image.size(1) == self.latent_channels):
             if not isinstance(image, list):
@@ -503,9 +598,33 @@ class GaudiQwenImageEditPlusPipeline(GaudiDiffusionPipeline, QwenImageEditPlusPi
                 latents.device, latents.dtype
             )
             latents = latents / latents_std + latents_mean
-            image = self.vae.decode(latents, return_dict=False)[0][:, :, 0]
-            image = self.image_processor.postprocess(image, output_type=output_type)
+           
+            buckets_list = [104,128,160,188]
+            _,_,_,h,w = latents.shape
+            h_pad = -1
+            w_pad = -1 
+            for bucket in buckets_list:
+                if h_pad >=0 and w_pad >=0:
+                    break
+                if h <= bucket and h_pad == -1:
+                    h_pad = bucket - h
+                if w <= bucket and w_pad == -1:
+                    w_pad = bucket - w
+            if h_pad < 0:
+                h_pad = 0
+            if w_pad < 0:
+                w_pad = 0 
+            x_padded = F.pad(latents,(0,w_pad,0,h_pad), "constant", 0)
+            down_sample_scales = 2 ** (len(self.vae.encoder.dim_mult) - 1)
+            latents=x_padded
 
+            htcore.mark_step()            
+            image = self.vae.decode(latents, return_dict=False)[0][:, :, 0]
+            htcore.mark_step()
+            
+            image = image[:,:,:h*down_sample_scales,:w*down_sample_scales]
+            
+            image = self.image_processor.postprocess(image, output_type=output_type)        
         hb_profiler.stop()
         
         # Offload all models
