@@ -25,22 +25,6 @@ from optimum.habana.transformers.gaudi_configuration import GaudiConfig
 from optimum.habana.diffusers.models.unet_2d_condition import set_default_attn_processor_hpu
 
 
-EXAMPLE_DOC_STRING = """
-    Examples:
-        ```py
-        >>> import torch
-        >>> from diffusers import StableDiffusionXLPipeline
-
-        >>> pipe = StableDiffusionXLPipeline.from_pretrained(
-        ...     "stabilityai/stable-diffusion-xl-base-0.9", torch_dtype=torch.float16
-        ... )
-        >>> pipe = pipe.to("cuda")
-
-        >>> prompt = "a photo of an astronaut riding a horse on mars"
-        >>> image = pipe(prompt).images[0]
-        ```
-"""
-
 def _pad_gaudi(
         self,
         encoded_inputs: Union[Dict[str, EncodedInput], BatchEncoding],
@@ -291,7 +275,6 @@ class GaudiStableDiffusionKolorsPipeline(GaudiDiffusionPipeline, StableDiffusion
         self.profiler = setup_profile(5)
 
     @torch.no_grad()
-    @replace_example_docstring(EXAMPLE_DOC_STRING)
     def __call__(
         self,
         prompt: Union[str, List[str]] = None,
