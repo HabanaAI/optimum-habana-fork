@@ -221,17 +221,12 @@ def forward_gaudi(self, query_layer, key_layer, value_layer, attention_mask):
 
     return context_layer
 
-
-
 from kolors.models import modeling_chatglm
 setattr(modeling_chatglm, "apply_rotary_pos_emb", apply_rotary_pos_emb_gaudi)
 setattr(modeling_chatglm.CoreAttention, "forward", forward_gaudi)
 setattr(ChatGLMTokenizer, "_pad", _pad_gaudi)
 
 from kolors.models.modeling_chatglm import ChatGLMModel
-
-
-
 
 
 def setup_profile(steps):

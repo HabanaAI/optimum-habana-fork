@@ -1,4 +1,5 @@
 import os, torch
+import argparse
 
 from kolors.models.tokenization_chatglm import ChatGLMTokenizer
 from diffusers import UNet2DConditionModel, AutoencoderKL
@@ -8,7 +9,24 @@ from optimum.habana.transformers.gaudi_configuration import GaudiConfig
 
 from kolors.models.modeling_chatglm import ChatGLMModel
 
-def infer(prompt):
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--model_name_or_path",
+        default="Kolors",
+        type=str,
+        help="Path to pre-trained model",
+    )
+    parser.add_argument(
+        "--prompts",
+        type=str,
+        nargs="*",
+        default="An image of a squirrel in Picasso style",
+        help="The prompt or prompts to guide the image generation.",
+    )
+
+    args = parser.parse_args()
+
     gaudi_config_kwargs = {"use_fused_adam": True, "use_fused_clip_norm": True}
     gaudi_config_kwargs["use_torch_autocast"] = True
     gaudi_config = GaudiConfig(**gaudi_config_kwargs)
@@ -19,18 +37,16 @@ def infer(prompt):
     }
     kwargs["force_zeros_for_empty_prompt"]=False
 
-    ckpt_dir = f'/mnt/ceph1/libo/hf_models/Kolors'
+    ckpt_dir = args.model_name_or_path
+
+    tokenizer = ChatGLMTokenizer.from_pretrained(f'{ckpt_dir}/text_encoder')
+    scheduler = EulerDiscreteScheduler.from_pretrained(f"{ckpt_dir}/scheduler")
+
     text_encoder = ChatGLMModel.from_pretrained(
         f'{ckpt_dir}/text_encoder',
         torch_dtype=torch.bfloat16).to(torch.bfloat16)
-    print(f'baymax text_encoder dtype:{text_encoder.dtype}')
-
-    tokenizer = ChatGLMTokenizer.from_pretrained(f'{ckpt_dir}/text_encoder')
-    vae = AutoencoderKL.from_pretrained(f"{ckpt_dir}/vae", revision=None).bfloat16()
-    scheduler = EulerDiscreteScheduler.from_pretrained(f"{ckpt_dir}/scheduler")
-
-    #unet = UNet2DConditionModel.from_pretrained(f"{ckpt_dir}/unet", revision=None).bfloat16()
     unet = UNet2DConditionModel.from_pretrained(f"{ckpt_dir}/unet", revision=None).bfloat16()
+    vae = AutoencoderKL.from_pretrained(f"{ckpt_dir}/vae", revision=None).bfloat16()
 
     pipe = GaudiStableDiffusionKolorsPipeline(
             vae=vae,
@@ -40,13 +56,11 @@ def infer(prompt):
             scheduler=scheduler,
             **kwargs,)
     pipe = pipe.to("cuda")
-    #pipe.enable_model_cpu_offload()
-    torch.hpu.synchronize()
 
     warmup = 5
     for i in range(warmup):
         pipe(
-            prompt=prompt,
+            prompt=args.prompts,
             height=1024,
             width=1024,
             num_inference_steps=10,
@@ -56,7 +70,7 @@ def infer(prompt):
     torch.hpu.synchronize()
 
     image = pipe(
-        prompt=prompt,
+        prompt=args.prompts,
         height=1024,
         width=1024,
         num_inference_steps=50,
@@ -69,6 +83,5 @@ def infer(prompt):
 
 
 if __name__ == '__main__':
-    import fire
-    fire.Fire(infer)
+    main()
 
