@@ -1,0 +1,74 @@
+import os, torch
+
+from kolors.models.tokenization_chatglm import ChatGLMTokenizer
+from diffusers import UNet2DConditionModel, AutoencoderKL
+from diffusers import EulerDiscreteScheduler
+from optimum.habana.diffusers import GaudiStableDiffusionKolorsPipeline
+from optimum.habana.transformers.gaudi_configuration import GaudiConfig
+
+from kolors.models.modeling_chatglm import ChatGLMModel
+
+def infer(prompt):
+    gaudi_config_kwargs = {"use_fused_adam": True, "use_fused_clip_norm": True}
+    gaudi_config_kwargs["use_torch_autocast"] = True
+    gaudi_config = GaudiConfig(**gaudi_config_kwargs)
+    kwargs = {
+        "use_habana": True,
+        "use_hpu_graphs": True,
+        "gaudi_config": gaudi_config,
+    }
+    kwargs["force_zeros_for_empty_prompt"]=False
+
+    ckpt_dir = f'/mnt/ceph1/libo/hf_models/Kolors'
+    text_encoder = ChatGLMModel.from_pretrained(
+        f'{ckpt_dir}/text_encoder',
+        torch_dtype=torch.bfloat16).to(torch.bfloat16)
+    print(f'baymax text_encoder dtype:{text_encoder.dtype}')
+
+    tokenizer = ChatGLMTokenizer.from_pretrained(f'{ckpt_dir}/text_encoder')
+    vae = AutoencoderKL.from_pretrained(f"{ckpt_dir}/vae", revision=None).bfloat16()
+    scheduler = EulerDiscreteScheduler.from_pretrained(f"{ckpt_dir}/scheduler")
+
+    #unet = UNet2DConditionModel.from_pretrained(f"{ckpt_dir}/unet", revision=None).bfloat16()
+    unet = UNet2DConditionModel.from_pretrained(f"{ckpt_dir}/unet", revision=None).bfloat16()
+
+    pipe = GaudiStableDiffusionKolorsPipeline(
+            vae=vae,
+            text_encoder=text_encoder,
+            tokenizer=tokenizer,
+            unet=unet,
+            scheduler=scheduler,
+            **kwargs,)
+    pipe = pipe.to("cuda")
+    #pipe.enable_model_cpu_offload()
+    torch.hpu.synchronize()
+
+    warmup = 5
+    for i in range(warmup):
+        pipe(
+            prompt=prompt,
+            height=1024,
+            width=1024,
+            num_inference_steps=10,
+            guidance_scale=5.0,
+            num_images_per_prompt=1,
+            generator= torch.Generator(pipe.device).manual_seed(878))
+    torch.hpu.synchronize()
+
+    image = pipe(
+        prompt=prompt,
+        height=1024,
+        width=1024,
+        num_inference_steps=50,
+        guidance_scale=5.0,
+        num_images_per_prompt=1,
+        is_profiler = False,
+        generator= torch.Generator(pipe.device).manual_seed(5554)).images[0]
+
+    image.save(f'piaocong.jpg')
+
+
+if __name__ == '__main__':
+    import fire
+    fire.Fire(infer)
+

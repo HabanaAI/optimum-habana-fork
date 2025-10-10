@@ -1,9 +1,10 @@
 import os, torch
 import time as tm_perf
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from transformers.utils import logging, PaddingStrategy
+from transformers.tokenization_utils_base import EncodedInput, BatchEncoding
 # from PIL import Image
 from kolors.pipelines.pipeline_stable_diffusion_xl_chatglm_256 import StableDiffusionXLPipeline
-from kolors.models.modeling_chatglm import ChatGLMModel
 from kolors.models.tokenization_chatglm import ChatGLMTokenizer
 from diffusers import UNet2DConditionModel, AutoencoderKL
 from diffusers import EulerDiscreteScheduler
@@ -17,14 +18,12 @@ from diffusers.utils import (
 
 import habana_frameworks.torch as ht
 import habana_frameworks.torch.core as htcore
-#from optimum.habana.transformers.modeling_utils import adapt_transformers_to_gaudi
 from diffusers.pipelines.stable_diffusion_xl import StableDiffusionXLPipelineOutput
 import habana_frameworks.torch.gpu_migration
 from optimum.habana.diffusers.pipelines.pipeline_utils import GaudiDiffusionPipeline
 from optimum.habana.transformers.gaudi_configuration import GaudiConfig
 from optimum.habana.diffusers.models.unet_2d_condition import set_default_attn_processor_hpu
 
-root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 EXAMPLE_DOC_STRING = """
     Examples:
@@ -41,6 +40,200 @@ EXAMPLE_DOC_STRING = """
         >>> image = pipe(prompt).images[0]
         ```
 """
+
+def _pad_gaudi(
+        self,
+        encoded_inputs: Union[Dict[str, EncodedInput], BatchEncoding],
+        max_length: Optional[int] = None,
+        padding_strategy: PaddingStrategy = PaddingStrategy.DO_NOT_PAD,
+        pad_to_multiple_of: Optional[int] = None,
+        return_attention_mask: Optional[bool] = None,
+        padding_side: Optional[str] = "left",
+) -> dict:
+    """
+    Pad encoded inputs (on left/right and up to predefined length or max length in the batch)
+
+    Args:
+        encoded_inputs:
+            Dictionary of tokenized inputs (`List[int]`) or batch of tokenized inputs (`List[List[int]]`).
+        max_length: maximum length of the returned list and optionally padding length (see below).
+            Will truncate by taking into account the special tokens.
+        padding_strategy: PaddingStrategy to use for padding.
+
+            - PaddingStrategy.LONGEST Pad to the longest sequence in the batch
+            - PaddingStrategy.MAX_LENGTH: Pad to the max length (default)
+            - PaddingStrategy.DO_NOT_PAD: Do not pad
+            The tokenizer padding sides are defined in self.padding_side:
+
+                - 'left': pads on the left of the sequences
+                - 'right': pads on the right of the sequences
+        pad_to_multiple_of: (optional) Integer if set will pad the sequence to a multiple of the provided value.
+            This is especially useful to enable the use of Tensor Core on NVIDIA hardware with compute capability
+            `>= 7.5` (Volta).
+        return_attention_mask:
+            (optional) Set to False to avoid returning attention mask (default: set to model specifics)
+    """
+    # Load from model defaults
+    assert self.padding_side == "left"
+
+    required_input = encoded_inputs[self.model_input_names[0]]
+    seq_length = len(required_input)
+
+    if padding_strategy == PaddingStrategy.LONGEST:
+        max_length = len(required_input)
+
+    if max_length is not None and pad_to_multiple_of is not None and (max_length % pad_to_multiple_of != 0):
+        max_length = ((max_length // pad_to_multiple_of) + 1) * pad_to_multiple_of
+
+    needs_to_be_padded = padding_strategy != PaddingStrategy.DO_NOT_PAD and len(required_input) != max_length
+
+    # Initialize attention mask if not present.
+    if "attention_mask" not in encoded_inputs:
+        encoded_inputs["attention_mask"] = [1] * seq_length
+
+    if "position_ids" not in encoded_inputs:
+        encoded_inputs["position_ids"] = list(range(seq_length))
+
+    if needs_to_be_padded:
+        difference = max_length - len(required_input)
+
+        if "attention_mask" in encoded_inputs:
+            encoded_inputs["attention_mask"] = [0] * difference + encoded_inputs["attention_mask"]
+        if "position_ids" in encoded_inputs:
+            encoded_inputs["position_ids"] = [0] * difference + encoded_inputs["position_ids"]
+        encoded_inputs[self.model_input_names[0]] = [self.pad_token_id] * difference + required_input
+
+    return encoded_inputs
+
+
+def apply_rotary_pos_emb_gaudi(x: torch.Tensor, rope_cache: torch.Tensor) -> torch.Tensor:
+    # x: [sq, b, np, hn]
+    sq, b, np, hn = x.size(0), x.size(1), x.size(2), x.size(3)
+    rot_dim = rope_cache.shape[-2] * 2
+    x, x_pass = x[..., :rot_dim], x[..., rot_dim:]
+    # truncate to support variable sizes
+    rope_cache = rope_cache[:sq]
+    xshaped = x.reshape(sq, -1, np, rot_dim // 2, 2)
+    rope_cache = rope_cache.view(sq, -1, 1, xshaped.size(3), 2)
+    x_out2 = torch.stack(
+        [
+            xshaped[..., 0] * rope_cache[..., 0] - xshaped[..., 1] * rope_cache[..., 1],
+            xshaped[..., 1] * rope_cache[..., 0] + xshaped[..., 0] * rope_cache[..., 1],
+        ],
+        -1,
+    )
+    x_out2 = x_out2.flatten(3)
+    return torch.cat((x_out2, x_pass), dim=-1)
+
+
+def forward_gaudi(self, query_layer, key_layer, value_layer, attention_mask):
+    pytorch_major_version = int(torch.__version__.split('.')[0])
+    if pytorch_major_version >= 2:
+        query_layer, key_layer, value_layer = [k.permute(1, 2, 0, 3) for k in [query_layer, key_layer, value_layer]]
+        if attention_mask is None and query_layer.shape[2] == key_layer.shape[2]:
+            context_layer = torch.nn.functional.scaled_dot_product_attention(query_layer, key_layer, value_layer,
+                                                                             is_causal=True)
+        else:
+            if attention_mask is not None:
+                attention_mask = ~attention_mask
+            #context_layer = torch.nn.functional.scaled_dot_product_attention(query_layer, key_layer, value_layer,
+            #                                                                 attention_mask)
+            fsdpa_mode="None"
+            from habana_frameworks.torch.hpex.kernels import FusedSDPA
+            context_layer = FusedSDPA.apply(query_layer, key_layer, value_layer, attention_mask, 0., False, None, fsdpa_mode)
+
+        context_layer = context_layer.permute(2, 0, 1, 3)
+        new_context_layer_shape = context_layer.size()[:-2] + (self.hidden_size_per_partition,)
+        context_layer = context_layer.reshape(*new_context_layer_shape)
+    else:
+        # Raw attention scores
+
+        # [b, np, sq, sk]
+        output_size = (query_layer.size(1), query_layer.size(2), query_layer.size(0), key_layer.size(0))
+
+        # [sq, b, np, hn] -> [sq, b * np, hn]
+        query_layer = query_layer.view(output_size[2], output_size[0] * output_size[1], -1)
+        # [sk, b, np, hn] -> [sk, b * np, hn]
+        key_layer = key_layer.view(output_size[3], output_size[0] * output_size[1], -1)
+
+        # preallocting input tensor: [b * np, sq, sk]
+        matmul_input_buffer = torch.empty(
+            output_size[0] * output_size[1], output_size[2], output_size[3], dtype=query_layer.dtype,
+            device=query_layer.device
+        )
+
+        # Raw attention scores. [b * np, sq, sk]
+        matmul_result = torch.baddbmm(
+            matmul_input_buffer,
+            query_layer.transpose(0, 1),  # [b * np, sq, hn]
+            key_layer.transpose(0, 1).transpose(1, 2),  # [b * np, hn, sk]
+            beta=0.0,
+            alpha=(1.0 / self.norm_factor),
+        )
+
+        # change view to [b, np, sq, sk]
+        attention_scores = matmul_result.view(*output_size)
+
+        # ===========================
+        # Attention probs and dropout
+        # ===========================
+
+        # attention scores and attention mask [b, np, sq, sk]
+        if self.attention_softmax_in_fp32:
+            attention_scores = attention_scores.float()
+        if self.coeff is not None:
+            attention_scores = attention_scores * self.coeff
+        if attention_mask is None and attention_scores.shape[2] == attention_scores.shape[3]:
+            attention_mask = torch.ones(output_size[0], 1, output_size[2], output_size[3],
+                                        device=attention_scores.device, dtype=torch.bool)
+            attention_mask.tril_()
+            attention_mask = ~attention_mask
+        if attention_mask is not None:
+            attention_scores = attention_scores.masked_fill(attention_mask, float("-inf"))
+        attention_probs = F.softmax(attention_scores, dim=-1)
+        attention_probs = attention_probs.type_as(value_layer)
+
+        # This is actually dropping out entire tokens to attend to, which might
+        # seem a bit unusual, but is taken from the original Transformer paper.
+        attention_probs = self.attention_dropout(attention_probs)
+        # =========================
+        # Context layer. [sq, b, hp]
+        # =========================
+
+        # value_layer -> context layer.
+        # [sk, b, np, hn] --> [b, np, sq, hn]
+
+        # context layer shape: [b, np, sq, hn]
+        output_size = (value_layer.size(1), value_layer.size(2), query_layer.size(0), value_layer.size(3))
+        # change view [sk, b * np, hn]
+        value_layer = value_layer.view(value_layer.size(0), output_size[0] * output_size[1], -1)
+        # change view [b * np, sq, sk]
+        attention_probs = attention_probs.view(output_size[0] * output_size[1], output_size[2], -1)
+        # matmul: [b * np, sq, hn]
+        context_layer = torch.bmm(attention_probs, value_layer.transpose(0, 1))
+        # change view [b, np, sq, hn]
+        context_layer = context_layer.view(*output_size)
+        # [b, np, sq, hn] --> [sq, b, np, hn]
+        context_layer = context_layer.permute(2, 0, 1, 3).contiguous()
+        # [sq, b, np, hn] --> [sq, b, hp]
+        new_context_layer_shape = context_layer.size()[:-2] + (self.hidden_size_per_partition,)
+        context_layer = context_layer.view(*new_context_layer_shape)
+
+    return context_layer
+
+
+
+from kolors.models import modeling_chatglm
+setattr(modeling_chatglm, "apply_rotary_pos_emb", apply_rotary_pos_emb_gaudi)
+setattr(modeling_chatglm.CoreAttention, "forward", forward_gaudi)
+setattr(ChatGLMTokenizer, "_pad", _pad_gaudi)
+
+from kolors.models.modeling_chatglm import ChatGLMModel
+
+
+
+
+
 def setup_profile(steps):
     activities = [torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.HPU]
     profiler=torch.profiler.profile(
@@ -65,7 +258,7 @@ class time_box_t():
         self.t0 = t1
         print(f'{desc} duration:{duration:.3f}s')
 
-class GaudiStableDiffusionXLPipeline(GaudiDiffusionPipeline, StableDiffusionXLPipeline):
+class GaudiStableDiffusionKolorsPipeline(GaudiDiffusionPipeline, StableDiffusionXLPipeline):
     def __init__(
         self,
         vae: AutoencoderKL,
@@ -454,70 +647,3 @@ class GaudiStableDiffusionXLPipeline(GaudiDiffusionPipeline, StableDiffusionXLPi
         return cached.graph_outputs
 
 
-def infer(prompt):
-    gaudi_config_kwargs = {"use_fused_adam": True, "use_fused_clip_norm": True}
-    gaudi_config_kwargs["use_torch_autocast"] = True
-    gaudi_config = GaudiConfig(**gaudi_config_kwargs)
-    kwargs = {
-        "use_habana": True,
-        "use_hpu_graphs": True,
-        "gaudi_config": gaudi_config,
-    }
-    kwargs["force_zeros_for_empty_prompt"]=False
-
-    #ckpt_dir = f'{root_dir}/weights/Kolors'
-    ckpt_dir = f'/mnt/ceph1/libo/hf_models/Kolors'
-    text_encoder = ChatGLMModel.from_pretrained(
-        f'{ckpt_dir}/text_encoder',
-        torch_dtype=torch.bfloat16).to(torch.bfloat16)
-    print(f'baymax text_encoder dtype:{text_encoder.dtype}')
-
-    tokenizer = ChatGLMTokenizer.from_pretrained(f'{ckpt_dir}/text_encoder')
-    vae = AutoencoderKL.from_pretrained(f"{ckpt_dir}/vae", revision=None).bfloat16()
-    scheduler = EulerDiscreteScheduler.from_pretrained(f"{ckpt_dir}/scheduler")
-
-    #unet = UNet2DConditionModel.from_pretrained(f"{ckpt_dir}/unet", revision=None).bfloat16()
-    unet = UNet2DConditionModel.from_pretrained(f"{ckpt_dir}/unet", revision=None).bfloat16()
-
-    pipe = GaudiStableDiffusionXLPipeline(
-            vae=vae,
-            text_encoder=text_encoder,
-            tokenizer=tokenizer,
-            unet=unet,
-            scheduler=scheduler,
-            **kwargs,)
-    pipe = pipe.to("cuda")
-    #pipe.enable_model_cpu_offload()
-    torch.hpu.synchronize()
-
-    warmup = 5
-    for i in range(warmup):
-        image = pipe(
-            prompt=prompt,
-            height=1024,
-            width=1024,
-            num_inference_steps=10,
-            guidance_scale=5.0,
-            num_images_per_prompt=1,
-            generator= torch.Generator(pipe.device).manual_seed(5544)).images[0]
-    torch.hpu.synchronize()
-
-
-    image = pipe(
-        prompt=prompt,
-        height=1024,
-        width=1024,
-        num_inference_steps=50,
-        guidance_scale=5.0,
-        num_images_per_prompt=1,
-        is_profiler = False,
-        generator= torch.Generator(pipe.device).manual_seed(5544)).images[0]
-
-
-    #image.save(f'{root_dir}/scripts/outputs/cat_wear_hat.jpg')
-    image.save(f'{root_dir}/scripts/outputs/piaocong.jpg')
-
-
-if __name__ == '__main__':
-    import fire
-    fire.Fire(infer)
