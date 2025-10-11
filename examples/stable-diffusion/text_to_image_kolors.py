@@ -63,11 +63,12 @@ def main():
             prompt=args.prompts,
             height=1024,
             width=1024,
-            num_inference_steps=10,
+            num_inference_steps=3,
             guidance_scale=5.0,
             num_images_per_prompt=1,
             generator= torch.Generator(pipe.device).manual_seed(878))
     torch.hpu.synchronize()
+    #exit()
 
     image = pipe(
         prompt=args.prompts,

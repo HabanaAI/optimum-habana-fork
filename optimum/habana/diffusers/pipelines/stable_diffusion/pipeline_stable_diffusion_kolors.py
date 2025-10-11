@@ -25,6 +25,30 @@ from optimum.habana.transformers.gaudi_configuration import GaudiConfig
 from optimum.habana.diffusers.models.unet_2d_condition import set_default_attn_processor_hpu
 
 
+def setup_profile(steps):
+    activities = [torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.HPU]
+    profiler=torch.profiler.profile(
+       schedule=torch.profiler.schedule(wait=0, warmup=1, active=steps, repeat=1),
+       activities=activities,
+       with_stack=True,
+        on_trace_ready=torch.profiler.tensorboard_trace_handler("/mnt/ceph1/libo/kolors/profile/", use_gzip=True))
+    return profiler
+
+
+class time_box_t():
+    def __init__(self):
+        self.t0=None
+
+    def start(self):
+        self.t0 = tm_perf.perf_counter()
+
+    def show_time(self, desc):
+        torch.hpu.synchronize()
+        t1 = tm_perf.perf_counter()
+        duration = t1-self.t0
+        self.t0 = t1
+        print(f'{desc} duration:{duration:.3f}s')
+
 def _pad_gaudi(
         self,
         encoded_inputs: Union[Dict[str, EncodedInput], BatchEncoding],
@@ -212,30 +236,6 @@ setattr(ChatGLMTokenizer, "_pad", _pad_gaudi)
 
 from kolors.models.modeling_chatglm import ChatGLMModel
 
-
-def setup_profile(steps):
-    activities = [torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.HPU]
-    profiler=torch.profiler.profile(
-       schedule=torch.profiler.schedule(wait=0, warmup=1, active=steps, repeat=1),
-       activities=activities,
-       with_stack=True,
-        on_trace_ready=torch.profiler.tensorboard_trace_handler("/mnt/ceph1/libo/kolors/profile/", use_gzip=True))
-    return profiler
-
-
-class time_box_t():
-    def __init__(self):
-        self.t0=None
-
-    def start(self):
-        self.t0 = tm_perf.perf_counter()
-
-    def show_time(self, desc):
-        torch.hpu.synchronize()
-        t1 = tm_perf.perf_counter()
-        duration = t1-self.t0
-        self.t0 = t1
-        print(f'{desc} duration:{duration:.3f}s')
 
 class GaudiStableDiffusionKolorsPipeline(GaudiDiffusionPipeline, StableDiffusionXLPipeline):
     def __init__(
@@ -497,6 +497,10 @@ class GaudiStableDiffusionKolorsPipeline(GaudiDiffusionPipeline, StableDiffusion
         time_box.show_time(f'prepare latents')
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
+                v = torch.zeros(1, device='hpu')
+                v[0] = t
+                t =v
+
                 # expand the latents if we are doing classifier free guidance
                 latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
 
@@ -515,7 +519,7 @@ class GaudiStableDiffusionKolorsPipeline(GaudiDiffusionPipeline, StableDiffusion
                 added_cond_kwargs = {"text_embeds": add_text_embeds, "time_ids": add_time_ids}
                 noise_pred = self.unet_hpu(
                     latent_model_input,
-                    torch.tensor(t, device=latent_model_input.device),
+                    t,
                     encoder_hidden_states=prompt_embeds,
                     cross_attention_kwargs=cross_attention_kwargs,
                     added_cond_kwargs=added_cond_kwargs,
