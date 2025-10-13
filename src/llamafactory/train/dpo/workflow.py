@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Optional
 
 from ...data import PairwiseDataCollatorWithPadding, get_dataset, get_template_and_fix_tokenizer
 from ...extras.constants import IGNORE_INDEX
-from ...extras.misc import calculate_tps
+from ...extras.misc import calculate_tps, is_torch_hpu_available
 from ...extras.ploting import plot_loss
 from ...hparams import ModelArguments
 from ...model import load_model, load_tokenizer
@@ -45,12 +45,20 @@ def run_dpo(
     template = get_template_and_fix_tokenizer(tokenizer, data_args)
     dataset_module = get_dataset(template, model_args, data_args, training_args, stage="rm", **tokenizer_module)
     model = load_model(tokenizer, model_args, finetuning_args, training_args.do_train)
+    padding = True  # defaults to True
+    max_length = None  # defaults to None
+    if is_torch_hpu_available():
+        if not data_args.streaming:
+            padding = "max_length"
+            max_length = training_args.generation_max_length or data_args.cutoff_len
 
     data_collator = PairwiseDataCollatorWithPadding(
         template=template,
         model=model,
         pad_to_multiple_of=8,
         label_pad_token_id=IGNORE_INDEX if data_args.ignore_pad_token_for_loss else tokenizer.pad_token_id,
+        padding=padding,
+        max_length=max_length,
         **tokenizer_module,
     )
 

@@ -166,10 +166,13 @@ def patch_model(
     ):
         gen_config.do_sample = True
 
-    if is_torch_hpu_available() and getattr(model.config, "model_type", None) in ["llama", "qwen2"]:
+    if is_torch_hpu_available() and getattr(model.config, "model_type", None) in ["llama",
+                                                                                  "qwen2",
+                                                                                  "qwen2_moe",
+                                                                                  "qwen3",
+                                                                                  "qwen3_moe"]:
         if model_args.attn_softmax_bf16:
             gen_config.attn_softmax_bf16 = True
-
         if model_args.use_flash_attention:
             gen_config.use_flash_attention = True
             gen_config.flash_attention_recompute = model_args.flash_attention_recompute
