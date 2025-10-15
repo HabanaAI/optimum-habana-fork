@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import inspect
+import functools
 from typing import Any, Callable, Dict, List, Optional, Union
 import types
 import numpy as np
@@ -61,6 +62,126 @@ EXAMPLE_DOC_STRING = """
         >>> image.save("qwenimage.png")
         ```
 """
+class GaudiQwenEmbedRope(torch.nn.Module):
+    def __init__(self, theta: int, axes_dim: List[int], scale_rope=False):
+        super().__init__()
+        self.theta = theta
+        self.axes_dim = axes_dim
+        pos_index = torch.arange(4096)
+        neg_index = torch.arange(4096).flip(0) * -1 - 1
+
+        # Get cos/sin components for positive indices
+        pos_cos_0, pos_sin_0 = self.rope_params(pos_index, self.axes_dim[0], self.theta)
+        pos_cos_1, pos_sin_1 = self.rope_params(pos_index, self.axes_dim[1], self.theta)
+        pos_cos_2, pos_sin_2 = self.rope_params(pos_index, self.axes_dim[2], self.theta)
+
+        # Get cos/sin components for negative indices
+        neg_cos_0, neg_sin_0 = self.rope_params(neg_index, self.axes_dim[0], self.theta)
+        neg_cos_1, neg_sin_1 = self.rope_params(neg_index, self.axes_dim[1], self.theta)
+        neg_cos_2, neg_sin_2 = self.rope_params(neg_index, self.axes_dim[2], self.theta)
+
+        # Concatenate cos components
+        self.pos_freqs_cos = torch.cat([pos_cos_0, pos_cos_1, pos_cos_2], dim=1)
+        self.neg_freqs_cos = torch.cat([neg_cos_0, neg_cos_1, neg_cos_2], dim=1)
+
+        # Concatenate sin components
+        self.pos_freqs_sin = torch.cat([pos_sin_0, pos_sin_1, pos_sin_2], dim=1)
+        self.neg_freqs_sin = torch.cat([neg_sin_0, neg_sin_1, neg_sin_2], dim=1)
+
+        self.rope_cache = {}
+        self.scale_rope = scale_rope
+
+    def rope_params(self, index, dim, theta=10000):
+        """
+        Args:
+            index: [0, 1, 2, 3] 1D Tensor representing the position index of the token
+        """
+        assert dim % 2 == 0
+        freqs = torch.outer(index, 1.0 / torch.pow(theta, torch.arange(0, dim, 2).to(torch.float32).div(dim)))
+        cos_freqs = torch.cos(freqs)
+        sin_freqs = torch.sin(freqs)
+        return cos_freqs, sin_freqs
+
+    def forward(self, video_fhw, txt_seq_lens, device):
+        """
+        Args: video_fhw: [frame, height, width] a list of 3 integers representing the shape of the video Args:
+        txt_length: [bs] a list of 1 integers representing the length of the text
+        """
+        if self.pos_freqs_cos.device != device:
+            self.pos_freqs_cos = self.pos_freqs_cos.to(device)
+            self.neg_freqs_cos = self.neg_freqs_cos.to(device)
+            self.pos_freqs_sin = self.pos_freqs_sin.to(device)
+            self.neg_freqs_sin = self.neg_freqs_sin.to(device)
+
+        if isinstance(video_fhw, list):
+            video_fhw = video_fhw[0]
+        if not isinstance(video_fhw, list):
+            video_fhw = [video_fhw]
+
+        vid_freqs = []
+        max_vid_index = 0
+        for idx, fhw in enumerate(video_fhw):
+            frame, height, width = fhw
+            rope_key = f"{idx}_{height}_{width}"
+
+            if not torch.compiler.is_compiling():
+                if rope_key not in self.rope_cache:
+                    self.rope_cache[rope_key] = self._compute_video_freqs(frame, height, width, idx)
+                video_freq = self.rope_cache[rope_key]
+            else:
+                video_freq = self._compute_video_freqs(frame, height, width, idx)
+            video_freq_cos, video_freq_sin = video_freq
+            video_freq_cos = video_freq_cos.to(device)
+            video_freq_sin = video_freq_sin.to(device)
+            vid_freqs.append((video_freq_cos, video_freq_sin))
+
+            if self.scale_rope:
+                max_vid_index = max(height // 2, width // 2, max_vid_index)
+            else:
+                max_vid_index = max(height, width, max_vid_index)
+
+        max_len = max(txt_seq_lens)
+        txt_freqs_cos = self.pos_freqs_cos[max_vid_index : max_vid_index + max_len, ...]
+        txt_freqs_sin = self.pos_freqs_sin[max_vid_index : max_vid_index + max_len, ...]
+
+        # Concatenate video frequencies
+        vid_freqs_cos = torch.cat([vf[0] for vf in vid_freqs], dim=0)
+        vid_freqs_sin = torch.cat([vf[1] for vf in vid_freqs], dim=0)
+
+        return (vid_freqs_cos, vid_freqs_sin), (txt_freqs_cos, txt_freqs_sin)
+
+    @functools.lru_cache(maxsize=None)
+    def _compute_video_freqs(self, frame, height, width, idx=0):
+        seq_lens = frame * height * width
+        freqs_pos_cos = self.pos_freqs_cos.split([x // 2 for x in self.axes_dim], dim=1)
+        freqs_neg_cos = self.neg_freqs_cos.split([x // 2 for x in self.axes_dim], dim=1)
+        freqs_pos_sin = self.pos_freqs_sin.split([x // 2 for x in self.axes_dim], dim=1)
+        freqs_neg_sin = self.neg_freqs_sin.split([x // 2 for x in self.axes_dim], dim=1)
+
+        freqs_frame_cos = freqs_pos_cos[0][idx : idx + frame].view(frame, 1, 1, -1).expand(frame, height, width, -1)
+        freqs_frame_sin = freqs_pos_sin[0][idx : idx + frame].view(frame, 1, 1, -1).expand(frame, height, width, -1)
+
+        if self.scale_rope:
+            freqs_height_cos = torch.cat([freqs_neg_cos[1][-(height - height // 2) :], freqs_pos_cos[1][: height // 2]], dim=0)
+            freqs_height_cos = freqs_height_cos.view(1, height, 1, -1).expand(frame, height, width, -1)
+            freqs_width_cos = torch.cat([freqs_neg_cos[2][-(width - width // 2) :], freqs_pos_cos[2][: width // 2]], dim=0)
+            freqs_width_cos = freqs_width_cos.view(1, 1, width, -1).expand(frame, height, width, -1)
+
+            freqs_height_sin = torch.cat([freqs_neg_sin[1][-(height - height // 2) :], freqs_pos_sin[1][: height // 2]], dim=0)
+            freqs_height_sin = freqs_height_sin.view(1, height, 1, -1).expand(frame, height, width, -1)
+            freqs_width_sin = torch.cat([freqs_neg_sin[2][-(width - width // 2) :], freqs_pos_sin[2][: width // 2]], dim=0)
+            freqs_width_sin = freqs_width_sin.view(1, 1, width, -1).expand(frame, height, width, -1)
+        else:
+            freqs_height_cos = freqs_pos_cos[1][:height].view(1, height, 1, -1).expand(frame, height, width, -1)
+            freqs_width_cos = freqs_pos_cos[2][:width].view(1, 1, width, -1).expand(frame, height, width, -1)
+            freqs_height_sin = freqs_pos_sin[1][:height].view(1, height, 1, -1).expand(frame, height, width, -1)
+            freqs_width_sin = freqs_pos_sin[2][:width].view(1, 1, width, -1).expand(frame, height, width, -1)
+
+        freqs_cos = torch.cat([freqs_frame_cos, freqs_height_cos, freqs_width_cos], dim=-1).reshape(seq_lens, -1)
+        freqs_sin = torch.cat([freqs_frame_sin, freqs_height_sin, freqs_width_sin], dim=-1).reshape(seq_lens, -1)
+
+        return freqs_cos.clone().contiguous(), freqs_sin.clone().contiguous()
+
 
 class GaudiQwenImagePipeline(GaudiDiffusionPipeline, QwenImagePipeline):
     r"""
@@ -109,7 +230,9 @@ class GaudiQwenImagePipeline(GaudiDiffusionPipeline, QwenImagePipeline):
         self.transformer.forward = types.MethodType(QwenImageTransformer2DModelGaudi, self.transformer)
         for block in self.transformer.transformer_blocks:
             block.attn.processor = GaudiQwenDoubleStreamAttnProcessor2_0(is_training)
-
+        config = self.transformer.config
+        self.transformer.pos_embed = GaudiQwenEmbedRope(theta=10000, axes_dim=list(config['axes_dims_rope']), scale_rope=True)
+        
         if use_hpu_graphs:
             from habana_frameworks.torch.hpu import wrap_in_hpu_graph
             #transformer = wrap_in_hpu_graph(transformer)

@@ -21,9 +21,11 @@ from diffusers.models.modeling_outputs import Transformer2DModelOutput
 import habana_frameworks.torch.core as htcore
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
-def apply_rotary_emb_qwen_real(
+def apply_rotary_emb_qwen(
     x: torch.Tensor,
     freqs_cis: Union[torch.Tensor, Tuple[torch.Tensor]],
+    use_real: bool = True,
+    use_real_unbind_dim: int = -1,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Apply rotary embeddings to input tensors using the given frequency tensor. This function applies rotary embeddings
@@ -39,27 +41,32 @@ def apply_rotary_emb_qwen_real(
     Returns:
         Tuple[torch.Tensor, torch.Tensor]: Tuple of modified query tensor and key tensor with rotary embeddings.
     """
-    #####original
-    # x_rotated = torch.view_as_complex(x.float().reshape(*x.shape[:-1], -1, 2))
-    # freqs_cis = freqs_cis.unsqueeze(1)
-    # x_out = torch.view_as_real(x_rotated * freqs_cis).flatten(3)
-    
-    #####to real calculation
-    x_ = x.reshape(*x.shape[:-1], -1, 2)
-    x_real = x_[..., 0]
-    x_imag = x_[..., 1]
+    if use_real:
+        cos, sin = freqs_cis  # [S, D]
+        cos = torch.repeat_interleave(cos.unsqueeze(1), 2, dim=2, output_size=128)
+        sin = torch.repeat_interleave(sin.unsqueeze(1), 2, dim=2, output_size=128)
+        cos, sin = cos.to(x.device), sin.to(x.device)
 
-    freqs_cis_real = freqs_cis.real.unsqueeze(1).to(x.device) 
-    freqs_cis_imag = freqs_cis.imag.unsqueeze(1).to(x.device) 
-    # freqs_cis_real = freqs_cis[0].unsqueeze(1).to(x.device) 
-    # freqs_cis_imag = freqs_cis[1].unsqueeze(1).to(x.device) 
+        if use_real_unbind_dim == -1:
+            # Used for flux, cogvideox, hunyuan-dit
+            x_real, x_imag = x.reshape(*x.shape[:-1], -1, 2).unbind(-1)  # [B, S, H, D//2]
+            x_rotated = torch.stack([-x_imag, x_real], dim=-1).flatten(3)
+        elif use_real_unbind_dim == -2:
+            # Used for Stable Audio, OmniGen, CogView4 and Cosmos
+            x_real, x_imag = x.reshape(*x.shape[:-1], 2, -1).unbind(-2)  # [B, S, H, D//2]
+            x_rotated = torch.cat([-x_imag, x_real], dim=-1)
+        else:
+            raise ValueError(f"`use_real_unbind_dim={use_real_unbind_dim}` but should be -1 or -2.")
 
-    real_part_product = x_real * freqs_cis_real - x_imag * freqs_cis_imag
-    imag_part_product = x_real * freqs_cis_imag + x_imag * freqs_cis_real
+        out = (x.float() * cos + x_rotated.float() * sin).to(x.dtype)
 
-    x_out = torch.stack((real_part_product, imag_part_product), dim=-1).flatten(3)  
-    
-    return x_out.type_as(x)
+        return out
+    else:
+        x_rotated = torch.view_as_complex(x.float().reshape(*x.shape[:-1], -1, 2))
+        freqs_cis = freqs_cis.unsqueeze(1)
+        x_out = torch.view_as_real(x_rotated * freqs_cis).flatten(3)
+
+        return x_out.type_as(x)
 
 def QwenImageTransformer2DModelGaudi(
         self,
@@ -108,8 +115,7 @@ def QwenImageTransformer2DModelGaudi(
         else self.time_text_embed(timestep, guidance, hidden_states)
     )
 
-    #image_rotary_emb = self.pos_embed(img_shapes, txt_seq_lens, device=hidden_states.device)
-    image_rotary_emb = self.pos_embed(img_shapes, txt_seq_lens, device="cpu")
+    image_rotary_emb = self.pos_embed(img_shapes, txt_seq_lens, device=hidden_states.device)
 
     for index_block, block in enumerate(self.transformer_blocks):
         if torch.is_grad_enabled() and self.gradient_checkpointing:
