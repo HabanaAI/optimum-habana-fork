@@ -241,6 +241,7 @@ class CustomDPOTrainer(DPOTrainer):
     ) -> tuple["torch.Tensor", dict[str, "torch.Tensor"]]:
         r"""Compute the DPO loss and other metrics for the given batch of inputs for train or test."""
         metrics = {}
+        reference_chosen_logps, reference_rejected_logps = self.compute_reference_log_probs(model, batch)
         (
             policy_chosen_logps,
             policy_rejected_logps,
@@ -249,7 +250,6 @@ class CustomDPOTrainer(DPOTrainer):
             policy_chosen_logps_avg,
         ) = self.concatenated_forward(model, batch)
 
-        reference_chosen_logps, reference_rejected_logps = self.compute_reference_log_probs(model, batch)
         losses, chosen_rewards, rejected_rewards = self.compute_preference_loss(
             policy_chosen_logps,
             policy_rejected_logps,
