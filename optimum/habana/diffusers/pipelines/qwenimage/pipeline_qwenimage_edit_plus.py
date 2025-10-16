@@ -38,6 +38,7 @@ from ...models.autoencoders.autoencoder_kl_qwenimage import QwenImageEncoder3dFo
 from ....transformers.gaudi_configuration import GaudiConfig
 import habana_frameworks.torch as ht
 import habana_frameworks.torch.core as htcore
+from .pipeline_qwenimage import GaudiQwenEmbedRope
         
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
@@ -123,7 +124,8 @@ class GaudiQwenImageEditPlusPipeline(GaudiDiffusionPipeline, QwenImageEditPlusPi
             block.attn.processor = GaudiQwenDoubleStreamAttnProcessor2_0(is_training)
         self.vae.decoder.forward = types.MethodType(QwenImageDecoder3dForwardGaudi, self.vae.decoder)
         self.vae.encoder.forward = types.MethodType(QwenImageEncoder3dForwardGaudi, self.vae.encoder)
-          
+        config = self.transformer.config
+        self.transformer.pos_embed = GaudiQwenEmbedRope(theta=10000, axes_dim=list(config['axes_dims_rope']), scale_rope=True)              
             
         if use_hpu_graphs:
             from habana_frameworks.torch.hpu import wrap_in_hpu_graph

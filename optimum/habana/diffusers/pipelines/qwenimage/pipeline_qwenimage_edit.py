@@ -33,6 +33,7 @@ from ...models.qwenimage_transformer import QwenImageTransformer2DModelGaudi
 from ....utils import HabanaProfile
 from ....transformers.modeling_utils import adapt_transformers_to_gaudi
 from ....transformers.models import GaudiQwen2_5_VLForConditionalGeneration,GaudiQwen2_5_VLModel
+from .pipeline_qwenimage import GaudiQwenEmbedRope
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
@@ -115,7 +116,8 @@ class GaudiQwenImageEditPipeline(GaudiDiffusionPipeline, QwenImageEditPipeline):
         self.transformer.forward = types.MethodType(QwenImageTransformer2DModelGaudi, self.transformer)
         for block in self.transformer.transformer_blocks:
             block.attn.processor = GaudiQwenDoubleStreamAttnProcessor2_0(is_training)
-          
+        config = self.transformer.config
+        self.transformer.pos_embed = GaudiQwenEmbedRope(theta=10000, axes_dim=list(config['axes_dims_rope']), scale_rope=True)          
             
         if use_hpu_graphs:
             from habana_frameworks.torch.hpu import wrap_in_hpu_graph
