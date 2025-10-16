@@ -53,42 +53,11 @@ Please refer to the Intel Gaudi AI Accelerator official [installation guide](htt
 
 ## Install the library and get example scripts
 
-### Option 1: Use the latest stable release
-
-To install the latest stable release of this package
-```bash
-pip install --upgrade-strategy eager optimum[habana]
-```
-
-The `--upgrade-strategy eager` option is needed to ensure `optimum-habana` is upgraded to the latest stable release.
-
 To use the example associated with the latest stable release, run:
 ```bash
-git clone https://github.com/huggingface/optimum-habana
-cd optimum-habana && git checkout v1.19.0
-```
-with `v1.19.0` being the latest Optimum for Intel Gaudi release version.
-
-### Option 2: Use the latest main branch under development
-
-Optimum for Intel Gaudi is a fast-moving project, and you may want to install it from source and get the latest scripts :
-
-```bash
-pip install git+https://github.com/huggingface/optimum-habana.git
-git clone https://github.com/huggingface/optimum-habana
-```
-
-### Option 3: Use the `transformers_future` branch to have the latest changes from Transformers
-
-The `transformers_future` branch is regularly updated with the latest changes from the main branches of Optimum for Intel Gaudi
-and Transformers. This enables you to try out new Transformers features that have not been merged into the main branch yet.
-
-> [!WARNING]
-> The `transformers_future` branch may have some regressions or bugs and may be less stable than the main branch.
-
-```bash
-pip install git+https://github.com/huggingface/optimum-habana.git@transformers_future
-git clone -b transformers_future https://github.com/huggingface/optimum-habana
+git clone github.com/HabanaAI/optimum-habana-fork.git -b aice/v1.22.0
+cd optimum-habana-fork && pip install -r requirements.txt
+pip install -e .
 ```
 
 ## Install Dependencies
