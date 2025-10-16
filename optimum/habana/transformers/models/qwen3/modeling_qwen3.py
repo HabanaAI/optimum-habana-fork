@@ -19,6 +19,7 @@
 from typing import Optional, Union
 
 import torch
+import math
 from transformers.cache_utils import Cache
 from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
 from transformers.modeling_outputs import (
@@ -966,7 +967,7 @@ class GaudiQwen3ForCausalLM(Qwen3ForCausalLM):
         )
 
         hidden_states = outputs.last_hidden_state
-        _, seq_len, _ = hidden_states.shape
+        bs, seq_len, hidden_dim = hidden_states.shape
         if seq_len > 1 and trim_logits and not self.training:
             if token_idx is not None:
                 hidden_states = hidden_states.index_select(1, token_idx - 1)
@@ -975,7 +976,20 @@ class GaudiQwen3ForCausalLM(Qwen3ForCausalLM):
 
         # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
         slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
-        logits = self.lm_head(hidden_states[:, slice_indices, :]).float()
+        batched_len = bs * seq_len
+        if self.training and batched_len > 16384:
+            hidden_states = hidden_states.reshape(-1, hidden_dim)
+            logits_list = []
+            seq_tiles = math.ceil(batched_len / 16384)
+            for i in range(seq_tiles):
+                s = i * 16384
+                e = (i + 1) * 16384 if i < seq_tiles - 1 else batched_len
+                logit_slice = self.lm_head(hidden_states[s:e, :]).float()
+                logits_list.append(logit_slice.unsqueeze(0))
+                htcore.mark_step()
+            logits = torch.cat(logits_list, dim=0)
+        else:
+            logits = self.lm_head(hidden_states[:, slice_indices, :]).float()
 
         loss = None
         if labels is not None:

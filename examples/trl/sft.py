@@ -134,7 +134,7 @@ if __name__ == "__main__":
             train_data = dataset["train"]
             valid_data = dataset["test"]
             logger.info(f"Size of the train set: {len(train_data)}. Size of the validation set: {len(valid_data)}")
-        if args.dataset_name == "lvwerra/stack-exchange-paired":
+        if args.dataset_name == "/data/stack-exchange-paired":
             chars_per_token = chars_token_ratio(train_data, tokenizer)
             logger.info(f"The character to token ratio of the dataset is: {chars_per_token:.2f}")
             formating_func = prepare_sample_text

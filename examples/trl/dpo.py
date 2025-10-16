@@ -92,6 +92,15 @@ class ScriptArguments:
     )
     deepspeed: Optional[str] = field(default=None, metadata={"help": "the deepspeed json config file"})
     num_workers: Optional[int] = field(default=None, metadata={"help": "the number of workers to map the data"})
+    use_flash_attention: Optional[bool] = field(
+        default=False, metadata={"help": "Whether to use Habana flash attention for fine-tuning."}
+    )
+    flash_attention_recompute: Optional[bool] = field(
+        default=False, metadata={"help": "Whether to enable recompute in Habana flash attention for fine-tuning."}
+    )
+    flash_attention_causal_mask: Optional[bool] = field(
+        default=False, metadata={"help": "Whether to enable causal mask in Habana flash attention for fine-tuning."}
+    )
 
 
 def get_stack_exchange_paired(
@@ -113,7 +122,7 @@ def get_stack_exchange_paired(
       "Question: " + <prompt> + "\n\nAnswer: "
     """
     dataset = load_dataset(
-        "lvwerra/stack-exchange-paired",
+        "/data/stack-exchange-paired",
         split="train",
         cache_dir=cache_dir,
         data_dir=data_dir,
@@ -203,8 +212,20 @@ if __name__ == "__main__":
         torch_dtype=torch.bfloat16,
     )
     model_ref.config.use_cache = False
+
+    if not script_args.use_flash_attention and (
+        script_args.flash_attention_recompute or script_args.flash_attention_recompute
+    ):
+        assert "Need to enable use_flash_attention"
+    model.generation_config.use_flash_attention = script_args.use_flash_attention
+    model.generation_config.flash_attention_recompute = script_args.flash_attention_recompute
+    model.generation_config.flash_attention_causal_mask = script_args.flash_attention_causal_mask
+
     tokenizer = AutoTokenizer.from_pretrained(script_args.tokenizer_name_or_path)
-    tokenizer.pad_token = tokenizer.eos_token
+    if model.config.model_type == "qwen3":
+        tokenizer.bos_token = tokenizer.pad_token
+    if model.config.model_type == "llama":
+        tokenizer.pad_token = tokenizer.eos_token
 
     # 3. Load the Stack-exchange paired dataset
     train_dataset = get_stack_exchange_paired(
