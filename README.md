@@ -64,7 +64,7 @@ pip install -e .
 
 To use DeepSpeed on HPUs, you also need to run the following command:
 ```bash
-pip install git+https://github.com/HabanaAI/DeepSpeed.git@1.22.0
+cd DeepSpeed && pip install -e .
 ```
 
 To install the requirements for every example:
