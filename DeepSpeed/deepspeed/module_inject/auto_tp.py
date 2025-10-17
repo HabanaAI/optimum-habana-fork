@@ -348,7 +348,8 @@ class AutoTP():
         mp_replace = ReplaceWithTensorSlicing(mp_group=self.mp_group)
         # For TP layer skip, e.g., MoE gate, deepseek low rank layer skip
         if "q_a_proj" in name or "kv_a_proj_with_mqa" in name or name == "block_sparse_moe.gate" or (
-            ('mlp.shared_expert_gate' == name or 'mlp.gate' == name) and 'qwen2_moe' in str(type(self.module))):
+            ('mlp.shared_expert_gate' == name or 'mlp.gate' == name) and ('qwen2_moe' in str(type(self.module)) or 
+            'qwen3_moe' in str(type(self.module)))):
             return child
         # For Yuan model
         if 'Yuan' in str(self.module):
