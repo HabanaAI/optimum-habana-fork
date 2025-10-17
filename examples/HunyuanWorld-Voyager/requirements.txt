@@ -1,0 +1,6 @@
+loguru
+imageio==2.34.0
+imageio-ffmpeg==0.5.1
+opencv-python==4.9.0.80
+pyexr==0.5.0
+
