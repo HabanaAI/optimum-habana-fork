@@ -11,6 +11,9 @@ from .pipelines.flux.pipeline_flux_img2img import GaudiFluxImg2ImgPipeline
 from .pipelines.flux.pipeline_flux_kontext import GaudiFluxKontextPipeline
 from .pipelines.i2vgen_xl.pipeline_i2vgen_xl import GaudiI2VGenXLPipeline
 from .pipelines.pipeline_utils import GaudiDiffusionPipeline
+from .pipelines.qwenimage.pipeline_qwenimage import GaudiQwenImagePipeline
+from .pipelines.qwenimage.pipeline_qwenimage_edit import GaudiQwenImageEditPipeline
+from .pipelines.qwenimage.pipeline_qwenimage_edit_plus import GaudiQwenImageEditPlusPipeline
 from .pipelines.stable_diffusion.pipeline_stable_diffusion import GaudiStableDiffusionPipeline
 from .pipelines.stable_diffusion.pipeline_stable_diffusion_depth2img import GaudiStableDiffusionDepth2ImgPipeline
 from .pipelines.stable_diffusion.pipeline_stable_diffusion_image_variation import (
@@ -38,6 +41,3 @@ from .schedulers import (
     GaudiEulerDiscreteScheduler,
     GaudiFlowMatchEulerDiscreteScheduler,
 )
-from .pipelines.qwenimage.pipeline_qwenimage import GaudiQwenImagePipeline
-from .pipelines.qwenimage.pipeline_qwenimage_edit import GaudiQwenImageEditPipeline
-from .pipelines.qwenimage.pipeline_qwenimage_edit_plus import GaudiQwenImageEditPlusPipeline

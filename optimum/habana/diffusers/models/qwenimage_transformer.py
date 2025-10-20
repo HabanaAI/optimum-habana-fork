@@ -11,15 +11,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import math
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-import torch
-from diffusers.utils import USE_PEFT_BACKEND, logging, scale_lora_layers, unscale_lora_layers
-from diffusers.models.modeling_outputs import Transformer2DModelOutput
-
 import habana_frameworks.torch.core as htcore
+import torch
+from diffusers.models.modeling_outputs import Transformer2DModelOutput
+from diffusers.utils import USE_PEFT_BACKEND, logging, scale_lora_layers, unscale_lora_layers
+
+
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
+
 
 def apply_rotary_emb_qwen(
     x: torch.Tensor,
@@ -68,23 +69,23 @@ def apply_rotary_emb_qwen(
 
         return x_out.type_as(x)
 
+
 def QwenImageTransformer2DModelGaudi(
-        self,
-        hidden_states: torch.Tensor,
-        encoder_hidden_states: torch.Tensor = None,
-        encoder_hidden_states_mask: torch.Tensor = None,
-        timestep: torch.LongTensor = None,
-        img_shapes: Optional[List[Tuple[int, int, int]]] = None,
-        txt_seq_lens: Optional[List[int]] = None,
-        guidance: torch.Tensor = None,  # TODO: this should probably be removed
-        attention_kwargs: Optional[Dict[str, Any]] = None,
-        return_dict: bool = True,
-    ) -> Union[torch.Tensor, Transformer2DModelOutput]:
+    self,
+    hidden_states: torch.Tensor,
+    encoder_hidden_states: torch.Tensor = None,
+    encoder_hidden_states_mask: torch.Tensor = None,
+    timestep: torch.LongTensor = None,
+    img_shapes: Optional[List[Tuple[int, int, int]]] = None,
+    txt_seq_lens: Optional[List[int]] = None,
+    guidance: torch.Tensor = None,  # TODO: this should probably be removed
+    attention_kwargs: Optional[Dict[str, Any]] = None,
+    return_dict: bool = True,
+) -> Union[torch.Tensor, Transformer2DModelOutput]:
     r"""
-    Adapted from: hAdapted from: https://github.com/huggingface/diffusers/blob/main/src/diffusers/models/transformers/transformer_qwenimage.py#L546
-    Put self.pos_embed() complex type calculation on cpu.
+    Adapted from: https://github.com/huggingface/diffusers/blob/df267ee4e8500a2ef5960879f6d1ea49cc8ec40d/src/diffusers/models/transformers/transformer_qwenimage.py#L548
     Add mark_step.
-    """    
+    """
     if attention_kwargs is not None:
         attention_kwargs = attention_kwargs.copy()
         lora_scale = attention_kwargs.pop("scale", 1.0)

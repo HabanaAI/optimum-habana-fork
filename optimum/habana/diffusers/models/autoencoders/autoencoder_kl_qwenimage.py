@@ -18,16 +18,17 @@
 # - GitHub: https://github.com/Wan-Video/Wan2.1
 # - arXiv: https://arxiv.org/abs/2503.20314
 
-from typing import Optional, Union
 
-import torch
 import habana_frameworks.torch.core as htcore
+import torch
+
 
 CACHE_T = 2
 
+
 def QwenImageEncoder3dForwardGaudi(self, x, feat_cache=None, feat_idx=[0]):
     r"""
-    Adapted from: https://github.com/huggingface/diffusers/blob/main/src/diffusers/models/autoencoders/autoencoder_kl_qwenimage.py#L442
+    Adapted from: https://github.com/huggingface/diffusers/blob/53a10518b9a5ac998d9ed40ae3f3edcaa4eadd89/src/diffusers/models/autoencoders/autoencoder_kl_qwenimage.py#L440
     only add mark_step() for memory optimization and reduce compile time.
     """
 
@@ -42,7 +43,7 @@ def QwenImageEncoder3dForwardGaudi(self, x, feat_cache=None, feat_idx=[0]):
         feat_idx[0] += 1
     else:
         x = self.conv_in(x)
-        
+
     htcore.mark_step()
     ## downsamples
     for layer in self.down_blocks:
@@ -51,14 +52,14 @@ def QwenImageEncoder3dForwardGaudi(self, x, feat_cache=None, feat_idx=[0]):
         else:
             x = layer(x)
         htcore.mark_step()
-    
+
     ## middle
     x = self.mid_block(x, feat_cache, feat_idx)
     htcore.mark_step()
-    
+
     ## head
     x = self.norm_out(x)
-    x = self.nonlinearity(x)   
+    x = self.nonlinearity(x)
     if feat_cache is not None:
         idx = feat_idx[0]
         cache_x = x[:, :, -CACHE_T:, :, :].clone()
@@ -71,12 +72,13 @@ def QwenImageEncoder3dForwardGaudi(self, x, feat_cache=None, feat_idx=[0]):
     else:
         x = self.conv_out(x)
     htcore.mark_step()
-    
+
     return x
-    
+
+
 def QwenImageDecoder3dForwardGaudi(self, x, feat_cache=None, feat_idx=[0]):
     r"""
-    Adapted from: https://github.com/huggingface/diffusers/blob/main/src/diffusers/models/autoencoders/autoencoder_kl_qwenimage.py#L633
+    Adapted from: https://github.com/huggingface/diffusers/blob/53a10518b9a5ac998d9ed40ae3f3edcaa4eadd89/src/diffusers/models/autoencoders/autoencoder_kl_qwenimage.py#L628
     only add mark_step() for memory optimization and reduce compile time.
     """
 
@@ -93,7 +95,7 @@ def QwenImageDecoder3dForwardGaudi(self, x, feat_cache=None, feat_idx=[0]):
     else:
         x = self.conv_in(x)
     htcore.mark_step()
-    
+
     ## middle
     x = self.mid_block(x, feat_cache, feat_idx)
     htcore.mark_step()
@@ -102,7 +104,7 @@ def QwenImageDecoder3dForwardGaudi(self, x, feat_cache=None, feat_idx=[0]):
     for up_block in self.up_blocks:
         x = up_block(x, feat_cache, feat_idx)
         htcore.mark_step()
-        
+
     ## head
     x = self.norm_out(x)
     x = self.nonlinearity(x)

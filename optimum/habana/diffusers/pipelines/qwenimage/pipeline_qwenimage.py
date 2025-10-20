@@ -12,32 +12,31 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import inspect
 import functools
-from typing import Any, Callable, Dict, List, Optional, Union
 import types
+from typing import Any, Callable, Dict, List, Optional, Union
+
 import numpy as np
 import torch
+from diffusers.models import AutoencoderKLQwenImage, QwenImageTransformer2DModel
+from diffusers.pipelines.qwenimage.pipeline_output import QwenImagePipelineOutput
+from diffusers.pipelines.qwenimage.pipeline_qwenimage import QwenImagePipeline, calculate_shift, retrieve_timesteps
+from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
+from diffusers.utils import (
+    logging,
+    replace_example_docstring,
+)
 from transformers import (
     Qwen2_5_VLForConditionalGeneration,
     Qwen2Tokenizer,
 )
 
-from diffusers.models import AutoencoderKLQwenImage, QwenImageTransformer2DModel
-from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
-from diffusers.utils import (
-    is_torch_xla_available,
-    logging,
-    replace_example_docstring,
-)
-
-from ..pipeline_utils import GaudiDiffusionPipeline
-from diffusers.pipelines.qwenimage.pipeline_output import QwenImagePipelineOutput
-from diffusers.pipelines.qwenimage.pipeline_qwenimage import QwenImagePipeline,calculate_shift,retrieve_timesteps
 from ....transformers.gaudi_configuration import GaudiConfig
+from ....utils import HabanaProfile
 from ...models.attention_processor import GaudiQwenDoubleStreamAttnProcessor2_0
 from ...models.qwenimage_transformer import QwenImageTransformer2DModelGaudi
-from ....utils import HabanaProfile
+from ..pipeline_utils import GaudiDiffusionPipeline
+
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
@@ -47,7 +46,7 @@ EXAMPLE_DOC_STRING = """
         >>> import torch
         >>> from optimum.habana.diffusers import GaudiQwenImagePipeline
 
-        >>> pipe = GaudiQwenImagePipeline.from_pretrained(       
+        >>> pipe = GaudiQwenImagePipeline.from_pretrained(
         ...    "Qwen/Qwen-Image",
         ...     torch_dtype=torch.bfloat16,
         ...     use_habana=True,
@@ -62,6 +61,8 @@ EXAMPLE_DOC_STRING = """
         >>> image.save("qwenimage.png")
         ```
 """
+
+
 class GaudiQwenEmbedRope(torch.nn.Module):
     def __init__(self, theta: int, axes_dim: List[int], scale_rope=False):
         super().__init__()
@@ -162,14 +163,22 @@ class GaudiQwenEmbedRope(torch.nn.Module):
         freqs_frame_sin = freqs_pos_sin[0][idx : idx + frame].view(frame, 1, 1, -1).expand(frame, height, width, -1)
 
         if self.scale_rope:
-            freqs_height_cos = torch.cat([freqs_neg_cos[1][-(height - height // 2) :], freqs_pos_cos[1][: height // 2]], dim=0)
+            freqs_height_cos = torch.cat(
+                [freqs_neg_cos[1][-(height - height // 2) :], freqs_pos_cos[1][: height // 2]], dim=0
+            )
             freqs_height_cos = freqs_height_cos.view(1, height, 1, -1).expand(frame, height, width, -1)
-            freqs_width_cos = torch.cat([freqs_neg_cos[2][-(width - width // 2) :], freqs_pos_cos[2][: width // 2]], dim=0)
+            freqs_width_cos = torch.cat(
+                [freqs_neg_cos[2][-(width - width // 2) :], freqs_pos_cos[2][: width // 2]], dim=0
+            )
             freqs_width_cos = freqs_width_cos.view(1, 1, width, -1).expand(frame, height, width, -1)
 
-            freqs_height_sin = torch.cat([freqs_neg_sin[1][-(height - height // 2) :], freqs_pos_sin[1][: height // 2]], dim=0)
+            freqs_height_sin = torch.cat(
+                [freqs_neg_sin[1][-(height - height // 2) :], freqs_pos_sin[1][: height // 2]], dim=0
+            )
             freqs_height_sin = freqs_height_sin.view(1, height, 1, -1).expand(frame, height, width, -1)
-            freqs_width_sin = torch.cat([freqs_neg_sin[2][-(width - width // 2) :], freqs_pos_sin[2][: width // 2]], dim=0)
+            freqs_width_sin = torch.cat(
+                [freqs_neg_sin[2][-(width - width // 2) :], freqs_pos_sin[2][: width // 2]], dim=0
+            )
             freqs_width_sin = freqs_width_sin.view(1, 1, width, -1).expand(frame, height, width, -1)
         else:
             freqs_height_cos = freqs_pos_cos[1][:height].view(1, height, 1, -1).expand(frame, height, width, -1)
@@ -185,7 +194,7 @@ class GaudiQwenEmbedRope(torch.nn.Module):
 
 class GaudiQwenImagePipeline(GaudiDiffusionPipeline, QwenImagePipeline):
     r"""
-    Adapted from: https://github.com/huggingface/diffusers/blob/main/src/diffusers/pipelines/qwenimage/pipeline_qwenimage.py#L132
+    Adapted from: https://github.com/huggingface/diffusers/blob/5e181eddfe7e44c1444a2511b0d8e21d177850a0/src/diffusers/pipelines/qwenimage/pipeline_qwenimage.py#L132
 
     This class inherits from `QwenImagePipeline` and overrides methods to use Gaudi-specific implementations.
     add args use_habana
@@ -194,8 +203,7 @@ class GaudiQwenImagePipeline(GaudiDiffusionPipeline, QwenImagePipeline):
     add args bf16_full_eval
     add args sdp_on_bf16
     """
-    
-    
+
     def __init__(
         self,
         scheduler: FlowMatchEulerDiscreteScheduler,
@@ -231,14 +239,16 @@ class GaudiQwenImagePipeline(GaudiDiffusionPipeline, QwenImagePipeline):
         for block in self.transformer.transformer_blocks:
             block.attn.processor = GaudiQwenDoubleStreamAttnProcessor2_0(is_training)
         config = self.transformer.config
-        self.transformer.pos_embed = GaudiQwenEmbedRope(theta=10000, axes_dim=list(config['axes_dims_rope']), scale_rope=True)
-        
+        self.transformer.pos_embed = GaudiQwenEmbedRope(
+            theta=10000, axes_dim=list(config["axes_dims_rope"]), scale_rope=True
+        )
+
         if use_hpu_graphs:
             from habana_frameworks.torch.hpu import wrap_in_hpu_graph
-            #transformer = wrap_in_hpu_graph(transformer)
+
+            # transformer = wrap_in_hpu_graph(transformer)
             for block in self.transformer.transformer_blocks:
                 block = wrap_in_hpu_graph(block)
-            
 
     @torch.no_grad()
     @replace_example_docstring(EXAMPLE_DOC_STRING)
@@ -338,7 +348,7 @@ class GaudiQwenImagePipeline(GaudiDiffusionPipeline, QwenImagePipeline):
                 Number of steps to ignore for profling.
             profiling_steps (`int`, *optional*):
                 Number of steps to be captured when enabling profiling.
-                
+
         Examples:
 
         Returns:
@@ -346,9 +356,8 @@ class GaudiQwenImagePipeline(GaudiDiffusionPipeline, QwenImagePipeline):
             [`~pipelines.qwenimage.QwenImagePipelineOutput`] if `return_dict` is True, otherwise a `tuple`. When
             returning a tuple, the first element is a list with the generated images.
         """
-        import habana_frameworks.torch as ht
         import habana_frameworks.torch.core as htcore
-        
+
         height = height or self.default_sample_size * self.vae_scale_factor
         width = width or self.default_sample_size * self.vae_scale_factor
 
@@ -403,7 +412,6 @@ class GaudiQwenImagePipeline(GaudiDiffusionPipeline, QwenImagePipeline):
                 max_sequence_length=max_sequence_length,
             )
 
-
         hb_profiler = HabanaProfile(
             warmup=profiling_warmup_steps,
             active=profiling_steps,
@@ -411,11 +419,10 @@ class GaudiQwenImagePipeline(GaudiDiffusionPipeline, QwenImagePipeline):
             name="diffuser_pipeline",
         )
         hb_profiler.start()
-        
-        
+
         # 4. Prepare latent variables
         num_channels_latents = self.transformer.config.in_channels // 4
-        #latents, latent_image_ids = self.prepare_latents(
+        # latents, latent_image_ids = self.prepare_latents(
         latents = self.prepare_latents(
             batch_size * num_images_per_prompt,
             num_channels_latents,
@@ -504,7 +511,7 @@ class GaudiQwenImagePipeline(GaudiDiffusionPipeline, QwenImagePipeline):
                     cond_norm = torch.norm(noise_pred, dim=-1, keepdim=True)
                     noise_norm = torch.norm(comb_pred, dim=-1, keepdim=True)
                     noise_pred = comb_pred * (cond_norm / noise_norm)
-       
+
                 # compute the previous noisy sample x_t -> x_t-1
                 latents_dtype = latents.dtype
                 latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
@@ -513,10 +520,10 @@ class GaudiQwenImagePipeline(GaudiDiffusionPipeline, QwenImagePipeline):
                     if torch.backends.mps.is_available():
                         # some platforms (eg. apple mps) misbehave due to a pytorch bug: https://github.com/pytorch/pytorch/pull/99272
                         latents = latents.to(latents_dtype)
-                    
+
                 if not self.use_hpu_graphs:
                     htcore.mark_step()
-                    
+
                 if callback_on_step_end is not None:
                     callback_kwargs = {}
                     for k in callback_on_step_end_tensor_inputs:
@@ -530,8 +537,6 @@ class GaudiQwenImagePipeline(GaudiDiffusionPipeline, QwenImagePipeline):
                 if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
                     progress_bar.update()
 
-                # if XLA_AVAILABLE:
-                #     xm.mark_step()
             if not self.use_hpu_graphs:
                 htcore.mark_step()
             hb_profiler.step()
@@ -555,7 +560,7 @@ class GaudiQwenImagePipeline(GaudiDiffusionPipeline, QwenImagePipeline):
             image = self.image_processor.postprocess(image, output_type=output_type)
 
         hb_profiler.stop()
-        
+
         # Offload all models
         self.maybe_free_model_hooks()
 

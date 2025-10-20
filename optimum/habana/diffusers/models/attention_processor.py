@@ -27,8 +27,8 @@ from torch import nn
 
 from ...distributed import parallel_state
 from .embeddings import RotaryPosEmbedding
-#from diffusers.models.transformers.transformer_qwenimage import apply_rotary_emb_qwen
 from .qwenimage_transformer import apply_rotary_emb_qwen
+
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
@@ -730,6 +730,7 @@ class GaudiFluxAttnProcessor2_0:
         else:
             return hidden_states
 
+
 class GaudiWanAttnProcessor:
     r"""
     Adapted from: https://github.com/huggingface/diffusers/blob/v0.35.1/src/diffusers/models/transformers/transformer_wan.py#L67
@@ -897,11 +898,13 @@ class GaudiWanAttnProcessor:
         hidden_states = attn.to_out[0](hidden_states)
         hidden_states = attn.to_out[1](hidden_states)
         return hidden_states
-    
+
+
 class GaudiQwenDoubleStreamAttnProcessor2_0:
     """
-    Attention processor for Qwen double-stream architecture, matching DoubleStreamLayerMegatron logic. This processor
-    implements joint attention computation where text and image streams are processed together.
+    Adapted from:
+    https://github.com/huggingface/diffusers/blob/e682af202787c44da4c7e583b95ec7f42dc45029/src/diffusers/models/transformers/transformer_qwenimage.py#L255
+        * Modified SDPA to use Gaudi fused SDPA kernel
     """
 
     _attention_backend = None
@@ -923,7 +926,7 @@ class GaudiQwenDoubleStreamAttnProcessor2_0:
         image_rotary_emb: Optional[torch.Tensor] = None,
     ) -> torch.FloatTensor:
         if encoder_hidden_states is None:
-            raise image_rotary_embValueError("QwenDoubleStreamAttnProcessor2_0 requires encoder_hidden_states (text stream)")
+            raise ValueError("GaudiQwenDoubleStreamAttnProcessor2_0 requires encoder_hidden_states (text stream)")
 
         seq_txt = encoder_hidden_states.shape[1]
 
@@ -963,38 +966,23 @@ class GaudiQwenDoubleStreamAttnProcessor2_0:
             img_key = apply_rotary_emb_qwen(img_key, img_freqs)
             txt_query = apply_rotary_emb_qwen(txt_query, txt_freqs)
             txt_key = apply_rotary_emb_qwen(txt_key, txt_freqs)
-                        
+
         # Concatenate for joint attention
         # Order: [text, image]
         joint_query = torch.cat([txt_query, img_query], dim=1).transpose(1, 2)
         joint_key = torch.cat([txt_key, img_key], dim=1).transpose(1, 2)
         joint_value = torch.cat([txt_value, img_value], dim=1).transpose(1, 2)
 
-        # Compute joint attention
-        # joint_hidden_states = dispatch_attention_fn(
-        #     joint_query,
-        #     joint_key,
-        #     joint_value,
-        #     attn_mask=attention_mask,
-        #     dropout_p=0.0,
-        #     is_causal=False,
-        #     backend=self._attention_backend,
-        # )
-        #apply gaudi fused SDPA
+        # apply gaudi fused SDPA intread of dispatch_attention_fn
         from habana_frameworks.torch.hpex.kernels import FusedSDPA
+
         # Fast FSDPA is not supported in training mode
         fsdpa_mode = "None" if self.is_training else "fast"
         joint_hidden_states = FusedSDPA.apply(
-            joint_query,
-            joint_key,
-            joint_value,
-            attention_mask,
-            0.0,
-            False,
-            None, fsdpa_mode, None
+            joint_query, joint_key, joint_value, attention_mask, 0.0, False, None, fsdpa_mode, None
         )
         joint_hidden_states = joint_hidden_states.transpose(1, 2).contiguous()
-        
+
         # Reshape back
         joint_hidden_states = joint_hidden_states.flatten(2, 3)
         joint_hidden_states = joint_hidden_states.to(joint_query.dtype)
@@ -1011,5 +999,6 @@ class GaudiQwenDoubleStreamAttnProcessor2_0:
         txt_attn_output = attn.to_add_out(txt_attn_output)
 
         return img_attn_output, txt_attn_output
-    
+
+
 AttentionProcessor = Union[AttnProcessor2_0,]

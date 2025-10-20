@@ -12,28 +12,31 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import inspect
-import math
-from typing import Any, Callable, Dict, List, Optional, Union
 import types
+from typing import Any, Callable, Dict, List, Optional, Union
+
 import numpy as np
 import torch
-from transformers import Qwen2_5_VLForConditionalGeneration, Qwen2Tokenizer, Qwen2VLProcessor
-
 from diffusers.image_processor import PipelineImageInput
 from diffusers.models import AutoencoderKLQwenImage, QwenImageTransformer2DModel
+from diffusers.pipelines.qwenimage.pipeline_output import QwenImagePipelineOutput
+from diffusers.pipelines.qwenimage.pipeline_qwenimage_edit import (
+    QwenImageEditPipeline,
+    calculate_dimensions,
+    calculate_shift,
+    retrieve_timesteps,
+)
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 from diffusers.utils import logging, replace_example_docstring
-from diffusers.pipelines.qwenimage.pipeline_output import QwenImagePipelineOutput
+from transformers import Qwen2_5_VLForConditionalGeneration, Qwen2Tokenizer, Qwen2VLProcessor
+
 from ....transformers.gaudi_configuration import GaudiConfig
-from ..pipeline_utils import GaudiDiffusionPipeline
-from diffusers.pipelines.qwenimage.pipeline_qwenimage_edit import QwenImageEditPipeline,calculate_dimensions,calculate_shift,retrieve_timesteps
+from ....utils import HabanaProfile
 from ...models.attention_processor import GaudiQwenDoubleStreamAttnProcessor2_0
 from ...models.qwenimage_transformer import QwenImageTransformer2DModelGaudi
-from ....utils import HabanaProfile
-from ....transformers.modeling_utils import adapt_transformers_to_gaudi
-from ....transformers.models import GaudiQwen2_5_VLForConditionalGeneration,GaudiQwen2_5_VLModel
+from ..pipeline_utils import GaudiDiffusionPipeline
 from .pipeline_qwenimage import GaudiQwenEmbedRope
+
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
@@ -45,15 +48,14 @@ EXAMPLE_DOC_STRING = """
         >>> from diffusers import GaudiQwenImageEditPipeline
         >>> from diffusers.utils import load_image
 
-        
-        >>> pipe = GaudiQwenImagePipeline.from_pretrained(       
+        >>> pipe = GaudiQwenImagePipeline.from_pretrained(
         ...    "Qwen/Qwen-Image-Edit",
         ...     torch_dtype=torch.bfloat16,
         ...     use_habana=True,
         ...     use_hpu_graphs=True,
         ...     gaudi_config="Habana/stable-diffusion",
         ... )
-        
+
         >>> image = load_image(
         ...     "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/diffusers/yarn-art-pikachu.png"
         ... ).convert("RGB")
@@ -67,9 +69,10 @@ EXAMPLE_DOC_STRING = """
         ```
 """
 
+
 class GaudiQwenImageEditPipeline(GaudiDiffusionPipeline, QwenImageEditPipeline):
     r"""
-    Adapted from: https://github.com/huggingface/diffusers/blob/main/src/diffusers/pipelines/qwenimage/pipeline_qwenimage_edit.py#L165
+    Adapted from: https://github.com/huggingface/diffusers/blob/df267ee4e8500a2ef5960879f6d1ea49cc8ec40d/src/diffusers/pipelines/qwenimage/pipeline_qwenimage_edit.py#L165
 
     This class inherits from `QwenImageEditPipeline` and overrides methods to use Gaudi-specific implementations.
     add args use_habana
@@ -78,7 +81,7 @@ class GaudiQwenImageEditPipeline(GaudiDiffusionPipeline, QwenImageEditPipeline):
     add args bf16_full_eval
     add args sdp_on_bf16
     """
-    
+
     def __init__(
         self,
         scheduler: FlowMatchEulerDiscreteScheduler,
@@ -94,7 +97,6 @@ class GaudiQwenImageEditPipeline(GaudiDiffusionPipeline, QwenImageEditPipeline):
         sdp_on_bf16: bool = False,
         is_training: bool = False,
     ):
-
         GaudiDiffusionPipeline.__init__(
             self,
             use_habana,
@@ -117,15 +119,68 @@ class GaudiQwenImageEditPipeline(GaudiDiffusionPipeline, QwenImageEditPipeline):
         for block in self.transformer.transformer_blocks:
             block.attn.processor = GaudiQwenDoubleStreamAttnProcessor2_0(is_training)
         config = self.transformer.config
-        self.transformer.pos_embed = GaudiQwenEmbedRope(theta=10000, axes_dim=list(config['axes_dims_rope']), scale_rope=True)          
-            
+        self.transformer.pos_embed = GaudiQwenEmbedRope(
+            theta=10000, axes_dim=list(config["axes_dims_rope"]), scale_rope=True
+        )
+
         if use_hpu_graphs:
             from habana_frameworks.torch.hpu import wrap_in_hpu_graph
-            #transformer = wrap_in_hpu_graph(transformer)
+
+            # transformer = wrap_in_hpu_graph(transformer)
             for block in self.transformer.transformer_blocks:
                 block = wrap_in_hpu_graph(block)
-                
 
+    def _get_qwen_prompt_embeds(
+        self,
+        prompt: Union[str, List[str]] = None,
+        image: Optional[torch.Tensor] = None,
+        device: Optional[torch.device] = None,
+        dtype: Optional[torch.dtype] = None,
+    ):
+        r"""
+        # HPU: add use_flash_attention=True for self.text_encoder input
+        """
+        device = device or self._execution_device
+        dtype = dtype or self.text_encoder.dtype
+
+        prompt = [prompt] if isinstance(prompt, str) else prompt
+
+        template = self.prompt_template_encode
+        drop_idx = self.prompt_template_encode_start_idx
+        txt = [template.format(e) for e in prompt]
+
+        model_inputs = self.processor(
+            text=txt,
+            images=image,
+            padding=True,
+            return_tensors="pt",
+        ).to(device)
+
+        outputs = self.text_encoder(
+            input_ids=model_inputs.input_ids,
+            attention_mask=model_inputs.attention_mask,
+            pixel_values=model_inputs.pixel_values,
+            image_grid_thw=model_inputs.image_grid_thw,
+            output_hidden_states=True,
+            use_flash_attention=True,
+        )
+
+        hidden_states = outputs.hidden_states[-1]
+        split_hidden_states = self._extract_masked_hidden(hidden_states, model_inputs.attention_mask)
+        split_hidden_states = [e[drop_idx:] for e in split_hidden_states]
+        attn_mask_list = [torch.ones(e.size(0), dtype=torch.long, device=e.device) for e in split_hidden_states]
+        max_seq_len = max([e.size(0) for e in split_hidden_states])
+        prompt_embeds = torch.stack(
+            [torch.cat([u, u.new_zeros(max_seq_len - u.size(0), u.size(1))]) for u in split_hidden_states]
+        )
+        encoder_attention_mask = torch.stack(
+            [torch.cat([u, u.new_zeros(max_seq_len - u.size(0))]) for u in attn_mask_list]
+        )
+
+        prompt_embeds = prompt_embeds.to(dtype=dtype, device=device)
+
+        return prompt_embeds, encoder_attention_mask
+    
     @torch.no_grad()
     @replace_example_docstring(EXAMPLE_DOC_STRING)
     def __call__(
@@ -248,9 +303,8 @@ class GaudiQwenImageEditPipeline(GaudiDiffusionPipeline, QwenImageEditPipeline):
             [`~pipelines.qwenimage.QwenImagePipelineOutput`] if `return_dict` is True, otherwise a `tuple`. When
             returning a tuple, the first element is a list with the generated images.
         """
-        import habana_frameworks.torch as ht
         import habana_frameworks.torch.core as htcore
-        
+
         image_size = image[0].size if isinstance(image, list) else image.size
         calculated_width, calculated_height, _ = calculate_dimensions(1024 * 1024, image_size[0] / image_size[1])
         height = height or calculated_height
@@ -329,7 +383,6 @@ class GaudiQwenImageEditPipeline(GaudiDiffusionPipeline, QwenImageEditPipeline):
                 max_sequence_length=max_sequence_length,
             )
 
-
         hb_profiler = HabanaProfile(
             warmup=profiling_warmup_steps,
             active=profiling_steps,
@@ -337,7 +390,7 @@ class GaudiQwenImageEditPipeline(GaudiDiffusionPipeline, QwenImageEditPipeline):
             name="diffuser_pipeline",
         )
         hb_profiler.start()
-        
+
         # 4. Prepare latent variables
         num_channels_latents = self.transformer.config.in_channels // 4
         latents, image_latents = self.prepare_latents(
@@ -460,7 +513,7 @@ class GaudiQwenImageEditPipeline(GaudiDiffusionPipeline, QwenImageEditPipeline):
 
                 if not self.use_hpu_graphs:
                     htcore.mark_step()
-                    
+
                 if callback_on_step_end is not None:
                     callback_kwargs = {}
                     for k in callback_on_step_end_tensor_inputs:
@@ -477,7 +530,7 @@ class GaudiQwenImageEditPipeline(GaudiDiffusionPipeline, QwenImageEditPipeline):
             if not self.use_hpu_graphs:
                 htcore.mark_step()
             hb_profiler.step()
-            
+
         self._current_timestep = None
         if output_type == "latent":
             image = latents
@@ -497,7 +550,7 @@ class GaudiQwenImageEditPipeline(GaudiDiffusionPipeline, QwenImageEditPipeline):
             image = self.image_processor.postprocess(image, output_type=output_type)
 
         hb_profiler.stop()
-        
+
         # Offload all models
         self.maybe_free_model_hooks()
 

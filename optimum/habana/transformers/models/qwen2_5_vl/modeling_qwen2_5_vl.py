@@ -834,7 +834,7 @@ class GaudiQwen2_5_VLModel(Qwen2_5_VLModel):
         rope_deltas: Optional[torch.LongTensor] = None,
         cache_position: Optional[torch.LongTensor] = None,
         second_per_grid_ts: Optional[torch.Tensor] = None,
-        use_flash_attention: Optional[bool] = True,
+        use_flash_attention: Optional[bool] = False,
         *kwargs,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         """
@@ -958,7 +958,7 @@ class GaudiQwen2_5_VLForConditionalGeneration(Qwen2_5_VLForConditionalGeneration
         second_per_grid_ts: Optional[torch.Tensor] = None,
         logits_to_keep: Union[int, torch.Tensor] = 0,
         token_idx: Optional[torch.Tensor] = None,
-        use_flash_attention: Optional[bool] = True,
+        use_flash_attention: Optional[bool] = False,
         **kwargs,
     ) -> Union[Tuple, Qwen2_5_VLCausalLMOutputWithPast]:
         """
