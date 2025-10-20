@@ -20,6 +20,7 @@ from .pipelines.stable_diffusion.pipeline_stable_diffusion_inpaint import GaudiS
 from .pipelines.stable_diffusion.pipeline_stable_diffusion_instruct_pix2pix import (
     GaudiStableDiffusionInstructPix2PixPipeline,
 )
+from .pipelines.stable_diffusion.pipeline_stable_diffusion_kolors import GaudiStableDiffusionKolorsPipeline
 from .pipelines.stable_diffusion.pipeline_stable_diffusion_ldm3d import GaudiStableDiffusionLDM3DPipeline
 from .pipelines.stable_diffusion.pipeline_stable_diffusion_upscale import GaudiStableDiffusionUpscalePipeline
 from .pipelines.stable_diffusion_3.pipeline_stable_diffusion_3 import GaudiStableDiffusion3Pipeline
