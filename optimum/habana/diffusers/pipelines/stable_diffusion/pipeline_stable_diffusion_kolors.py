@@ -270,7 +270,7 @@ class GaudiStableDiffusionKolorsPipeline(GaudiDiffusionPipeline, StableDiffusion
             scheduler,
             force_zeros_for_empty_prompt,
         )
-        self.unet.set_default_attn_processor = set_default_attn_processor_hpu
+        #self.unet.set_default_attn_processor = set_default_attn_processor_hpu
         self.to(self._device)
         self.profiler = setup_profile(5)
 
