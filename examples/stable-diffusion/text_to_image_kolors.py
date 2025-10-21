@@ -23,7 +23,6 @@ def main():
         default="An image of a squirrel in Picasso style",
         help="The prompt or prompts to guide the image generation.",
     )
-
     args = parser.parse_args()
 
     gaudi_config_kwargs = {"use_fused_adam": True, "use_fused_clip_norm": True}
@@ -37,10 +36,8 @@ def main():
     kwargs["force_zeros_for_empty_prompt"]=False
 
     ckpt_dir = args.model_name_or_path
-
     tokenizer = ChatGLMTokenizer.from_pretrained(f'{ckpt_dir}/text_encoder')
     scheduler = EulerDiscreteScheduler.from_pretrained(f"{ckpt_dir}/scheduler")
-
     text_encoder = ChatGLMModel.from_pretrained(
         f'{ckpt_dir}/text_encoder',
         torch_dtype=torch.bfloat16).to(torch.bfloat16)

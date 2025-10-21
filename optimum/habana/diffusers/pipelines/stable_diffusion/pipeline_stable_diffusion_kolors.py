@@ -33,7 +33,6 @@ def setup_profile(steps):
         on_trace_ready=torch.profiler.tensorboard_trace_handler("profile", use_gzip=True))
     return profiler
 
-
 class time_box_t():
     def __init__(self):
         self.t0=None
@@ -112,15 +111,12 @@ def _pad_gaudi(
 
     return encoded_inputs
 
-
 try:
     from habana_frameworks.torch.hpex.kernels import apply_rotary_pos_emb as apply_rotary_pos_emb_gaudi_kernel
-
     has_fused_rope = True
 except ImportError:
     has_fused_rope = False
     print("Not using HPU fused kernel for apply_rotary_pos_emb")
-
 def apply_rotary_pos_emb_gaudi(x: torch.Tensor, rope_cache: torch.Tensor) -> torch.Tensor:
     if x.device.type == "hpu" and has_fused_rope:
         return apply_rotary_pos_emb_gaudi_kernel(x, rope_cache)
@@ -142,7 +138,6 @@ def apply_rotary_pos_emb_gaudi(x: torch.Tensor, rope_cache: torch.Tensor) -> tor
         )
         x_out2 = x_out2.flatten(3)
         return torch.cat((x_out2, x_pass), dim=-1)
-
 
 def forward_gaudi(self, query_layer, key_layer, value_layer, attention_mask):
     fsdpa_mode="None"
@@ -166,10 +161,7 @@ from kolors.models import modeling_chatglm
 setattr(modeling_chatglm, "apply_rotary_pos_emb", apply_rotary_pos_emb_gaudi)
 setattr(modeling_chatglm.CoreAttention, "forward", forward_gaudi)
 setattr(ChatGLMTokenizer, "_pad", _pad_gaudi)
-
 from kolors.models.modeling_chatglm import ChatGLMModel
-
-
 class GaudiStableDiffusionKolorsPipeline(GaudiDiffusionPipeline, StableDiffusionXLPipeline):
     def __init__(
         self,
@@ -512,7 +504,6 @@ class GaudiStableDiffusionKolorsPipeline(GaudiDiffusionPipeline, StableDiffusion
 
         return StableDiffusionXLPipelineOutput(images=image)
 
-
     @torch.no_grad()
     def unet_hpu(
         self,
@@ -559,5 +550,3 @@ class GaudiStableDiffusionKolorsPipeline(GaudiDiffusionPipeline, StableDiffusion
         self.ht.core.hpu.default_stream().synchronize()
 
         return cached.graph_outputs
-
-
