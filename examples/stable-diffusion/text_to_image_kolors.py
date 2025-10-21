@@ -1,6 +1,5 @@
 import os, torch
 import argparse
-
 from kolors.models.tokenization_chatglm import ChatGLMTokenizer
 from diffusers import UNet2DConditionModel, AutoencoderKL
 from diffusers import EulerDiscreteScheduler
@@ -55,7 +54,7 @@ def main():
             unet=unet,
             scheduler=scheduler,
             **kwargs,)
-    pipe = pipe.to("cuda")
+    pipe = pipe.to("hpu")
 
     warmup = 5
     for i in range(warmup):
@@ -68,7 +67,6 @@ def main():
             num_images_per_prompt=1,
             generator= torch.Generator(pipe.device).manual_seed(878))
     torch.hpu.synchronize()
-    #exit()
 
     image = pipe(
         prompt=args.prompts,
@@ -78,14 +76,9 @@ def main():
         guidance_scale=5.0,
         num_images_per_prompt=1,
         is_profiler = False,
-        generator= torch.Generator(pipe.device).manual_seed(5554)).images[0]
+        generator= torch.Generator(pipe.device).manual_seed(5544)).images[0]
 
     image.save(f'piaocong.jpg')
 
-
-
-
-
 if __name__ == '__main__':
     main()
-
