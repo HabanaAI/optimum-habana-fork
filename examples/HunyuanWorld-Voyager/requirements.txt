@@ -1,0 +1,5 @@
+transformers==4.39.3
+loguru
+imageio
+opencv-python==4.9.0.80
+pyexr==0.5.0
