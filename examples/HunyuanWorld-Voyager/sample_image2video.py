@@ -19,8 +19,8 @@ def main():
     args = parse_args()
     print(args)
     models_root_path = Path(args.model_base)
-    if not models_root_path.exists():
-        raise ValueError(f"`models_root` not exists: {models_root_path}")
+    #if not models_root_path.exists():
+    #    raise ValueError(f"`models_root` not exists: {models_root_path}")
 
     # Create save folder to save the samples
     save_path = args.save_path if args.save_path_suffix == "" else f'{args.save_path}_{args.save_path_suffix}'
