@@ -6,14 +6,11 @@ from datetime import datetime
 
 import habana_frameworks.torch as ht
 import habana_frameworks.torch.core as htcore
-#from optimum.habana.transformers.modeling_utils import adapt_transformers_to_gaudi
 import habana_frameworks.torch.gpu_migration
-
 
 from voyager.utils.file_utils import save_videos_grid
 from voyager.config import parse_args
 from voyager.inference import HunyuanVideoSampler
-
 
 def main():
     args = parse_args()
@@ -26,8 +23,6 @@ def main():
     save_path = args.save_path if args.save_path_suffix == "" else f'{args.save_path}_{args.save_path_suffix}'
     if not os.path.exists(save_path):
         os.makedirs(save_path, exist_ok=True)
-
-    #adapt_transformers_to_gaudi()
 
     # Load models
     hunyuan_video_sampler = HunyuanVideoSampler.from_pretrained(
@@ -78,7 +73,6 @@ def main():
                 f"{save_path}/{time_flag}_seed{outputs['seeds'][i]}_{outputs['prompts'][i][:100].replace('/', '')}.mp4"
             save_videos_grid(sample, cur_save_path, fps=24)
             logger.info(f'Sample save to: {cur_save_path}')
-
 
 if __name__ == "__main__":
     main()

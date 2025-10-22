@@ -862,8 +862,6 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
                 token_replace_vec,
                 frist_frame_token_num,
             ]
-            #print(f'baymax run double layer:{layer_num}')
-
             if self.training and self.gradient_checkpoint and \
                     (self.gradient_checkpoint_layers == -1 or layer_num < self.gradient_checkpoint_layers):
                 # print(f'gradient checkpointing...')
@@ -876,7 +874,6 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
                 if self.use_context_block:
                     img += condition1
             htcore.mark_step()
-        #print(f'baymax run double layer done!')
 
         # Merge txt and img to pass through single stream blocks.
         x = torch.cat((img, txt), 1)
@@ -909,9 +906,7 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
                     if self.use_context_block:
                         x += condition2
                 htcore.mark_step()
-                #print(f'baymax run single layer:{single_idx}')
 
-        #print(f'baymax run single layer done!')
         img = x[:, :img_seq_len, ...]
 
         # ---------------------------- Final layer ------------------------------

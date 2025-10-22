@@ -792,12 +792,9 @@ class HunyuanVideoSampler(Inference):
             raise ValueError(
                 f"Seed must be an integer, a list of integers, or None, got {seed}."
             )
-        #generator = [torch.Generator(
-        #    self.device).manual_seed(seed) for seed in seeds]
         generator = [torch.Generator(
             'hpu').manual_seed(seed) for seed in seeds]
         out_dict["seeds"] = seeds
-        print(f'baymax set hpu Generator')
 
         if width <= 0 or height <= 0 or video_length <= 0:
             raise ValueError(

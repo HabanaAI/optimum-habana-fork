@@ -50,10 +50,6 @@ from ...text_encoder import TextEncoder
 from ...modules import HYVideoDiffusionTransformer
 from ...utils.data_utils import black_image
 
-#from optimum.habana.diffusers.pipeline_utils import GaudiDiffusionPipeline
-
-
-
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 EXAMPLE_DOC_STRING = """"""
@@ -64,7 +60,7 @@ def setup_profile(steps):
        schedule=torch.profiler.schedule(wait=0, warmup=1, active=steps, repeat=1),
        activities=activities,
        with_stack=True,
-        on_trace_ready=torch.profiler.tensorboard_trace_handler("/mnt/ceph1/libo/voyager/profile/", use_gzip=True))
+        on_trace_ready=torch.profiler.tensorboard_trace_handler("profile/", use_gzip=True))
     return profiler
 
 class time_box_t():
@@ -99,7 +95,6 @@ def rescale_noise_cfg(noise_cfg, noise_pred_text, guidance_rescale=0.0):
         (1 - guidance_rescale) * noise_cfg
     )
     return noise_cfg
-
 
 def retrieve_timesteps(
     scheduler,
@@ -170,8 +165,6 @@ def retrieve_timesteps(
 class HunyuanVideoPipelineOutput(BaseOutput):
     videos: Union[torch.Tensor, np.ndarray]
 
-
-#class HunyuanVideoPipeline(GaudiDiffusionPipeline, DiffusionPipeline):
 class HunyuanVideoPipeline(DiffusionPipeline):
     r"""
     Pipeline for text-to-video generation using HunyuanVideo.
@@ -207,34 +200,10 @@ class HunyuanVideoPipeline(DiffusionPipeline):
         text_encoder_2: Optional[TextEncoder] = None,
         progress_bar_config: Dict[str, Any] = None,
         args=None,
-        #use_habana: bool = False,
-        #use_hpu_graphs: bool = False,
-        #gaudi_config: Union[str, GaudiConfig] = None,
-        #bf16_full_eval: bool = False,
-        #sdp_on_bf16: bool = False,
     ):
-        #GaudiDiffusionPipeline.__init__(
-        #    self,
-        #    use_habana,
-        #    use_hpu_graphs,
-        #    gaudi_config,
-        #    bf16_full_eval,
-        #    sdp_on_bf16,
-        #)
-        #DiffusionPipeline.__init(
-        #        self,
-        #        vae,
-        #        text_encoder,
-        #        transformer,
-        #        scheduler,
-        #        text_encoder_2
-        #)
         super().__init__()
-        #self.profiler = setup_profile(3)
-
         from habana_frameworks.torch.hpu import wrap_in_hpu_graph
         transformer = wrap_in_hpu_graph(transformer)
-        print(f'baymax wrap transformer with HPU graph.')
         # ==========================================================================================
         if progress_bar_config is None:
             progress_bar_config = {}
@@ -914,8 +883,6 @@ Please use VaeImageProcessor.postprocess(...) instead"
         # width = width or self.transformer.config.sample_size * self.vae_scale_factor
         # to deal with lora scaling and other possible forward hooks
 
-        time_box = time_box_t() 
-        time_box.start()
         # 1. Check inputs. Raise error if not correct
         self.check_inputs(
             prompt,
@@ -1089,7 +1056,6 @@ Please use VaeImageProcessor.postprocess(...) instead"
             num_inference_steps * self.scheduler.order
         self._num_timesteps = len(timesteps)
 
-        time_box.show_time('prepare latents')
         inf_step = 0
         # if is_progress_bar:
 
@@ -1098,14 +1064,6 @@ Please use VaeImageProcessor.postprocess(...) instead"
             for i, t in enumerate(timesteps):
                 if self.interrupt:
                     continue
-
-                #if i == 35:
-                #    self.profiler.start()
-                #if i == 38:
-                #    self.profiler.stop()
-                #if i >= 35 and i < 38:
-                #    self.profiler.step()
-                #    print(f'baymax run profiler step')
 
                 if i2v_mode and i2v_condition_type == "token_replace":
                     latents = torch.concat(
@@ -1140,26 +1098,6 @@ Please use VaeImageProcessor.postprocess(...) instead"
                     if embedded_guidance_scale is not None
                     else None
                 )
-                #print(f'baymax  latent_model_input requires_grad:{latent_model_input.requires_grad}')
-                #print(f'baymax  text_states requires_grad:{prompt_embeds.requires_grad}')
-                #dump_dic = {}
-                #dump_dic['latent_model_input'] = latent_model_input
-                #dump_dic['t_expand'] = t_expand
-                #dump_dic['text_states'] = prompt_embeds
-                #dump_dic['text_mask'] = prompt_mask
-                #dump_dic['text_states_2'] = prompt_embeds_2
-                #dump_dic['freqs_cos'] = freqs_cis[0]
-                #dump_dic['freqs_sin'] = freqs_cis[1]
-                #dump_dic['freqs_cos_cond'] = freqs_cis_cond[0]
-                #dump_dic['freqs_sin_cond'] = freqs_cis_cond[1]
-                #dump_dic['guidance'] = guidance_expand
-                #dump_dic['return_dict'] = True
-
-                #dump_dir = '/mnt/ceph1/libo/voyager/dbg/dump/'
-                #file_name = dump_dir + 'transformer_input_dict.pt'
-                #torch.save(dump_dic, file_name)
-                #print(f'save {file_name} done exit.')
-                #exit()
 
                 # predict the noise residual
                 with torch.autocast(
@@ -1205,7 +1143,6 @@ Please use VaeImageProcessor.postprocess(...) instead"
                         [img_latents, latents], dim=2
                     )
                 else:
-                    #print(f'baymax pipeline_hunyuan_video line 1125 t:{t}')
                     latents = self.scheduler.step(
                         noise_pred, t, latents, **extra_step_kwargs, return_dict=False
                     )[0]
@@ -1235,9 +1172,6 @@ Please use VaeImageProcessor.postprocess(...) instead"
                     if callback is not None and i % callback_steps == 0:
                         step_idx = i // getattr(self.scheduler, "order", 1)
                         callback(step_idx, t, latents)
-                time_box.show_time(f'baymax step:{i}')
-
-        #time_box.show_time('transformer HPU')
 
         if not output_type == "latent":
             expand_temporal_dim = False
@@ -1297,8 +1231,6 @@ Please use VaeImageProcessor.postprocess(...) instead"
         depth = depth[:, 0] * 0.299 + depth[:, 1] * 0.587 + depth[:, 2] * 0.114
         depth = depth.unsqueeze(1).repeat(1, 3, 1, 1, 1)
         image = torch.cat([rgb, depth], dim=-2)
-
-        time_box.show_time('vae decode')
 
         # Offload all models
         self.maybe_free_model_hooks()

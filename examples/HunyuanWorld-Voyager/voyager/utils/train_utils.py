@@ -167,12 +167,10 @@ def load_state_dict(args, model, logger, pretrained_model_path=None):
     
     dit_weight = args.i2v_dit_weight
     
-    print(f'baymax dit_weight:{dit_weight}')
     if args.use_context_block:
         model_path = Path(dit_weight.replace("_model_states.pt", "_model_states_context.pt"))
     else:
         model_path = Path(dit_weight)
-    print(f'baymax model_path:{model_path}')
     
     # Verify model path exists
     if not model_path.exists():
