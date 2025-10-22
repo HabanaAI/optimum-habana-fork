@@ -4,7 +4,7 @@ export PT_HPU_LAZY_MODE=1
 export PT_HPU_MAX_COMPOUND_OP_SIZE=256
 export PT_HPU_GPU_MIGRATION=1
 
-export MODEL_BASE="tencent/HunyuanWorld-Mirror"
+export MODEL_BASE="tencent/HunyuanWorld-Voyager"
 
 #single card
 python3 sample_image2video.py \
