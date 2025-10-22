@@ -321,9 +321,9 @@ class GaudiStableDiffusionKolorsPipeline(GaudiDiffusionPipeline, StableDiffusion
 
         original_size = original_size or (height, width)
         target_size = target_size or (height, width)
-
-        time_box = time_box_t() 
-        time_box.start()
+        if "True" == os.getenv("SHOW_KOLORS_PIPELINE_TIME", False):
+            time_box = time_box_t() 
+            time_box.start()
         # 1. Check inputs. Raise error if not correct
         self.check_inputs(
             prompt,
@@ -419,7 +419,8 @@ class GaudiStableDiffusionKolorsPipeline(GaudiDiffusionPipeline, StableDiffusion
             timesteps = timesteps[: num_warmup_steps + self.scheduler.order * num_inference_steps]
         htcore.mark_step()
 
-        time_box.show_time(f'prepare latents')
+        if "True" == os.getenv("SHOW_KOLORS_PIPELINE_TIME", False):
+            time_box.show_time(f'prepare latents')
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
                 v = torch.zeros(1, device='hpu')
@@ -475,7 +476,8 @@ class GaudiStableDiffusionKolorsPipeline(GaudiDiffusionPipeline, StableDiffusion
                     if callback is not None and i % callback_steps == 0:
                         callback(i, t, latents)
                 htcore.mark_step()
-        time_box.show_time(f'transformer hpu')
+        if "True" == os.getenv("SHOW_KOLORS_PIPELINE_TIME", False):
+            time_box.show_time(f'transformer hpu')
 
         # make sureo the VAE is in float32 mode, as it overflows in float16
         # torch.cuda.empty_cache()
@@ -497,7 +499,8 @@ class GaudiStableDiffusionKolorsPipeline(GaudiDiffusionPipeline, StableDiffusion
         # Offload last model to CPU
         if hasattr(self, "final_offload_hook") and self.final_offload_hook is not None:
             self.final_offload_hook.offload()
-        time_box.show_time(f'vae')
+        if "True" == os.getenv("SHOW_KOLORS_PIPELINE_TIME", False):
+            time_box.show_time(f'vae')
 
         if not return_dict:
             return (image,)

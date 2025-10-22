@@ -1,5 +1,6 @@
 import os, torch
 import argparse
+import time
 from kolors.models.tokenization_chatglm import ChatGLMTokenizer
 from diffusers import UNet2DConditionModel, AutoencoderKL
 from diffusers import EulerDiscreteScheduler
@@ -53,7 +54,7 @@ def main():
             **kwargs,)
     pipe = pipe.to("hpu")
 
-    warmup = 5
+    warmup = 2
     for i in range(warmup):
         pipe(
             prompt=args.prompts,
@@ -65,15 +66,20 @@ def main():
             generator= torch.Generator(pipe.device).manual_seed(878))
     torch.hpu.synchronize()
 
-    image = pipe(
-        prompt=args.prompts,
-        height=1024,
-        width=1024,
-        num_inference_steps=50,
-        guidance_scale=5.0,
-        num_images_per_prompt=1,
-        is_profiler = False,
-        generator= torch.Generator(pipe.device).manual_seed(5544)).images[0]
+    for i in range(5):
+        start_time = time.perf_counter()
+        image = pipe(
+            prompt=args.prompts,
+            height=1024,
+            width=1024,
+            num_inference_steps=50,
+            guidance_scale=5.0,
+            num_images_per_prompt=1,
+            is_profiler = False,
+            generator= torch.Generator(pipe.device).manual_seed(5544)).images[0]
+        torch.hpu.synchronize()
+        iter_time = time.perf_counter() - start_time
+        print(f'iter {i} duration:{iter_time:.3f}s')
 
     image.save(f'piaocong.jpg')
 
