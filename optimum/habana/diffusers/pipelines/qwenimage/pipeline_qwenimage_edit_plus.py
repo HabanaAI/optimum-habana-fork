@@ -463,6 +463,7 @@ class GaudiQwenImageEditPlusPipeline(GaudiDiffusionPipeline, QwenImageEditPlusPi
             vae_images = []
             for img in image:
                 image_width, image_height = img.size
+                img = img.convert('RGB')
                 condition_width, condition_height = calculate_dimensions(
                     CONDITION_IMAGE_SIZE, image_width / image_height
                 )
