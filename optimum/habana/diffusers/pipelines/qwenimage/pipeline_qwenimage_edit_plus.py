@@ -229,7 +229,9 @@ class GaudiQwenImageEditPlusPipeline(GaudiDiffusionPipeline, QwenImageEditPlusPi
                 f" size of {batch_size}. Make sure the batch size matches the length of the generators."
             )
         if latents is None:
-            latents = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
+            rand_device = "cpu" if device.type == "hpu" else device
+            rand_device = torch.device(rand_device)
+            latents = randn_tensor(shape, generator=generator, device=rand_device, dtype=dtype).to(device)
             latents = self._pack_latents(latents, batch_size, num_channels_latents, height, width)
         else:
             latents = latents.to(device=device, dtype=dtype)
