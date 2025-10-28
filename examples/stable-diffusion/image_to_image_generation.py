@@ -31,6 +31,7 @@ from optimum.habana.diffusers import (
 )
 from optimum.habana.transformers.gaudi_configuration import GaudiConfig
 from optimum.habana.utils import set_seed
+import os
 
 
 try:
@@ -278,7 +279,8 @@ def main():
         from optimum.habana.diffusers import GaudiStableDiffusionImg2ImgPipeline as Img2ImgPipeline
 
     if qwenimage:
-        kwargs["use_hpu_graphs"] = False
+        os.environ['QWEN25VL_FP32_SOFTMAX'] = "True"
+        kwargs["use_hpu_graphs"] = True
         gaudi_config_kwargs = {"use_fused_adam": True, "use_fused_clip_norm": True}
         gaudi_config_kwargs["use_torch_autocast"] = True
         gaudi_config = GaudiConfig(**gaudi_config_kwargs)
