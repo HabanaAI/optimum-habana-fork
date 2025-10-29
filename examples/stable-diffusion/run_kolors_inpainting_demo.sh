@@ -1,6 +1,7 @@
 #!/bin/bash
 
-
+#export SHOW_KOLORS_PIPELINE_TIME=False
+export SHOW_KOLORS_PIPELINE_TIME=True
 export PT_HPU_LAZY_MODE=1
 export PT_HPU_GPU_MIGRATION=1
 

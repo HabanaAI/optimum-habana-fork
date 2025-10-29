@@ -25,6 +25,7 @@ from diffusers.utils import (
 )
 from diffusers.callbacks import MultiPipelineCallbacks, PipelineCallback
 from diffusers.image_processor import PipelineImageInput, VaeImageProcessor
+from diffusers.utils.torch_utils import randn_tensor
 
 import habana_frameworks.torch as ht
 import habana_frameworks.torch.core as htcore
@@ -615,6 +616,73 @@ class GaudiStableDiffusionXLKolorsInpaintPipeline(GaudiDiffusionPipeline, Stable
 
         self.to(self._device)
 
+    def prepare_latents_gaudi(
+        self,
+        batch_size,
+        num_channels_latents,
+        height,
+        width,
+        dtype,
+        device,
+        generator,
+        latents=None,
+        image=None,
+        timestep=None,
+        is_strength_max=True,
+        add_noise=True,
+        return_noise=False,
+        return_image_latents=False,
+    ):
+        shape = (
+            batch_size,
+            num_channels_latents,
+            int(height) // self.vae_scale_factor,
+            int(width) // self.vae_scale_factor,
+        )
+        if isinstance(generator, list) and len(generator) != batch_size:
+            raise ValueError(
+                f"You have passed a list of generators of length {len(generator)}, but requested an effective batch"
+                f" size of {batch_size}. Make sure the batch size matches the length of the generators."
+            )
+
+        if (image is None or timestep is None) and not is_strength_max:
+            raise ValueError(
+                "Since strength < 1. initial latents are to be initialised as a combination of Image + Noise."
+                "However, either the image or the noise timestep has not been provided."
+            )
+
+        if image.shape[1] == 4:
+            image_latents = image.to(device=device, dtype=dtype)
+            image_latents = image_latents.repeat(batch_size // image_latents.shape[0], 1, 1, 1)
+        elif return_image_latents or (latents is None and not is_strength_max):
+            image = image.to(device=device, dtype=dtype)
+            image_latents = self._encode_vae_image(image=image, generator=generator)
+            image_latents = image_latents.repeat(batch_size // image_latents.shape[0], 1, 1, 1)
+
+        self.ht.core.mark_step()
+        if latents is None and add_noise:
+            noise = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
+            # if strength is 1. then initialise the latents to noise, else initial to image + noise
+            latents = noise if is_strength_max else self.scheduler.add_noise(image_latents, noise, timestep)
+            # if pure noise then scale the initial latents by the  Scheduler's init sigma
+            latents = latents * self.scheduler.init_noise_sigma if is_strength_max else latents
+        elif add_noise:
+            noise = latents.to(device)
+            latents = noise * self.scheduler.init_noise_sigma
+        else:
+            noise = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
+            latents = image_latents.to(device)
+
+        outputs = (latents,)
+
+        if return_noise:
+            outputs += (noise,)
+
+        if return_image_latents:
+            outputs += (image_latents,)
+
+        return outputs
+
     @torch.no_grad()
     def __call__(
         self,
@@ -848,6 +916,9 @@ class GaudiStableDiffusionXLKolorsInpaintPipeline(GaudiDiffusionPipeline, Stable
 
         callback = kwargs.pop("callback", None)
         callback_steps = kwargs.pop("callback_steps", None)
+        if "True" == os.getenv("SHOW_KOLORS_PIPELINE_TIME", False):
+            time_box = time_box_t() 
+            time_box.start()
 
         if callback is not None:
             deprecate(
@@ -932,6 +1003,9 @@ class GaudiStableDiffusionXLKolorsInpaintPipeline(GaudiDiffusionPipeline, Stable
                 negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
                 lora_scale=text_encoder_lora_scale,
             )
+            self.ht.core.mark_step()
+            if "True" == os.getenv("SHOW_KOLORS_PIPELINE_TIME", False):
+                time_box.show_time(f'encode_prompt')
 
             # 4. set timesteps
             def denoising_value_valid(dnv):
@@ -988,9 +1062,10 @@ class GaudiStableDiffusionXLKolorsInpaintPipeline(GaudiDiffusionPipeline, Stable
             num_channels_unet = self.unet.config.in_channels
             return_image_latents = num_channels_unet == 4
 
-            self.ht.core.mark_step()
+            if "True" == os.getenv("SHOW_KOLORS_PIPELINE_TIME", False):
+                time_box.show_time(f'pre prepare_latents')
             add_noise = True if self.denoising_start is None else False
-            latents_outputs = self.prepare_latents(
+            latents_outputs = self.prepare_latents_gaudi(
                 batch_size * num_images_per_prompt,
                 num_channels_latents,
                 height,
@@ -1006,6 +1081,9 @@ class GaudiStableDiffusionXLKolorsInpaintPipeline(GaudiDiffusionPipeline, Stable
                 return_noise=True,
                 return_image_latents=return_image_latents,
             )
+            #self.ht.core.mark_step()
+            if "True" == os.getenv("SHOW_KOLORS_PIPELINE_TIME", False):
+                time_box.show_time(f'prepare_latents')
 
             if return_image_latents:
                 latents, noise, image_latents = latents_outputs
@@ -1131,6 +1209,10 @@ class GaudiStableDiffusionXLKolorsInpaintPipeline(GaudiDiffusionPipeline, Stable
                     guidance_scale_tensor, embedding_dim=self.unet.config.time_cond_proj_dim
                 ).to(device=device, dtype=latents.dtype)
 
+            self.ht.core.mark_step()
+            if "True" == os.getenv("SHOW_KOLORS_PIPELINE_TIME", False):
+                time_box.show_time(f'pre unet_hpu')
+
             self._num_timesteps = len(timesteps)
             with self.progress_bar(total=num_inference_steps) as progress_bar:
                 for i, t in enumerate(timesteps):
@@ -1218,6 +1300,8 @@ class GaudiStableDiffusionXLKolorsInpaintPipeline(GaudiDiffusionPipeline, Stable
 
                     if not self.use_hpu_graphs:
                         self.htcore.mark_step()
+            if "True" == os.getenv("SHOW_KOLORS_PIPELINE_TIME", False):
+                time_box.show_time(f'unet_hpu')
 
             if not output_type == "latent":
                 # make sure the VAE is in float32 mode, as it overflows in float16
@@ -1265,6 +1349,8 @@ class GaudiStableDiffusionXLKolorsInpaintPipeline(GaudiDiffusionPipeline, Stable
 
             # Offload all models
             self.maybe_free_model_hooks()
+            if "True" == os.getenv("SHOW_KOLORS_PIPELINE_TIME", False):
+                time_box.show_time(f'vae')
 
             if not return_dict:
                 return (image,)
