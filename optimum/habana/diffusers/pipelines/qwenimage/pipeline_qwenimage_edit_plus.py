@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+import os
 import types
 from typing import Any, Callable, Dict, List, Optional, Union
 
@@ -109,6 +109,7 @@ class GaudiQwenImageEditPlusPipeline(GaudiDiffusionPipeline, QwenImageEditPlusPi
         sdp_on_bf16: bool = False,
         is_training: bool = False,
     ):
+        os.environ["QWEN25VL_FP32_SOFTMAX"] = "True"
         GaudiDiffusionPipeline.__init__(
             self,
             use_habana,
@@ -465,7 +466,7 @@ class GaudiQwenImageEditPlusPipeline(GaudiDiffusionPipeline, QwenImageEditPlusPi
             vae_images = []
             for img in image:
                 image_width, image_height = img.size
-                img = img.convert('RGB')
+                img = img.convert("RGB")
                 condition_width, condition_height = calculate_dimensions(
                     CONDITION_IMAGE_SIZE, image_width / image_height
                 )

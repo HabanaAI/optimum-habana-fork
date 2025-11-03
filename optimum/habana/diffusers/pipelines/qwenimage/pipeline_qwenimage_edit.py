@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+import os
 import types
 from typing import Any, Callable, Dict, List, Optional, Union
 
@@ -97,6 +97,7 @@ class GaudiQwenImageEditPipeline(GaudiDiffusionPipeline, QwenImageEditPipeline):
         sdp_on_bf16: bool = False,
         is_training: bool = False,
     ):
+        os.environ["QWEN25VL_FP32_SOFTMAX"] = "True"
         GaudiDiffusionPipeline.__init__(
             self,
             use_habana,
@@ -180,7 +181,7 @@ class GaudiQwenImageEditPipeline(GaudiDiffusionPipeline, QwenImageEditPipeline):
         prompt_embeds = prompt_embeds.to(dtype=dtype, device=device)
 
         return prompt_embeds, encoder_attention_mask
-    
+
     @torch.no_grad()
     @replace_example_docstring(EXAMPLE_DOC_STRING)
     def __call__(

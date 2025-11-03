@@ -16,10 +16,10 @@
 # Copyright (C) 2022-2024 Habana Labs, Ltd. an Intel Company
 ###############################################################################
 
+import math
 from typing import Optional, Union
 
 import torch
-import math
 from transformers.cache_utils import Cache
 from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
 from transformers.modeling_outputs import (

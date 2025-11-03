@@ -14,6 +14,7 @@
 # limitations under the License.
 """PyTorch Gaudi Qwen2.5-VL model."""
 
+import os
 from math import ceil
 from typing import List, Optional, Tuple, Union
 
@@ -42,7 +43,7 @@ from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
     apply_rotary_pos_emb_vision,
 )
 from transformers.utils import is_torchdynamo_compiling, logging
-import os
+
 
 try:
     from habana_frameworks.torch.hpex.kernels import RotaryPosEmbeddingHelperV2 as FusedRoPE
@@ -104,8 +105,8 @@ class ModuleFusedSDPA(torch.nn.Module):
         self._hpu_kernel_fsdpa = fusedSDPA
 
     def forward(self, query, key, value, attn_mask, dropout_p, is_casual, scale, softmax_mode):
-        if os.environ.get('QWEN25VL_FP32_SOFTMAX', 'false').lower() in ['true', '1']:
-            softmax_mode = 'fp32'
+        if os.environ.get("QWEN25VL_FP32_SOFTMAX", "false").lower() in ["true", "1"]:
+            softmax_mode = "fp32"
         return self._hpu_kernel_fsdpa.apply(query, key, value, attn_mask, dropout_p, is_casual, scale, softmax_mode)
 
 
