@@ -496,8 +496,8 @@ PT_HPU_LAZY_MODE=1 python image_to_video_generation.py \
 download Kolors model from https://huggingface.co/Kwai-Kolors/Kolors
 
 run Kolors demo:
-```bash
-run_kolors_demo.sh
+```
+bash run_kolors_demo.sh
 ```
 
 
@@ -508,8 +508,8 @@ download Kolors Inpainting  model from  https://huggingface.co/Kwai-Kolors/Kolor
 download test data from https://github.com/Kwai-Kolors/Kolors/tree/master/inpainting
 
 run Kolors Inpainting demo:
-```bash
-run_kolors_inpainting_demo.sh
+```
+bash run_kolors_inpainting_demo.sh
 ```
 
 # Important Notes for Gaudi3 Users
