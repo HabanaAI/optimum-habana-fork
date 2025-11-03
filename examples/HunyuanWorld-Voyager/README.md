@@ -15,6 +15,7 @@ limitations under the License.
 
 # inference
 this is HunyuanWorld Voyager model example on Intel Gaudi.
+
 1 install python package.
 ```bash
      pip install -r requirements.txt
