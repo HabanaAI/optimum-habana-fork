@@ -66,8 +66,9 @@ def main():
             generator= torch.Generator(pipe.device).manual_seed(878))
     torch.hpu.synchronize()
 
+    iter_time = 0
+    start_time = time.perf_counter()
     for i in range(5):
-        start_time = time.perf_counter()
         image = pipe(
             prompt=args.prompts,
             height=1024,
@@ -77,9 +78,11 @@ def main():
             num_images_per_prompt=1,
             is_profiler = False,
             generator= torch.Generator(pipe.device).manual_seed(5544)).images[0]
-        torch.hpu.synchronize()
-        iter_time = time.perf_counter() - start_time
-        print(f'iter {i} duration:{iter_time:.3f}s')
+    torch.hpu.synchronize()
+    iter_time += time.perf_counter() - start_time
+
+    iter_time = iter_time / 5
+    print(f'Kolors pipeline duration:{iter_time:.3f}s')
 
     image.save(f'piaocong.jpg')
 
