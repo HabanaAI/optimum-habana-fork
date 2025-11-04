@@ -660,7 +660,6 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
             finalize_calibration(self.transformer)
 
         ht.hpu.synchronize()
-        end_time = time.time()
 
         speed_metrics_prefix = "generation"
         if use_warmup_inference_steps:
@@ -668,7 +667,6 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
         speed_measures = speed_metrics(
             split=speed_metrics_prefix,
             start_time=t0,
-            end_time=end_time,
             num_samples=batch_size
             if t1 == t0 or use_warmup_inference_steps
             else (num_batches - throughput_warmup_steps) * batch_size,
