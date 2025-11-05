@@ -483,8 +483,8 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
             image,
             num_prompts * num_images_per_prompt,
             num_channels_latents,
-            height,
-            width,
+            image_height,
+            image_width,
             prompt_embeds.dtype,
             device,
             generator,
@@ -641,7 +641,7 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
                     ht.hpu.synchronize()
 
             if not output_type == "latent":
-                latents_batch = self._unpack_latents(latents_batch, height, width, self.vae_scale_factor)
+                latents_batch = self._unpack_latents(latents_batch, image_height, image_width, self.vae_scale_factor)
                 latents_batch = (latents_batch / self.vae.config.scaling_factor) + self.vae.config.shift_factor
                 image = self.vae.decode(latents_batch, return_dict=False)[0]
                 image = self.image_processor.postprocess(image, output_type=output_type)
