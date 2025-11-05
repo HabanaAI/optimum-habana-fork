@@ -487,12 +487,12 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
 
         # 2. Define call parameters
         if prompt is not None and isinstance(prompt, str):
-            num_prompts = 1
+            batch_size = 1
         elif prompt is not None and isinstance(prompt, list):
-            num_prompts = len(prompt)
+            batch_size = len(prompt)
         else:
-            num_prompts = prompt_embeds.shape[0]
-        num_batches = math.ceil((num_images_per_prompt * num_prompts) / batch_size)
+            batch_size = prompt_embeds.shape[0]
+        num_batches = num_images_per_prompt
 
         device = self._execution_device
 
@@ -503,8 +503,6 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
             negative_prompt_embeds is not None and negative_pooled_prompt_embeds is not None
         )
         do_true_cfg = true_cfg_scale > 1 and has_neg_prompt
-
-        # 3. Run text encoder
         (
             prompt_embeds,
             pooled_prompt_embeds,
@@ -535,7 +533,7 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
                 lora_scale=lora_scale,
             )
 
-        # 4. Preprocess image
+        # 3. Preprocess image
         if image is not None and not (isinstance(image, torch.Tensor) and image.size(1) == self.latent_channels):
             img = image[0] if isinstance(image, list) else image
             image_height, image_width = self.image_processor.get_default_height_width(img)
@@ -550,11 +548,11 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
             image = self.image_processor.resize(image, image_height, image_width)
             image = self.image_processor.preprocess(image, image_height, image_width)
 
-        # 5. Prepare latent variables
+        # 4. Prepare latent variables
         num_channels_latents = self.transformer.config.in_channels // 4
         latents, image_latents, latent_ids, image_ids = self.prepare_latents(
             image,
-            num_prompts * num_images_per_prompt,
+            batch_size * num_images_per_prompt,
             num_channels_latents,
             image_height,
             image_width,
@@ -566,7 +564,7 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
         if image_ids is not None:
             latent_ids = torch.cat([latent_ids, image_ids], dim=0)  # dim 0 is sequence dimension
 
-        # 6. Prepare timesteps
+        # 5. Prepare timesteps
         sigmas = np.linspace(1.0, 1 / num_inference_steps, num_inference_steps) if sigmas is None else sigmas
         image_seq_len = latents.shape[1]
         mu = calculate_shift(
@@ -627,7 +625,7 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
             )
 
         logger.info(
-            f"{num_prompts} prompt(s) received, {num_images_per_prompt} generation(s) per prompt,"
+            f"{batch_size} prompt(s) received, {num_images_per_prompt} generation(s) per prompt,"
             f" {batch_size} sample(s) per batch, {num_batches} total batch(es)."
         )
         if num_batches < 3:
@@ -650,7 +648,7 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
         )
         hb_profiler.start()
 
-        # 6.1. Split Input data to batches (HPU-specific step)
+        # 5.1. Split Input data to batches (HPU-specific step)
         (
             latents_batches,
             text_embeddings_batches,
@@ -663,7 +661,7 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
             "images": [],
         }
 
-        # 7. Denoising loop
+        # 6. Denoising loop
         for j in range(num_batches):
             # The throughput is calculated from the 4th iteration
             # because compilation occurs in the first 2-3 iterations
@@ -757,7 +755,7 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
             outputs["images"].append(image)
             # htcore.mark_step(sync=True)
 
-        # 8. Stage after denoising
+        # 7. Stage after denoising
         hb_profiler.stop()
 
         if quant_mode == "measure":
@@ -782,7 +780,7 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
         )
         logger.info(f"Speed metrics: {speed_measures}")
 
-        # 9. Output Images
+        # 8. Output Images
         if num_dummy_samples > 0:
             # Remove dummy generations if needed
             outputs["images"][-1] = outputs["images"][-1][:-num_dummy_samples]
