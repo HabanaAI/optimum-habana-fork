@@ -149,7 +149,7 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
             Whether to allow PyTorch to use reduced precision in the SDPA math backend.
     """
 
-    model_cpu_offload_seq = "text_encoder->text_encoder_2->transformer->vae"
+    model_cpu_offload_seq = "text_encoder->text_encoder_2->image_encoder->transformer->vae"
     _optional_components = ["image_encoder", "feature_extractor"]
     _callback_tensor_inputs = ["latents", "prompt_embeds"]
 
@@ -180,13 +180,15 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
         )
         FluxKontextPipeline.__init__(
             self,
-            scheduler=scheduler,
             vae=vae,
             text_encoder=text_encoder,
-            tokenizer=tokenizer,
             text_encoder_2=text_encoder_2,
+            tokenizer=tokenizer,
             tokenizer_2=tokenizer_2,
             transformer=transformer,
+            scheduler=scheduler,
+            image_encoder=image_encoder,
+            feature_extractor=feature_extractor,
         )
 
         for block in self.transformer.single_transformer_blocks:
@@ -263,10 +265,14 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
         image: Optional[PipelineImageInput] = None,
         prompt: Union[str, List[str]] = None,
         prompt_2: Optional[Union[str, List[str]]] = None,
+        negative_prompt: Union[str, List[str]] = None,
+        negative_prompt_2: Optional[Union[str, List[str]]] = None,
+        true_cfg_scale: float = 1.0,
         height: Optional[int] = None,
         width: Optional[int] = None,
         num_inference_steps: int = 28,
         timesteps: List[int] = None,
+        sigmas: Optional[List[float]] = None,
         guidance_scale: float = 3.5,
         batch_size: int = 1,
         num_images_per_prompt: Optional[int] = 1,
@@ -274,6 +280,12 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
         latents: Optional[torch.FloatTensor] = None,
         prompt_embeds: Optional[torch.FloatTensor] = None,
         pooled_prompt_embeds: Optional[torch.FloatTensor] = None,
+        ip_adapter_image: Optional[PipelineImageInput] = None,
+        ip_adapter_image_embeds: Optional[List[torch.Tensor]] = None,
+        negative_ip_adapter_image: Optional[PipelineImageInput] = None,
+        negative_ip_adapter_image_embeds: Optional[List[torch.Tensor]] = None,
+        negative_prompt_embeds: Optional[torch.FloatTensor] = None,
+        negative_pooled_prompt_embeds: Optional[torch.FloatTensor] = None,
         output_type: Optional[str] = "pil",
         return_dict: bool = True,
         joint_attention_kwargs: Optional[Dict[str, Any]] = None,
@@ -303,6 +315,15 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
             prompt_2 (`str` or `List[str]`, *optional*):
                 The prompt or prompts to be sent to `tokenizer_2` and `text_encoder_2`. If not defined, `prompt` is
                 will be used instead.
+            negative_prompt (`str` or `List[str]`, *optional*):
+                The prompt or prompts not to guide the image generation. If not defined, one has to pass
+                `negative_prompt_embeds` instead. Ignored when not using guidance (i.e., ignored if `true_cfg_scale` is
+                not greater than `1`).
+            negative_prompt_2 (`str` or `List[str]`, *optional*):
+                The prompt or prompts not to guide the image generation to be sent to `tokenizer_2` and
+                `text_encoder_2`. If not defined, `negative_prompt` is used in all the text-encoders.
+            true_cfg_scale (`float`, *optional*, defaults to 1.0):
+                When > 1.0 and a provided `negative_prompt`, enables true classifier-free guidance.
             height (`int`, *optional*, defaults to self.unet.config.sample_size * self.vae_scale_factor):
                 The height in pixels of the generated image. This is set to 1024 by default for the best results.
             width (`int`, *optional*, defaults to self.unet.config.sample_size * self.vae_scale_factor):
@@ -314,6 +335,10 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
                 Custom timesteps to use for the denoising process with schedulers which support a `timesteps` argument
                 in their `set_timesteps` method. If not defined, the default behavior when `num_inference_steps` is
                 passed will be used. Must be in descending order.
+            sigmas (`List[float]`, *optional*):
+                Custom sigmas to use for the denoising process with schedulers which support a `sigmas` argument in
+                their `set_timesteps` method. If not defined, the default behavior when `num_inference_steps` is passed
+                will be used.
             guidance_scale (`float`, *optional*, defaults to 3.5):
                 Embedded guidance scale is enabled by setting `guidance_scale` > 1. Higher `guidance_scale` encourages
                 a model to generate images more aligned with prompt at the expense of lower image quality.
@@ -328,13 +353,33 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
             latents (`torch.FloatTensor`, *optional*):
                 Pre-generated noisy latents, sampled from a Gaussian distribution, to be used as inputs for image
                 generation. Can be used to tweak the same generation with different prompts. If not provided, a latents
-                tensor will ge generated by sampling using the supplied random `generator`.
+                tensor will be generated by sampling using the supplied random `generator`.
             prompt_embeds (`torch.FloatTensor`, *optional*):
                 Pre-generated text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt weighting. If not
                 provided, text embeddings will be generated from `prompt` input argument.
             pooled_prompt_embeds (`torch.FloatTensor`, *optional*):
                 Pre-generated pooled text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt weighting.
                 If not provided, pooled text embeddings will be generated from `prompt` input argument.
+            ip_adapter_image: (`PipelineImageInput`, *optional*):
+                Optional image input to work with IP Adapters.
+            ip_adapter_image_embeds (`List[torch.Tensor]`, *optional*):
+                Pre-generated image embeddings for IP-Adapter. It should be a list of length same as number of
+                IP-adapters. Each element should be a tensor of shape `(batch_size, num_images, emb_dim)`. If not
+                provided, embeddings are computed from the `ip_adapter_image` input argument.
+            negative_ip_adapter_image:
+                (`PipelineImageInput`, *optional*): Optional image input to work with IP Adapters.
+            negative_ip_adapter_image_embeds (`List[torch.Tensor]`, *optional*):
+                Pre-generated image embeddings for IP-Adapter. It should be a list of length same as number of
+                IP-adapters. Each element should be a tensor of shape `(batch_size, num_images, emb_dim)`. If not
+                provided, embeddings are computed from the `ip_adapter_image` input argument.
+            negative_prompt_embeds (`torch.FloatTensor`, *optional*):
+                Pre-generated negative text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt
+                weighting. If not provided, negative_prompt_embeds will be generated from `negative_prompt` input
+                argument.
+            negative_pooled_prompt_embeds (`torch.FloatTensor`, *optional*):
+                Pre-generated negative pooled text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt
+                weighting. If not provided, pooled negative_prompt_embeds will be generated from `negative_prompt`
+                input argument.
             output_type (`str`, *optional*, defaults to `"pil"`):
                 The output format of the generate image. Choose between
                 [PIL](https://pillow.readthedocs.io/en/stable/): `PIL.Image.Image` or `np.array`.
@@ -425,8 +470,12 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
             prompt_2,
             height,
             width,
+            negative_prompt=negative_prompt,
+            negative_prompt_2=negative_prompt_2,
             prompt_embeds=prompt_embeds,
+            negative_prompt_embeds=negative_prompt_embeds,
             pooled_prompt_embeds=pooled_prompt_embeds,
+            negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
             callback_on_step_end_tensor_inputs=callback_on_step_end_tensor_inputs,
             max_sequence_length=max_sequence_length,
         )
@@ -447,6 +496,14 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
 
         device = self._execution_device
 
+        lora_scale = (
+            self.joint_attention_kwargs.get("scale", None) if self.joint_attention_kwargs is not None else None
+        )
+        has_neg_prompt = negative_prompt is not None or (
+            negative_prompt_embeds is not None and negative_pooled_prompt_embeds is not None
+        )
+        do_true_cfg = true_cfg_scale > 1 and has_neg_prompt
+
         # 3. Run text encoder
         (
             prompt_embeds,
@@ -460,7 +517,23 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
             device=device,
             num_images_per_prompt=num_images_per_prompt,
             max_sequence_length=max_sequence_length,
+            lora_scale=lora_scale,
         )
+        if do_true_cfg:
+            (
+                negative_prompt_embeds,
+                negative_pooled_prompt_embeds,
+                negative_text_ids,
+            ) = self.encode_prompt(
+                prompt=negative_prompt,
+                prompt_2=negative_prompt_2,
+                prompt_embeds=negative_prompt_embeds,
+                pooled_prompt_embeds=negative_pooled_prompt_embeds,
+                device=device,
+                num_images_per_prompt=num_images_per_prompt,
+                max_sequence_length=max_sequence_length,
+                lora_scale=lora_scale,
+            )
 
         # 4. Preprocess image
         if image is not None and not (isinstance(image, torch.Tensor) and image.size(1) == self.latent_channels):
@@ -494,7 +567,7 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
             latent_ids = torch.cat([latent_ids, image_ids], dim=0)  # dim 0 is sequence dimension
 
         # 6. Prepare timesteps
-        sigmas = np.linspace(1.0, 1 / num_inference_steps, num_inference_steps)
+        sigmas = np.linspace(1.0, 1 / num_inference_steps, num_inference_steps) if sigmas is None else sigmas
         image_seq_len = latents.shape[1]
         mu = calculate_shift(
             image_seq_len,
@@ -508,9 +581,10 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
             num_inference_steps,
             device,
             timesteps,
-            sigmas,
+            sigmas=sigmas,
             mu=mu,
         )
+        num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
         self._num_timesteps = len(timesteps)
 
         # handle guidance
@@ -519,6 +593,38 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
             guidance = guidance.expand(latents.shape[0])
         else:
             guidance = None
+
+        if (ip_adapter_image is not None or ip_adapter_image_embeds is not None) and (
+            negative_ip_adapter_image is None and negative_ip_adapter_image_embeds is None
+        ):
+            negative_ip_adapter_image = np.zeros((width, height, 3), dtype=np.uint8)
+            negative_ip_adapter_image = [negative_ip_adapter_image] * self.transformer.encoder_hid_proj.num_ip_adapters
+
+        elif (ip_adapter_image is None and ip_adapter_image_embeds is None) and (
+            negative_ip_adapter_image is not None or negative_ip_adapter_image_embeds is not None
+        ):
+            ip_adapter_image = np.zeros((width, height, 3), dtype=np.uint8)
+            ip_adapter_image = [ip_adapter_image] * self.transformer.encoder_hid_proj.num_ip_adapters
+
+        if self.joint_attention_kwargs is None:
+            self._joint_attention_kwargs = {}
+
+        image_embeds = None
+        negative_image_embeds = None
+        if ip_adapter_image is not None or ip_adapter_image_embeds is not None:
+            image_embeds = self.prepare_ip_adapter_image_embeds(
+                ip_adapter_image,
+                ip_adapter_image_embeds,
+                device,
+                batch_size * num_images_per_prompt,
+            )
+        if negative_ip_adapter_image is not None or negative_ip_adapter_image_embeds is not None:
+            negative_image_embeds = self.prepare_ip_adapter_image_embeds(
+                negative_ip_adapter_image,
+                negative_ip_adapter_image_embeds,
+                device,
+                batch_size * num_images_per_prompt,
+            )
 
         logger.info(
             f"{num_prompts} prompt(s) received, {num_images_per_prompt} generation(s) per prompt,"
@@ -660,7 +766,6 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
             finalize_calibration(self.transformer)
 
         ht.hpu.synchronize()
-
         speed_metrics_prefix = "generation"
         if use_warmup_inference_steps:
             t1 = warmup_inference_steps_time_adjustment(t1, t1, num_inference_steps, throughput_warmup_steps)
