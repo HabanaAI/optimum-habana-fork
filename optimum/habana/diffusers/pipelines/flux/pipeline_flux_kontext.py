@@ -699,7 +699,7 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
             prompt_embeds_batches = torch.roll(prompt_embeds_batches, shifts=-1, dims=0)
             pooled_prompt_embeds_batch = pooled_prompt_embeds_batches[0]
             pooled_prompt_embeds_batches = torch.roll(pooled_prompt_embeds_batches, shifts=-1, dims=0)
-            if has_neg_prompt:
+            if do_true_cfg:
                 negative_prompt_embeds_batch = negative_prompt_embeds_batches[0]
                 negative_prompt_embeds_batches = torch.roll(negative_prompt_embeds_batches, shifts=-1, dims=0)
                 negative_pooled_prompt_embeds_batch = negative_pooled_prompt_embeds_batches[0]
