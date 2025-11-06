@@ -200,7 +200,7 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
         if use_hpu_graphs:
             from habana_frameworks.torch.hpu import wrap_in_hpu_graph
 
-            self.transformer = wrap_in_hpu_graph(self.transformer)
+            transformer = wrap_in_hpu_graph(transformer)
 
     @classmethod
     def _split_inputs_into_batches(cls, batch_size, latents, prompt_embeds, pooled_prompt_embeds, guidance):
