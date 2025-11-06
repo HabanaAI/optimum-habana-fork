@@ -651,8 +651,8 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
         # 5.1. Split Input data to batches (HPU-specific step)
         (
             latents_batches,
-            text_embeddings_batches,
-            pooled_prompt_embeddings_batches,
+            prompt_embeds_batches,
+            pooled_prompt_embeds_batches,
             guidance_batches,
             num_dummy_samples,
         ) = self._split_inputs_into_batches(batch_size, latents, prompt_embeds, pooled_prompt_embeds, guidance)
@@ -671,10 +671,10 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
 
             latents_batch = latents_batches[0]
             latents_batches = torch.roll(latents_batches, shifts=-1, dims=0)
-            text_embeddings_batch = text_embeddings_batches[0]
-            text_embeddings_batches = torch.roll(text_embeddings_batches, shifts=-1, dims=0)
-            pooled_prompt_embeddings_batch = pooled_prompt_embeddings_batches[0]
-            pooled_prompt_embeddings_batches = torch.roll(pooled_prompt_embeddings_batches, shifts=-1, dims=0)
+            prompt_embeds_batch = prompt_embeds_batches[0]
+            prompt_embeds_batches = torch.roll(prompt_embeds_batches, shifts=-1, dims=0)
+            pooled_prompt_embeds_batch = pooled_prompt_embeds_batches[0]
+            pooled_prompt_embeds_batches = torch.roll(pooled_prompt_embeds_batches, shifts=-1, dims=0)
             guidance_batch = None if guidance_batches is None else guidance_batches[0]
             guidance_batches = None if guidance_batches is None else torch.roll(guidance_batches, shifts=-1, dims=0)
 
@@ -703,6 +703,8 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
                 timesteps = torch.roll(timesteps, shifts=-1, dims=0)
                 # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
                 timestep = timestep.expand(latents_batch.shape[0]).to(latents_batch.dtype)
+                if image_embeds is not None:
+                    self._joint_attention_kwargs["ip_adapter_image_embeds"] = image_embeds
 
                 latent_model_input = latents_batch
                 if image_latents is not None:
@@ -714,27 +716,62 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
                         hidden_states=latent_model_input,
                         timestep=timestep / 1000,
                         guidance=guidance_batch,
-                        pooled_projections=pooled_prompt_embeddings_batch,
-                        encoder_hidden_states=text_embeddings_batch,
+                        pooled_projections=pooled_prompt_embeds_batch,
+                        encoder_hidden_states=prompt_embeds_batch,
                         txt_ids=text_ids,
                         img_ids=latent_ids,
                         joint_attention_kwargs=self.joint_attention_kwargs,
                         return_dict=False,
                     )[0]
                     noise_pred = noise_pred[:, : latents_batch.size(1)]
+
+                    if do_true_cfg:
+                        if negative_image_embeds is not None:
+                            self._joint_attention_kwargs["ip_adapter_image_embeds"] = negative_image_embeds
+                        neg_noise_pred = transformer_bf16(
+                            hidden_states=latent_model_input,
+                            timestep=timestep / 1000,
+                            guidance=guidance_batch,
+                            pooled_projections=negative_pooled_prompt_embeds_batch,
+                            encoder_hidden_states=negative_prompt_embeds_batch,
+                            txt_ids=negative_text_ids,
+                            img_ids=latent_ids,
+                            joint_attention_kwargs=self.joint_attention_kwargs,
+                            return_dict=False,
+                        )[0]
+                        neg_noise_pred = neg_noise_pred[:, : latents_batch.size(1)]
+                        noise_pred = neg_noise_pred + true_cfg_scale * (noise_pred - neg_noise_pred)
+                        
                 else:
                     noise_pred = self.transformer(
                         hidden_states=latent_model_input,
                         timestep=timestep / 1000,
                         guidance=guidance_batch,
-                        pooled_projections=pooled_prompt_embeddings_batch,
-                        encoder_hidden_states=text_embeddings_batch,
+                        pooled_projections=pooled_prompt_embeds_batch,
+                        encoder_hidden_states=prompt_embeds_batch,
                         txt_ids=text_ids,
                         img_ids=latent_ids,
                         joint_attention_kwargs=self.joint_attention_kwargs,
                         return_dict=False,
                     )[0]
                     noise_pred = noise_pred[:, : latents_batch.size(1)]
+                    
+                    if do_true_cfg:
+                        if negative_image_embeds is not None:
+                            self._joint_attention_kwargs["ip_adapter_image_embeds"] = negative_image_embeds
+                        neg_noise_pred = self.transformer(
+                            hidden_states=latent_model_input,
+                            timestep=timestep / 1000,
+                            guidance=guidance_batch,
+                            pooled_projections=negative_pooled_prompt_embeds_batch,
+                            encoder_hidden_states=negative_prompt_embeds_batch,
+                            txt_ids=negative_text_ids,
+                            img_ids=latent_ids,
+                            joint_attention_kwargs=self.joint_attention_kwargs,
+                            return_dict=False,
+                        )[0]
+                        neg_noise_pred = neg_noise_pred[:, : latents_batch.size(1)]
+                        noise_pred = neg_noise_pred + true_cfg_scale * (noise_pred - neg_noise_pred)
 
                 # compute the previous noisy sample x_t -> x_t-1
                 latents_batch = self.scheduler.step(noise_pred, timestep, latents_batch, return_dict=False)[0]
