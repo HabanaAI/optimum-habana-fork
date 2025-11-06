@@ -266,8 +266,8 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
         latents_batches = torch.stack(latents_batches)
         prompt_embeds_batches = torch.stack(prompt_embeds_batches)
         pooled_prompt_embeds_batches = torch.stack(pooled_prompt_embeds_batches)
-        negative_prompt_embeds_batches = torch.stack(negative_prompt_embeds_batches) if negative_prompt_embeds_batches is not None else None
-        negative_pooled_prompt_embeds_batches = torch.stack(negative_pooled_prompt_embeds_batches) if negative_pooled_prompt_embeds_batches is not None else None
+        negative_prompt_embeds_batches = torch.stack(negative_prompt_embeds_batches) if negative_prompt_embeds is not None else None
+        negative_pooled_prompt_embeds_batches = torch.stack(negative_pooled_prompt_embeds_batches) if negative_pooled_prompt_embeds is not None else None
         guidance_batches = torch.stack(guidance_batches) if guidance is not None else None
 
         return (
