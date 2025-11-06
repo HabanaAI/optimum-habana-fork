@@ -26,11 +26,16 @@ from diffusers.utils import logging, replace_example_docstring
 from diffusers.utils.torch_utils import randn_tensor
 from transformers import AutoTokenizer, UMT5EncoderModel
 
+from ....distributed import parallel_state
 from ....transformers.gaudi_configuration import GaudiConfig
 from ....utils import HabanaProfile
 from ...models.attention_processor import GaudiWanAttnProcessor
-from ...models.autoencoders.autoencoder_kl_wan import WanDecoder3dForwardGaudi, WanDupUp3DForwardGaudi
-from ...models.wan_transformer_3d import WanTransformer3DModleForwardGaudi
+from ...models.autoencoders.autoencoder_kl_wan import (
+    WanDecoder3dForwardGaudi,
+    WanDupUp3DForwardGaudi,
+    WanAttentionBlockForwardGaudi,
+)
+from ...models.wan_transformer_3d import WanTransformer3DModleForwardGaudi, WanTransformerBlockForwardGaudi
 from ..pipeline_utils import GaudiDiffusionPipeline
 
 
@@ -119,17 +124,25 @@ class GaudiWanPipeline(GaudiDiffusionPipeline, WanPipeline):
         if self.transformer is not None:
             self.transformer.forward = types.MethodType(WanTransformer3DModleForwardGaudi, self.transformer)
             for block in self.transformer.blocks:
+                block.forward = types.MethodType(WanTransformerBlockForwardGaudi, block)
                 block.attn1.processor = GaudiWanAttnProcessor(is_training)
                 block.attn2.processor = GaudiWanAttnProcessor(is_training)
         if self.transformer_2 is not None:
             self.transformer_2.forward = types.MethodType(WanTransformer3DModleForwardGaudi, self.transformer_2)
             for block in self.transformer_2.blocks:
+                block.forward = types.MethodType(WanTransformerBlockForwardGaudi, block)
                 block.attn1.processor = GaudiWanAttnProcessor(is_training)
                 block.attn2.processor = GaudiWanAttnProcessor(is_training)
         self.vae.decoder.forward = types.MethodType(WanDecoder3dForwardGaudi, self.vae.decoder)
         for block in self.vae.decoder.up_blocks:
             if type(block) is WanResidualUpBlock and block.avg_shortcut is not None:
                 block.avg_shortcut.forward = types.MethodType(WanDupUp3DForwardGaudi, block.avg_shortcut)
+
+        for attn in self.vae.decoder.mid_block.attentions:
+            attn.forwward = types.MethodType(WanAttentionBlockForwardGaudi, attn)
+
+        for attn in self.vae.encoder.mid_block.attentions:
+            attn.forwward = types.MethodType(WanAttentionBlockForwardGaudi, attn)
 
         if use_hpu_graphs:
             from habana_frameworks.torch.hpu import wrap_in_hpu_graph
@@ -155,6 +168,7 @@ class GaudiWanPipeline(GaudiDiffusionPipeline, WanPipeline):
             return latents.to(device=device, dtype=dtype)
 
         num_latent_frames = (num_frames - 1) // self.vae_scale_factor_temporal + 1
+
         shape = (
             batch_size,
             num_channels_latents,
@@ -300,6 +314,19 @@ class GaudiWanPipeline(GaudiDiffusionPipeline, WanPipeline):
             )
             num_frames = num_frames // self.vae_scale_factor_temporal * self.vae_scale_factor_temporal + 1
         num_frames = max(num_frames, 1)
+
+        # It is to ensure the latent width/height can be divided by patch size.
+        _, p_w, p_h = self.transformer.config.patch_size
+        if width // self.vae_scale_factor_spatial % p_w != 0:
+            logger.warning(
+                f"`latent_width` has to be divisible by patch_size{p_w}. Rounding to the nearest number."
+            )
+            width = (width // self.vae_scale_factor_spatial // p_w + 1) * p_w * self.vae_scale_factor_spatial
+        if height // self.vae_scale_factor_spatial % p_h != 0:
+            logger.warning(
+                f"`latent_height` has to be divisible by patch_size{p_h}. Rounding to the nearest number."
+            )
+            height = (height // self.vae_scale_factor_spatial // p_h + 1) * p_h * self.vae_scale_factor_spatial
 
         if self.config.boundary_ratio is not None and guidance_scale_2 is None:
             guidance_scale_2 = guidance_scale

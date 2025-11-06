@@ -22,8 +22,10 @@ from diffusers.models.attention_processor import Attention
 from diffusers.models.transformers.transformer_wan import WanAttention, _get_added_kv_projections, _get_qkv_projections
 from diffusers.utils import deprecate, logging
 from diffusers.utils.import_utils import is_xformers_available
+from habana_frameworks.torch.hpex.kernels import FusedSDPA
 from torch import nn
 
+from ...distributed import parallel_state
 from .embeddings import RotaryPosEmbedding
 
 
@@ -206,8 +208,92 @@ class ModuleFusedSDPA(torch.nn.Module):
         super().__init__()
         self._hpu_kernel_fsdpa = fusedSDPA
 
-    def forward(self, query, key, value, attn_mask, dropout_p, is_casual, scale, softmax_mode):
-        return self._hpu_kernel_fsdpa.apply(query, key, value, attn_mask, dropout_p, is_casual, scale, softmax_mode)
+    def forward(
+        self,
+        query,
+        key,
+        value,
+        attn_mask,
+        dropout_p,
+        is_causal,
+        scale,
+        softmax_mode,
+        recompute_mode,
+        valid_sequence_lengths,
+        padding_side="left",
+    ):
+        query, key, value = (x.permute(0, 2, 1, 3).contiguous() for x in (query, key, value))
+        out = self._hpu_kernel_fsdpa.apply(
+            query,
+            key,
+            value,
+            attn_mask,
+            dropout_p,
+            is_causal,
+            scale,
+            softmax_mode,
+            recompute_mode,
+            valid_sequence_lengths,
+            padding_side,
+        )
+        return out.permute(0, 2, 1, 3)
+
+
+class GaudiDistributedAttention(torch.nn.Module):
+    def __init__(self, hpu_module_fsdpa: ModuleFusedSDPA):
+        super().__init__()
+        self._hpu_module_fsdpa = hpu_module_fsdpa
+        if parallel_state.sequence_parallel_is_initialized() and parallel_state.get_sequence_parallel_world_size() > 1:
+            from deepspeed.sequence.layer import DistributedAttention
+
+            self._hpu_module_fsdpa_distributed = DistributedAttention(
+                self._hpu_module_fsdpa, parallel_state.get_sequence_parallel_group(), 2, 1
+            )
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_mask: torch.Tensor,
+        dropout_p: float,
+        is_casual,
+        scale,
+        softmax_mode,
+        recompute_mode,
+        valid_sequence_lengths,
+        padding_side="left",
+    ):
+        if parallel_state.sequence_parallel_is_initialized() and parallel_state.get_sequence_parallel_world_size() > 1:
+            return self._hpu_module_fsdpa_distributed(
+                query,
+                key,
+                value,
+                0,  # As the shape for inputs is [B, S, N, H]
+                None,
+                attn_mask,
+                dropout_p,
+                is_casual,
+                scale,
+                softmax_mode,
+                recompute_mode,
+                valid_sequence_lengths,
+                padding_side,
+            )
+        else:
+            return self._hpu_module_fsdpa(
+                query,
+                key,
+                value,
+                attn_mask,
+                dropout_p,
+                is_casual,
+                scale,
+                softmax_mode,
+                recompute_mode,
+                valid_sequence_lengths,
+                padding_side,
+            )
 
 
 class CogVideoXAttnProcessorGaudi:
@@ -262,17 +348,20 @@ class CogVideoXAttnProcessorGaudi:
 
         softmax_mode = "None" if attn.training else "fast"
         hidden_states = self.fused_scaled_dot_product_attention(
-            query,
-            key,
-            value,
-            attn_mask=attention_mask,
-            dropout_p=0.0,
-            is_casual=False,
-            scale=None,
-            softmax_mode=softmax_mode,
+            query.transpose(1, 2).contiguous(),
+            key.transpose(1, 2).contiguous(),
+            value.transpose(1, 2).contiguous(),
+            attention_mask,
+            0.0,
+            False,
+            None,
+            softmax_mode,
+            False,
+            None,
+            "None",
         )
 
-        hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim)
+        hidden_states = hidden_states.reshape(batch_size, -1, attn.heads * head_dim)
 
         # linear proj
         hidden_states = attn.to_out[0](hidden_states)
@@ -553,6 +642,18 @@ class GaudiWanAttnProcessor:
                 "WanAttnProcessor requires PyTorch 2.0. To use it, please upgrade PyTorch to version 2.0 or higher."
             )
         self.is_training = is_training
+        self.fused_scaled_dot_product_attention = ModuleFusedSDPA(FusedSDPA) if FusedSDPA else None
+        self.fused_scaled_dot_product_attention_distributed = None
+        self.use_sp = os.getenv("USE_SP", "True").lower() not in ("0", "false", "False")
+        self.cp_size = parallel_state.get_sequence_parallel_world_size()
+
+        if not self.use_sp and parallel_state.sequence_parallel_is_initialized() \
+            and self.cp_size > 1:
+            self.fused_scaled_dot_product_attention_distributed = (
+                GaudiDistributedAttention(self.fused_scaled_dot_product_attention)
+                if FusedSDPA
+                else None
+            )
 
     def _native_attention(
         self,
@@ -565,14 +666,28 @@ class GaudiWanAttnProcessor:
         scale: Optional[float] = None,
         enable_gqa: bool = False,
     ) -> torch.Tensor:
-        # apply gaudi fused SDPA
-        from habana_frameworks.torch.hpex.kernels import FusedSDPA
-
         # Fast FSDPA is not supported in training mode
         fsdpa_mode = "None" if self.is_training else "fast"
-        query, key, value = (x.permute(0, 2, 1, 3) for x in (query, key, value))
-        out = FusedSDPA.apply(query, key, value, attn_mask, dropout_p, is_causal, scale, fsdpa_mode, None)
-        out = out.permute(0, 2, 1, 3)
+
+        if self.fused_scaled_dot_product_attention_distributed:
+            out = self.fused_scaled_dot_product_attention_distributed(
+                query,
+                key,
+                value,
+                attn_mask,
+                0.0,
+                False,
+                None,
+                fsdpa_mode,
+                False,
+                None,
+                "None",
+            )
+        else:
+            out = self.fused_scaled_dot_product_attention(query, key, value, attn_mask, dropout_p, is_causal, scale, fsdpa_mode,
+                    False,
+                    None,
+                    "None",)
         return out
 
     def __call__(
@@ -634,7 +749,38 @@ class GaudiWanAttnProcessor:
             hidden_states_img = hidden_states_img.flatten(2, 3)
             hidden_states_img = hidden_states_img.type_as(query)
 
+        # Add traditional SP:
+        if self.use_sp and self.cp_size > 1:
+            bs, kv_seq, num_head, head_dim = key.shape
+            key = key.reshape(bs, kv_seq, -1)
+            value = value.reshape(bs, kv_seq, -1)
+            full_key = torch.empty(bs, kv_seq * self.cp_size, num_head * head_dim, dtype=key.dtype, device=key.device)
+            full_value = torch.empty(bs, kv_seq * self.cp_size, num_head * head_dim, dtype=value.dtype, device=value.device)
+            gather1 = torch.distributed.all_gather_into_tensor(
+                full_key,
+                key,
+                group=parallel_state.get_sequence_parallel_group(),
+                async_op=True,
+            )
+            torch.distributed.all_gather_into_tensor(
+                full_value,
+                value,
+                group=parallel_state.get_sequence_parallel_group(),
+                async_op=False,
+            )
+            gather1.wait()
+            key = full_key.reshape(bs, kv_seq * self.cp_size, num_head, head_dim)
+            value = full_value.reshape(bs, kv_seq * self.cp_size, num_head, head_dim)
+
+            if attention_mask is not None:
+                logger.warning(f"Applying attention_mask in SP is not well supported, set it as None.")
+                attention_mask = None
+
         hidden_states = self._native_attention(query, key, value, attention_mask, 0.0, False, None)
+
+        if self.use_sp and self.cp_size > 1:
+            torch.hpu.synchronize()
+
 
         hidden_states = hidden_states.flatten(2, 3)
         hidden_states = hidden_states.type_as(query)

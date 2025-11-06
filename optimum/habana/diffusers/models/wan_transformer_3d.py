@@ -12,9 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from typing import Any, Dict, Optional, Union
 
 import torch
+import torch.nn.functional as F
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
 
 # from diffusers.models.transformers.transformer_wan import WanTransformer3DModel
@@ -24,6 +26,8 @@ from diffusers.utils import (
     scale_lora_layers,
     unscale_lora_layers,
 )
+
+from ...distributed import parallel_state
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
@@ -66,6 +70,47 @@ def WanTransformer3DModleForwardGaudi(
     hidden_states = self.patch_embedding(hidden_states)
     hidden_states = hidden_states.flatten(2).transpose(1, 2)
 
+    pad_len = 0
+    attention_mask = None
+    if parallel_state.sequence_parallel_is_initialized():
+        bs, seq_len, _ = hidden_states.shape
+        cp_size = parallel_state.get_sequence_parallel_world_size()
+        # We need to ensure seq_len can be divided by cp_size
+        if seq_len % cp_size != 0:
+            padded_seq_len = (seq_len // cp_size + 1) * cp_size
+            pad_len = padded_seq_len - seq_len
+            hidden_states = F.pad(hidden_states, (0, 0, 0, pad_len))
+            cos = F.pad(rotary_emb[0], (0, 0, 0, 0, 0, pad_len))
+            sin = F.pad(rotary_emb[1], (0, 0, 0, 0, 0, pad_len))
+            rotary_emb = (cos, sin)
+            if timestep.ndim == 2:
+                timestep = F.pad(timestep, (0, pad_len))
+
+            use_mask = os.getenv("CP_USE_MASK", "False")
+            use_mask = use_mask.lower() in ("1", "true", "True")
+            if use_mask:
+                attention_mask = torch.ones(bs, 1, seq_len, seq_len, dtype=hidden_states.dtype, device=hidden_states.device)
+                attention_mask = F.pad(attention_mask, (0, pad_len, 0, pad_len)).bool()
+
+            seq_len = padded_seq_len
+
+        sp_seq_len = seq_len // parallel_state.get_sequence_parallel_world_size()
+        start = sp_seq_len * parallel_state.get_sequence_parallel_rank()
+        end = sp_seq_len * (parallel_state.get_sequence_parallel_rank() + 1)
+
+        hidden_states = hidden_states[:, start:end, :]
+
+        # timestep with 2 dims means expand_timesteps in config is True, and
+        # We only need to split the timestep when it has 2 dim.
+        expanded_timestep = False
+        if timestep.ndim == 2:
+            expanded_timestep = True
+            timestep = timestep[:, start:end]
+
+        cos = rotary_emb[0][:, start:end, :, :]
+        sin = rotary_emb[1][:, start:end, :, :]
+        rotary_emb = (cos, sin)
+
     # timestep shape: batch_size, or batch_size, seq_len (wan 2.2 ti2v)
     if timestep.ndim == 2:
         ts_seq_len = timestep.shape[1]
@@ -92,12 +137,12 @@ def WanTransformer3DModleForwardGaudi(
     if torch.is_grad_enabled() and self.gradient_checkpointing:
         for block in self.blocks:
             hidden_states = self._gradient_checkpointing_func(
-                block, hidden_states, encoder_hidden_states, timestep_proj, rotary_emb
+                block, hidden_states, encoder_hidden_states, timestep_proj, rotary_emb, attention_mask
             )
             htcore.mark_step()
     else:
         for block in self.blocks:
-            hidden_states = block(hidden_states, encoder_hidden_states, timestep_proj, rotary_emb)
+            hidden_states = block(hidden_states, encoder_hidden_states, timestep_proj, rotary_emb, attention_mask)
             htcore.mark_step()
 
     # 5. Output norm, projection & unpatchify
@@ -117,9 +162,47 @@ def WanTransformer3DModleForwardGaudi(
     shift = shift.to(hidden_states.device)
     scale = scale.to(hidden_states.device)
 
+    if parallel_state.sequence_parallel_is_initialized():
+        cp_size = parallel_state.get_sequence_parallel_world_size()
+        bs, seq, dim = hidden_states.shape
+
+        gather_hidden = torch.empty(bs, seq * cp_size, dim, dtype=hidden_states.dtype, device=hidden_states.device)
+        gather1 = torch.distributed.all_gather_into_tensor(
+            gather_hidden,
+            hidden_states,
+            group=parallel_state.get_sequence_parallel_group(),
+            async_op=True,
+        )
+
+        gather_shift = None
+        gather_scale = None
+        if expanded_timestep:
+            gather_shift = torch.empty(bs, seq * cp_size, dim, dtype=shift.dtype, device=shift.device)
+            torch.distributed.all_gather_into_tensor(
+                gather_shift,
+                shift,
+                group=parallel_state.get_sequence_parallel_group(),
+                async_op=False,
+            )
+
+            gather_scale = torch.empty(bs, seq * cp_size, dim, dtype=scale.dtype, device=scale.device)
+            torch.distributed.all_gather_into_tensor(
+                gather_scale,
+                scale,
+                group=parallel_state.get_sequence_parallel_group(),
+                async_op=False,
+            )
+
+        gather1.wait()
+
+        hidden_states = gather_hidden.reshape(bs, seq * cp_size, dim)
+        shift = gather_shift if gather_shift is not None else shift
+        scale = gather_scale if gather_scale is not None else scale
+
     hidden_states = (self.norm_out(hidden_states.float()) * (1 + scale) + shift).type_as(hidden_states)
     hidden_states = self.proj_out(hidden_states)
 
+    hidden_states = hidden_states[:, :-pad_len, :] if pad_len > 0 else hidden_states
     hidden_states = hidden_states.reshape(
         batch_size, post_patch_num_frames, post_patch_height, post_patch_width, p_t, p_h, p_w, -1
     )
@@ -134,3 +217,44 @@ def WanTransformer3DModleForwardGaudi(
         return (output,)
 
     return Transformer2DModelOutput(sample=output)
+
+def WanTransformerBlockForwardGaudi (
+    self,
+    hidden_states: torch.Tensor,
+    encoder_hidden_states: torch.Tensor,
+    temb: torch.Tensor,
+    rotary_emb: torch.Tensor,
+    attention_mask: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    if temb.ndim == 4:
+        # temb: batch_size, seq_len, 6, inner_dim (wan2.2 ti2v)
+        shift_msa, scale_msa, gate_msa, c_shift_msa, c_scale_msa, c_gate_msa = (
+            self.scale_shift_table.unsqueeze(0) + temb.float()
+        ).chunk(6, dim=2)
+        # batch_size, seq_len, 1, inner_dim
+        shift_msa = shift_msa.squeeze(2)
+        scale_msa = scale_msa.squeeze(2)
+        gate_msa = gate_msa.squeeze(2)
+        c_shift_msa = c_shift_msa.squeeze(2)
+        c_scale_msa = c_scale_msa.squeeze(2)
+        c_gate_msa = c_gate_msa.squeeze(2)
+    else:
+        # temb: batch_size, 6, inner_dim (wan2.1/wan2.2 14B)
+        shift_msa, scale_msa, gate_msa, c_shift_msa, c_scale_msa, c_gate_msa = (
+            self.scale_shift_table + temb.float()
+        ).chunk(6, dim=1)
+    # 1. Self-attention
+    norm_hidden_states = (self.norm1(hidden_states.float()) * (1 + scale_msa) + shift_msa).type_as(hidden_states)
+    attn_output = self.attn1(norm_hidden_states, None, attention_mask, rotary_emb)
+    hidden_states = (hidden_states.float() + attn_output * gate_msa).type_as(hidden_states)
+    # 2. Cross-attention
+    norm_hidden_states = self.norm2(hidden_states.float()).type_as(hidden_states)
+    attn_output = self.attn2(norm_hidden_states, encoder_hidden_states, None, None)
+    hidden_states = hidden_states + attn_output
+    # 3. Feed-forward
+    norm_hidden_states = (self.norm3(hidden_states.float()) * (1 + c_scale_msa) + c_shift_msa).type_as(
+        hidden_states
+    )
+    ff_output = self.ffn(norm_hidden_states)
+    hidden_states = (hidden_states.float() + ff_output.float() * c_gate_msa).type_as(hidden_states)
+    return hidden_states
