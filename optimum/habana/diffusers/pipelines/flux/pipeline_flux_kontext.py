@@ -683,24 +683,32 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
                 self.scheduler.timesteps = timesteps
                 self.scheduler._init_step_index(timesteps[0])
 
-            self.scheduler.set_begin_index(0)
-            with self.progress_bar(total=num_inference_steps) as progress_bar:
-                for i, t in enumerate(timesteps):
-                    if use_warmup_inference_steps and i == throughput_warmup_steps and j == num_batches - 1:
-                        ht.hpu.synchronize()
-                        t1 = time.time()
+            # Mixed quantization
+            quant_mixed_step = len(timesteps)
+            if quant_mode == "quantize-mixed":
+                # 10% of steps use higher precision in mixed quant mode
+                quant_mixed_step = quant_mixed_step - (quant_mixed_step // 10)
+                print(f"Use FP8  Transformer at steps 0 to {quant_mixed_step - 1}")
+                print(f"Use BF16 Transformer at steps {quant_mixed_step} to {len(timesteps) - 1}")
+
+            for i in self.progress_bar(range(len(timesteps))):
+                if use_warmup_inference_steps and i == throughput_warmup_steps and j == num_batches - 1:
+                    ht.hpu.synchronize()
+                    t1 = time.time()
 
                 if self.interrupt:
                     continue
 
-                self._current_timestep = t
+                timestep = timesteps[0]
+                timesteps = torch.roll(timesteps, shifts=-1, dims=0)
+                # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
+                timestep = timestep.expand(latents_batch.shape[0]).to(latents_batch.dtype)
                 if image_embeds is not None:
                     self._joint_attention_kwargs["ip_adapter_image_embeds"] = image_embeds
 
                 latent_model_input = latents_batch
                 if image_latents is not None:
                     latent_model_input = torch.cat([latents_batch, image_latents], dim=1)
-                timestep = t.expand(latents.shape[0]).to(latents.dtype)
 
                 if quant_mode == "quantize-mixed" and i >= quant_mixed_step:
                     # Mixed quantization
@@ -766,14 +774,12 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
                         noise_pred = neg_noise_pred + true_cfg_scale * (noise_pred - neg_noise_pred)
 
                 # compute the previous noisy sample x_t -> x_t-1
-                latents_batch = self.scheduler.step(noise_pred, t, latents_batch, return_dict=False)[0]
+                latents_batch = self.scheduler.step(noise_pred, timestep, latents_batch, return_dict=False)[0]
 
                 hb_profiler.step()
                 # htcore.mark_step(sync=True)
                 if num_batches > throughput_warmup_steps:
                     ht.hpu.synchronize()
-
-            self._current_timestep = None
 
             if not output_type == "latent":
                 latents_batch = self._unpack_latents(latents_batch, image_height, image_width, self.vae_scale_factor)
