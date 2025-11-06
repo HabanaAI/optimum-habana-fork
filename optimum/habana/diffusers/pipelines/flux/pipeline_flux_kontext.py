@@ -203,12 +203,16 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
             transformer = wrap_in_hpu_graph(transformer)
 
     @classmethod
-    def _split_inputs_into_batches(cls, batch_size, latents, prompt_embeds, pooled_prompt_embeds, guidance):
+    def _split_inputs_into_batches(cls, batch_size, latents, prompt_embeds, pooled_prompt_embeds, negative_prompt_embeds, negative_pooled_prompt_embeds, guidance):
         # Use torch.split to generate num_batches batches of size batch_size
         latents_batches = list(torch.split(latents, batch_size))
         prompt_embeds_batches = list(torch.split(prompt_embeds, batch_size))
         if pooled_prompt_embeds is not None:
             pooled_prompt_embeds_batches = list(torch.split(pooled_prompt_embeds, batch_size))
+        if negative_prompt_embeds is not None:
+            negative_prompt_embeds_batches = list(torch.split(negative_prompt_embeds, batch_size))
+        if negative_pooled_prompt_embeds is not None:
+            negative_pooled_prompt_embeds_batches = list(torch.split(negative_pooled_prompt_embeds, batch_size))
         if guidance is not None:
             guidance_batches = list(torch.split(guidance, batch_size))
 
@@ -229,12 +233,26 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
             )
             prompt_embeds_batches[-1] = torch.vstack(sequence_to_stack)
 
-            # Pad pooled_prompt_embeds if necessary
+            # Pad pooled_prompt_embeds_batches if necessary
             if pooled_prompt_embeds is not None:
                 sequence_to_stack = (pooled_prompt_embeds_batches[-1],) + tuple(
                     torch.zeros_like(pooled_prompt_embeds_batches[-1][0][None, :]) for _ in range(num_dummy_samples)
                 )
                 pooled_prompt_embeds_batches[-1] = torch.vstack(sequence_to_stack)
+            
+            # Pad negative_prompt_embeds_batches if necessary
+            if negative_prompt_embeds is not None:
+                sequence_to_stack = (negative_prompt_embeds_batches[-1],) + tuple(
+                    torch.zeros_like(negative_prompt_embeds_batches[-1][0][None, :]) for _ in range(num_dummy_samples)
+                )
+                negative_prompt_embeds_batches[-1] = torch.vstack(sequence_to_stack)
+
+            # Pad negative_pooled_prompt_embeds_batches if necessary
+            if negative_pooled_prompt_embeds is not None:
+                sequence_to_stack = (negative_pooled_prompt_embeds_batches[-1],) + tuple(
+                    torch.zeros_like(negative_pooled_prompt_embeds_batches[-1][0][None, :]) for _ in range(num_dummy_samples)
+                )
+                negative_pooled_prompt_embeds_batches[-1] = torch.vstack(sequence_to_stack)
 
             # Pad guidance if necessary
             if guidance is not None:
@@ -248,12 +266,16 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
         latents_batches = torch.stack(latents_batches)
         prompt_embeds_batches = torch.stack(prompt_embeds_batches)
         pooled_prompt_embeds_batches = torch.stack(pooled_prompt_embeds_batches)
+        negative_prompt_embeds_batches = torch.stack(negative_prompt_embeds_batches)
+        negative_pooled_prompt_embeds_batches = torch.stack(negative_pooled_prompt_embeds_batches)
         guidance_batches = torch.stack(guidance_batches) if guidance is not None else None
 
         return (
             latents_batches,
             prompt_embeds_batches,
             pooled_prompt_embeds_batches,
+            negative_prompt_embeds_batches,
+            negative_pooled_prompt_embeds_batches,
             guidance_batches,
             num_dummy_samples,
         )
@@ -653,9 +675,11 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
             latents_batches,
             prompt_embeds_batches,
             pooled_prompt_embeds_batches,
+            negative_prompt_embeds_batches,
+            negative_pooled_prompt_embeds_batches,
             guidance_batches,
             num_dummy_samples,
-        ) = self._split_inputs_into_batches(batch_size, latents, prompt_embeds, pooled_prompt_embeds, guidance)
+        ) = self._split_inputs_into_batches(batch_size, latents, prompt_embeds, pooled_prompt_embeds, negative_prompt_embeds, negative_pooled_prompt_embeds, guidance)
 
         outputs = {
             "images": [],
@@ -675,6 +699,10 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
             prompt_embeds_batches = torch.roll(prompt_embeds_batches, shifts=-1, dims=0)
             pooled_prompt_embeds_batch = pooled_prompt_embeds_batches[0]
             pooled_prompt_embeds_batches = torch.roll(pooled_prompt_embeds_batches, shifts=-1, dims=0)
+            negative_prompt_embeds_batch = negative_prompt_embeds_batches[0]
+            negative_prompt_embeds_batches = torch.roll(negative_prompt_embeds_batches, shifts=-1, dims=0)
+            negative_pooled_prompt_embeds_batch = negative_pooled_prompt_embeds_batches[0]
+            negative_pooled_prompt_embeds_batches = torch.roll(negative_pooled_prompt_embeds_batches, shifts=-1, dims=0)
             guidance_batch = None if guidance_batches is None else guidance_batches[0]
             guidance_batches = None if guidance_batches is None else torch.roll(guidance_batches, shifts=-1, dims=0)
 
