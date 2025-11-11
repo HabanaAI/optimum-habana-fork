@@ -15,8 +15,11 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import habana_frameworks.torch.core as htcore
 import torch
+import torch.nn.functional as F
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
 from diffusers.utils import USE_PEFT_BACKEND, logging, scale_lora_layers, unscale_lora_layers
+
+from ...distributed import parallel_state
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
@@ -118,6 +121,38 @@ def QwenImageTransformer2DModelGaudi(
 
     image_rotary_emb = self.pos_embed(img_shapes, txt_seq_lens, device=hidden_states.device)
 
+    pad_len_img = 0
+    attention_mask = None
+    if parallel_state.sequence_parallel_is_initialized():
+        bs, seq_len_img, _ = hidden_states.shape
+        bs, seq_len_txt, _ = encoder_hidden_states.shape
+
+        cp_size = parallel_state.get_sequence_parallel_world_size()
+        (vid_freqs_cos, vid_freqs_sin), (txt_freqs_cos, txt_freqs_sin) = image_rotary_emb
+        # We need to ensure seq_len can be divided by cp_size
+        if seq_len_img % cp_size != 0:
+            padded_seq_len_img = (seq_len_img // cp_size + 1) * cp_size
+            pad_len_img = padded_seq_len_img - seq_len_img
+            hidden_states = F.pad(hidden_states, (0, 0, 0, pad_len_img))
+
+            vid_freqs_cos = F.pad(vid_freqs_cos, (0, 0, 0, pad_len_img))
+            vid_freqs_sin = F.pad(vid_freqs_sin, (0, 0, 0, pad_len_img))
+
+            seq_len_img = padded_seq_len_img
+
+        image_rotary_emb = (vid_freqs_cos, vid_freqs_sin), (txt_freqs_cos, txt_freqs_sin)
+
+        sp_seq_len_img = seq_len_img // parallel_state.get_sequence_parallel_world_size()
+        start_img = sp_seq_len_img * parallel_state.get_sequence_parallel_rank()
+        end_img = sp_seq_len_img * (parallel_state.get_sequence_parallel_rank() + 1)
+        hidden_states = hidden_states[:, start_img:end_img, :]
+
+        (vid_freqs_cos, vid_freqs_sin), (txt_freqs_cos, txt_freqs_sin) = image_rotary_emb
+        vid_freqs_cos = vid_freqs_cos[start_img:end_img, :]
+        vid_freqs_sin = vid_freqs_sin[start_img:end_img, :]
+
+        image_rotary_emb = (vid_freqs_cos, vid_freqs_sin), (txt_freqs_cos, txt_freqs_sin)
+
     for index_block, block in enumerate(self.transformer_blocks):
         if torch.is_grad_enabled() and self.gradient_checkpointing:
             encoder_hidden_states, hidden_states = self._gradient_checkpointing_func(
@@ -127,6 +162,7 @@ def QwenImageTransformer2DModelGaudi(
                 encoder_hidden_states_mask,
                 temb,
                 image_rotary_emb,
+                attention_mask,
             )
             htcore.mark_step()
 
@@ -138,8 +174,27 @@ def QwenImageTransformer2DModelGaudi(
                 temb=temb,
                 image_rotary_emb=image_rotary_emb,
                 joint_attention_kwargs=attention_kwargs,
+                attention_mask=attention_mask,
             )
             htcore.mark_step()
+
+    if parallel_state.sequence_parallel_is_initialized():
+        cp_size = parallel_state.get_sequence_parallel_world_size()
+        bs, seq, dim = hidden_states.shape
+        _, seq_txt, _ = encoder_hidden_states.shape
+
+        gather_hidden = torch.empty(bs, seq * cp_size, dim, dtype=hidden_states.dtype, device=hidden_states.device)
+        gather1 = torch.distributed.all_gather_into_tensor(
+            gather_hidden,
+            hidden_states,
+            group=parallel_state.get_sequence_parallel_group(),
+            async_op=True,
+        )
+
+        gather1.wait()
+        hidden_states = gather_hidden.reshape(bs, seq * cp_size, dim)
+
+        hidden_states = hidden_states[:, :-pad_len_img, :] if pad_len_img > 0 else hidden_states
 
     # Use only the image part (hidden_states) from the dual-stream blocks
     hidden_states = self.norm_out(hidden_states, temb)
@@ -153,3 +208,77 @@ def QwenImageTransformer2DModelGaudi(
         return (output,)
 
     return Transformer2DModelOutput(sample=output)
+
+
+def QwenImageTransformerBlockForwardGaudi(
+    self,
+    hidden_states: torch.Tensor,
+    encoder_hidden_states: torch.Tensor,
+    encoder_hidden_states_mask: torch.Tensor,
+    temb: torch.Tensor,
+    image_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    joint_attention_kwargs: Optional[Dict[str, Any]] = None,
+    attention_mask: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Adapted from https://github.com/huggingface/diffusers/blob/df267ee4e8500a2ef5960879f6d1ea49cc8ec40d/src/diffusers/models/transformers/transformer_qwenimage.py#L405
+    Add attention_mask.
+    """
+    # Get modulation parameters for both streams
+    img_mod_params = self.img_mod(temb)  # [B, 6*dim]
+    txt_mod_params = self.txt_mod(temb)  # [B, 6*dim]
+
+    # Split modulation parameters for norm1 and norm2
+    img_mod1, img_mod2 = img_mod_params.chunk(2, dim=-1)  # Each [B, 3*dim]
+    txt_mod1, txt_mod2 = txt_mod_params.chunk(2, dim=-1)  # Each [B, 3*dim]
+
+    # Process image stream - norm1 + modulation
+    img_normed = self.img_norm1(hidden_states)
+    img_modulated, img_gate1 = self._modulate(img_normed, img_mod1)
+
+    # Process text stream - norm1 + modulation
+    txt_normed = self.txt_norm1(encoder_hidden_states)
+    txt_modulated, txt_gate1 = self._modulate(txt_normed, txt_mod1)
+
+    # Use QwenAttnProcessor2_0 for joint attention computation
+    # This directly implements the DoubleStreamLayerMegatron logic:
+    # 1. Computes QKV for both streams
+    # 2. Applies QK normalization and RoPE
+    # 3. Concatenates and runs joint attention
+    # 4. Splits results back to separate streams
+    joint_attention_kwargs = joint_attention_kwargs or {}
+    attn_output = self.attn(
+        hidden_states=img_modulated,  # Image stream (will be processed as "sample")
+        encoder_hidden_states=txt_modulated,  # Text stream (will be processed as "context")
+        encoder_hidden_states_mask=encoder_hidden_states_mask,
+        image_rotary_emb=image_rotary_emb,
+        attention_mask=attention_mask,
+        **joint_attention_kwargs,
+    )
+
+    # QwenAttnProcessor2_0 returns (img_output, txt_output) when encoder_hidden_states is provided
+    img_attn_output, txt_attn_output = attn_output
+
+    # Apply attention gates and add residual (like in Megatron)
+    hidden_states = hidden_states + img_gate1 * img_attn_output
+    encoder_hidden_states = encoder_hidden_states + txt_gate1 * txt_attn_output
+
+    # Process image stream - norm2 + MLP
+    img_normed2 = self.img_norm2(hidden_states)
+    img_modulated2, img_gate2 = self._modulate(img_normed2, img_mod2)
+    img_mlp_output = self.img_mlp(img_modulated2)
+    hidden_states = hidden_states + img_gate2 * img_mlp_output
+
+    # Process text stream - norm2 + MLP
+    txt_normed2 = self.txt_norm2(encoder_hidden_states)
+    txt_modulated2, txt_gate2 = self._modulate(txt_normed2, txt_mod2)
+    txt_mlp_output = self.txt_mlp(txt_modulated2)
+    encoder_hidden_states = encoder_hidden_states + txt_gate2 * txt_mlp_output
+
+    # Clip to prevent overflow for fp16
+    if encoder_hidden_states.dtype == torch.float16:
+        encoder_hidden_states = encoder_hidden_states.clip(-65504, 65504)
+    if hidden_states.dtype == torch.float16:
+        hidden_states = hidden_states.clip(-65504, 65504)
+
+    return encoder_hidden_states, hidden_states

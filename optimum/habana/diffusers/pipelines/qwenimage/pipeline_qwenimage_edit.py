@@ -19,6 +19,7 @@ import numpy as np
 import torch
 from diffusers.image_processor import PipelineImageInput
 from diffusers.models import AutoencoderKLQwenImage, QwenImageTransformer2DModel
+from diffusers.models.autoencoders.autoencoder_kl_qwenimage import QwenImageAttentionBlock
 from diffusers.pipelines.qwenimage.pipeline_output import QwenImagePipelineOutput
 from diffusers.pipelines.qwenimage.pipeline_qwenimage_edit import (
     QwenImageEditPipeline,
@@ -33,7 +34,12 @@ from transformers import Qwen2_5_VLForConditionalGeneration, Qwen2Tokenizer, Qwe
 from ....transformers.gaudi_configuration import GaudiConfig
 from ....utils import HabanaProfile
 from ...models.attention_processor import GaudiQwenDoubleStreamAttnProcessor2_0
-from ...models.qwenimage_transformer import QwenImageTransformer2DModelGaudi
+from ...models.autoencoders.autoencoder_kl_qwenimage import (
+    QwenImageAttentionBlockForwardGaudi,
+    QwenImageDecoder3dForwardGaudi,
+    QwenImageEncoder3dForwardGaudi,
+)
+from ...models.qwenimage_transformer import QwenImageTransformer2DModelGaudi, QwenImageTransformerBlockForwardGaudi
 from ..pipeline_utils import GaudiDiffusionPipeline
 from .pipeline_qwenimage import GaudiQwenEmbedRope
 
@@ -118,7 +124,21 @@ class GaudiQwenImageEditPipeline(GaudiDiffusionPipeline, QwenImageEditPipeline):
         self.to(self._device)
         self.transformer.forward = types.MethodType(QwenImageTransformer2DModelGaudi, self.transformer)
         for block in self.transformer.transformer_blocks:
+            block.forward = types.MethodType(QwenImageTransformerBlockForwardGaudi, block)
             block.attn.processor = GaudiQwenDoubleStreamAttnProcessor2_0(is_training)
+        self.vae.decoder.forward = types.MethodType(QwenImageDecoder3dForwardGaudi, self.vae.decoder)
+        self.vae.encoder.forward = types.MethodType(QwenImageEncoder3dForwardGaudi, self.vae.encoder)
+
+        for attn in self.vae.decoder.mid_block.attentions:
+            attn.forwward = types.MethodType(QwenImageAttentionBlockForwardGaudi, attn)
+
+        for attn in self.vae.encoder.mid_block.attentions:
+            attn.forwward = types.MethodType(QwenImageAttentionBlockForwardGaudi, attn)
+
+        for layer in self.vae.encoder.down_blocks:
+            if isinstance(layer, QwenImageAttentionBlock):
+                layer.forwward = types.MethodType(QwenImageAttentionBlockForwardGaudi, layer)
+
         config = self.transformer.config
         self.transformer.pos_embed = GaudiQwenEmbedRope(
             theta=10000, axes_dim=list(config["axes_dims_rope"]), scale_rope=True
@@ -127,9 +147,8 @@ class GaudiQwenImageEditPipeline(GaudiDiffusionPipeline, QwenImageEditPipeline):
         if use_hpu_graphs:
             from habana_frameworks.torch.hpu import wrap_in_hpu_graph
 
-            # transformer = wrap_in_hpu_graph(transformer)
-            for block in self.transformer.transformer_blocks:
-                block = wrap_in_hpu_graph(block)
+            self.transformer = wrap_in_hpu_graph(self.transformer)
+            self.text_encoder = wrap_in_hpu_graph(self.text_encoder)
 
     def _get_qwen_prompt_embeds(
         self,

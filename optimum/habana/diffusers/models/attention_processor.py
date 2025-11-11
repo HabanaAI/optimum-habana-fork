@@ -915,6 +915,8 @@ class GaudiQwenDoubleStreamAttnProcessor2_0:
                 "QwenDoubleStreamAttnProcessor2_0 requires PyTorch 2.0, to use it, please upgrade PyTorch to 2.0."
             )
         self.is_training = is_training
+        self.fused_scaled_dot_product_attention = ModuleFusedSDPA(FusedSDPA) if FusedSDPA else None
+        self.cp_size = parallel_state.get_sequence_parallel_world_size()
 
     def __call__(
         self,
@@ -967,21 +969,59 @@ class GaudiQwenDoubleStreamAttnProcessor2_0:
             txt_query = apply_rotary_emb_qwen(txt_query, txt_freqs)
             txt_key = apply_rotary_emb_qwen(txt_key, txt_freqs)
 
-        # Concatenate for joint attention
-        # Order: [text, image]
-        joint_query = torch.cat([txt_query, img_query], dim=1).transpose(1, 2)
-        joint_key = torch.cat([txt_key, img_key], dim=1).transpose(1, 2)
-        joint_value = torch.cat([txt_value, img_value], dim=1).transpose(1, 2)
+        if self.cp_size > 1:
 
-        # apply gaudi fused SDPA intread of dispatch_attention_fn
-        from habana_frameworks.torch.hpex.kernels import FusedSDPA
+            bs, img_kv_seq, num_head, head_dim = img_key.shape
+            img_key = img_key.reshape(bs, img_kv_seq, -1)
+            img_value = img_value.reshape(bs, img_kv_seq, -1)
+
+            img_full_key = torch.empty(
+                bs, img_kv_seq * self.cp_size, num_head * head_dim, dtype=img_key.dtype, device=img_key.device
+            )
+            img_full_value = torch.empty(
+                bs, img_kv_seq * self.cp_size, num_head * head_dim, dtype=img_value.dtype, device=img_value.device
+            )
+            gather2 = torch.distributed.all_gather_into_tensor(
+                img_full_key,
+                img_key,
+                group=parallel_state.get_sequence_parallel_group(),
+                async_op=True,
+            )
+            torch.distributed.all_gather_into_tensor(
+                img_full_value,
+                img_value,
+                group=parallel_state.get_sequence_parallel_group(),
+                async_op=False,
+            )
+            gather2.wait()
+            img_key = img_full_key.reshape(bs, img_kv_seq * self.cp_size, num_head, head_dim)
+            img_value = img_full_value.reshape(bs, img_kv_seq * self.cp_size, num_head, head_dim)
+
+        joint_query = torch.cat([txt_query, img_query], dim=1)
+        joint_key = torch.cat([txt_key, img_key], dim=1)
+        joint_value = torch.cat([txt_value, img_value], dim=1)
 
         # Fast FSDPA is not supported in training mode
         fsdpa_mode = "None" if self.is_training else "fast"
-        joint_hidden_states = FusedSDPA.apply(
-            joint_query, joint_key, joint_value, attention_mask, 0.0, False, None, fsdpa_mode, None
+
+        joint_hidden_states = self.fused_scaled_dot_product_attention(
+            joint_query,
+            joint_key,
+            joint_value,
+            attention_mask,
+            0.0,
+            False,
+            None,
+            fsdpa_mode,
+            False,
+            None,
+            "None",
         )
-        joint_hidden_states = joint_hidden_states.transpose(1, 2).contiguous()
+
+        if self.cp_size > 1:
+            torch.hpu.synchronize()
+
+        joint_hidden_states = joint_hidden_states.contiguous()
 
         # Reshape back
         joint_hidden_states = joint_hidden_states.flatten(2, 3)
