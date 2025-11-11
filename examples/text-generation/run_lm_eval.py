@@ -234,6 +234,7 @@ def main() -> None:
                 apply_chat_template=args.apply_chat_template,
                 metadata=metadata,
                 confirm_run_unsafe_code=args.confirm_run_unsafe_code,
+                torch_random_seed=args.seed
             )
         if args.device == "hpu":
             import habana_frameworks.torch.hpu as torch_hpu
