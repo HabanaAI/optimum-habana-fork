@@ -203,9 +203,11 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
             transformer = wrap_in_hpu_graph(transformer)
 
     @classmethod
-    def _split_inputs_into_batches(cls, batch_size, latents, prompt_embeds, pooled_prompt_embeds, negative_prompt_embeds, negative_pooled_prompt_embeds, guidance):
+    def _split_inputs_into_batches(cls, batch_size, latents, image_latents, prompt_embeds, pooled_prompt_embeds, negative_prompt_embeds, negative_pooled_prompt_embeds, guidance):
         # Use torch.split to generate num_batches batches of size batch_size
         latents_batches = list(torch.split(latents, batch_size))
+        if image_latents is not None:
+            image_latents_batches = list(torch.split(image_latents, batch_size))
         prompt_embeds_batches = list(torch.split(prompt_embeds, batch_size))
         if pooled_prompt_embeds is not None:
             pooled_prompt_embeds_batches = list(torch.split(pooled_prompt_embeds, batch_size))
@@ -226,6 +228,13 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
                 torch.zeros_like(latents_batches[-1][0][None, :]) for _ in range(num_dummy_samples)
             )
             latents_batches[-1] = torch.vstack(sequence_to_stack)
+
+            # Pad image_latents_batches if necessary
+            if image_latents is not None:
+                sequence_to_stack = (image_latents_batches[-1],) + tuple(
+                    torch.zeros_like(image_latents_batches[-1][0][None, :]) for _ in range(num_dummy_samples)
+                )
+                image_latents_batches[-1] = torch.vstack(sequence_to_stack)
 
             # Pad prompt_embeds_batches
             sequence_to_stack = (prompt_embeds_batches[-1],) + tuple(
@@ -264,6 +273,7 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
 
         # Stack batches in the same tensor
         latents_batches = torch.stack(latents_batches)
+        image_latents_batches = torch.stack(image_latents_batches) if image_latents is not None else None
         prompt_embeds_batches = torch.stack(prompt_embeds_batches)
         pooled_prompt_embeds_batches = torch.stack(pooled_prompt_embeds_batches)
         negative_prompt_embeds_batches = torch.stack(negative_prompt_embeds_batches) if negative_prompt_embeds is not None else None
@@ -272,6 +282,7 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
 
         return (
             latents_batches,
+            image_latents_batches,
             prompt_embeds_batches,
             pooled_prompt_embeds_batches,
             negative_prompt_embeds_batches,
@@ -673,13 +684,14 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
         # 5.1. Split Input data to batches (HPU-specific step)
         (
             latents_batches,
+            image_latents_batches,
             prompt_embeds_batches,
             pooled_prompt_embeds_batches,
             negative_prompt_embeds_batches,
             negative_pooled_prompt_embeds_batches,
             guidance_batches,
             num_dummy_samples,
-        ) = self._split_inputs_into_batches(batch_size, latents, prompt_embeds, pooled_prompt_embeds, negative_prompt_embeds, negative_pooled_prompt_embeds, guidance)
+        ) = self._split_inputs_into_batches(batch_size, latents, image_latents, prompt_embeds, pooled_prompt_embeds, negative_prompt_embeds, negative_pooled_prompt_embeds, guidance)
 
         outputs = {
             "images": [],
@@ -695,6 +707,8 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
 
             latents_batch = latents_batches[0]
             latents_batches = torch.roll(latents_batches, shifts=-1, dims=0)
+            image_latents_batch = None if image_latents_batches is None else image_latents_batches[0]
+            image_latents_batches = None if image_latents_batches is None else torch.roll(image_latents_batches, shifts=-1, dims=0)
             prompt_embeds_batch = prompt_embeds_batches[0]
             prompt_embeds_batches = torch.roll(prompt_embeds_batches, shifts=-1, dims=0)
             pooled_prompt_embeds_batch = pooled_prompt_embeds_batches[0]
@@ -736,8 +750,8 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
                     self._joint_attention_kwargs["ip_adapter_image_embeds"] = image_embeds
 
                 latent_model_input = latents_batch
-                if image_latents is not None:
-                    latent_model_input = torch.cat([latents_batch, image_latents], dim=1)
+                if image_latents_batch is not None:
+                    latent_model_input = torch.cat([latents_batch, image_latents_batch], dim=1)
 
                 if quant_mode == "quantize-mixed" and i >= quant_mixed_step:
                     # Mixed quantization
