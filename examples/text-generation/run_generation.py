@@ -606,6 +606,18 @@ def main():
                     if torch.is_tensor(input_tokens[t]):
                         input_tokens[t] = input_tokens[t].to(args.device)
 
+            # ===== HPU Memory Diagnostic (pre) =====
+            import habana_frameworks.torch.hpu as torch_hpu
+            import torch
+            try:
+                alloc_pre = torch_hpu.memory_allocated()
+                reserv_pre = torch_hpu.memory_reserved()
+                print(f"[DEBUG][HPU][pre] Allocated={alloc_pre/1024**3:.2f} GB, Reserved={reserv_pre/1024**3:.2f} GB", flush=True)
+            except Exception as e:
+                print(f"[WARN][HPU][pre] memory_allocated() failed: {e}", flush=True)
+            # =======================================
+
+
             outputs = model.generate(
                 **input_tokens,
                 generation_config=generation_config,
@@ -617,6 +629,18 @@ def main():
             outputs = outputs.tolist()
             for i in range(len(outputs)):
                 outputs[i] = outputs[i][args.max_input_tokens :]
+
+            # ===== HPU Memory Diagnostic (post) =====
+            try:
+                torch_hpu.synchronize()
+                alloc_post = torch_hpu.memory_allocated()
+                reserv_post = torch_hpu.memory_reserved()
+                print(f"[DEBUG][HPU][post] Allocated={alloc_post/1024**3:.2f} GB, Reserved={reserv_post/1024**3:.2f} GB", flush=True)
+            except Exception as e:
+                print(f"[WARN][HPU][post] memory_allocated() failed: {e}", flush=True)
+            # ========================================
+
+
             timer.step()
             duration = timer.last_duration
             print(f"Total E2E time of this batch is {duration:.3f}s", flush=True)
