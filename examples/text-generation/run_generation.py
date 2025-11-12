@@ -853,6 +853,15 @@ def main():
             else:
                 input_data.update(input_tokens)
 
+            # ===== HPU Memory Diagnostic (pre) =====
+            try:
+                alloc_pre = torch_hpu.memory_allocated()
+                reserv_pre = torch_hpu.memory_reserved()
+                print(f"[DEBUG][HPU][pre] Allocated={alloc_pre/1024**3:.2f} GB, Reserved={reserv_pre/1024**3:.2f} GB", flush=True)
+            except Exception as e:
+                print(f"[WARN][HPU][pre] memory_allocated() failed: {e}", flush=True)
+            # =======================================
+
             iteration_times = []
             outputs = model.generate(
                 **input_data,
@@ -864,6 +873,18 @@ def main():
                 iteration_times=iteration_times,
                 profiler=profiler,
             ).cpu()
+
+            # ===== HPU Memory Diagnostic (post) =====
+            try:
+                torch_hpu.synchronize()
+                alloc_post = torch_hpu.memory_allocated()
+                reserv_post = torch_hpu.memory_reserved()
+                print(f"[DEBUG][HPU][post] Allocated={alloc_post/1024**3:.2f} GB, Reserved={reserv_post/1024**3:.2f} GB", flush=True)
+            except Exception as e:
+                print(f"[WARN][HPU][post] memory_allocated() failed: {e}", flush=True)
+            # ========================================
+
+
             timer.step()
             first_token_time = iteration_times[0] + encode_duration
             rest_token_time = sum(iteration_times[1:]) / (len(iteration_times) - 1) if len(iteration_times) > 1 else 0
