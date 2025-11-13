@@ -714,9 +714,9 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
             pooled_prompt_embeds_batch = pooled_prompt_embeds_batches[0]
             pooled_prompt_embeds_batches = torch.roll(pooled_prompt_embeds_batches, shifts=-1, dims=0)
             if do_true_cfg:
-                negative_prompt_embeds_batch = negative_prompt_embeds_batches[0]
+                negative_prompt_embeds_batch = negative_prompt_embeds_batches.squeeze(1)[0]
                 negative_prompt_embeds_batches = torch.roll(negative_prompt_embeds_batches, shifts=-1, dims=0)
-                negative_pooled_prompt_embeds_batch = negative_pooled_prompt_embeds_batches[0]
+                negative_pooled_prompt_embeds_batch = negative_pooled_prompt_embeds_batches.squeeze(1)[0]
                 negative_pooled_prompt_embeds_batches = torch.roll(negative_pooled_prompt_embeds_batches, shifts=-1, dims=0)
             guidance_batch = None if guidance_batches is None else guidance_batches[0]
             guidance_batches = None if guidance_batches is None else torch.roll(guidance_batches, shifts=-1, dims=0)
@@ -775,8 +775,8 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
                             hidden_states=latent_model_input,
                             timestep=timestep / 1000,
                             guidance=guidance_batch,
-                            pooled_projections=negative_pooled_prompt_embeds,
-                            encoder_hidden_states=negative_prompt_embeds,
+                            pooled_projections=negative_pooled_prompt_embeds_batch,
+                            encoder_hidden_states=negative_prompt_embeds_batch,
                             txt_ids=negative_text_ids,
                             img_ids=latent_ids,
                             joint_attention_kwargs=self.joint_attention_kwargs,
@@ -806,8 +806,8 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
                             hidden_states=latent_model_input,
                             timestep=timestep / 1000,
                             guidance=guidance_batch,
-                            pooled_projections=negative_pooled_prompt_embeds,
-                            encoder_hidden_states=negative_prompt_embeds,
+                            pooled_projections=negative_pooled_prompt_embeds_batch,
+                            encoder_hidden_states=negative_prompt_embeds_batch,
                             txt_ids=negative_text_ids,
                             img_ids=latent_ids,
                             joint_attention_kwargs=self.joint_attention_kwargs,
