@@ -96,7 +96,7 @@ class ScaledDotProductAttention(nn.Module):
 
 
 class FlashAttnV3Gaudi:
-    def __init__ (self):
+    def __init__(self):
         self.q_chunk = int(os.environ.get("FA3_Q_CHUNK", 8192))
         self.kv_chunk = int(os.environ.get("FA3_KV_CHUNK", 8192))
 
@@ -117,21 +117,11 @@ class FlashAttnV3Gaudi:
         key_len = key.size(-2)
 
         # In the case of cross-attn, use FusedSDPA.
-        if  (query_len * cp_size) != key_len:
-            output = FusedSDPA.apply(
-                query,
-                key,
-                value,
-                attention_mask,
-                0.0,
-                False,
-                None,
-                fsdpa_mode,
-                None
-            )
+        if (query_len * cp_size) != key_len:
+            output = FusedSDPA.apply(query, key, value, attention_mask, 0.0, False, None, fsdpa_mode, None)
             return output.permute(0, 2, 1, 3).contiguous()
- 
-        #Flash Attention V3 for Full Attention
+
+        # Flash Attention V3 for Full Attention
         linv_factor = 128.0 if fsdpa_mode == "fast" else 1.0
 
         if pad_len > 0:
@@ -145,7 +135,6 @@ class FlashAttnV3Gaudi:
         final_hidden_list = []
 
         for query_idx in range(num_query_chunk):
-
             query_start = query_idx * self.q_chunk
             query_end = (query_idx + 1) * self.q_chunk if query_idx < num_query_chunk - 1 else query_len
             query_slice = query[..., query_start:query_end, :]
@@ -155,7 +144,6 @@ class FlashAttnV3Gaudi:
             linv = None
 
             for kv_idx in range(num_kv_chunk):
-
                 kv_start = kv_idx * self.kv_chunk
                 kv_end = (kv_idx + 1) * self.kv_chunk if kv_idx < num_kv_chunk - 1 else key_len
 
@@ -753,12 +741,9 @@ class GaudiWanAttnProcessor:
         self.cp_size = parallel_state.get_sequence_parallel_world_size()
         self.fav3 = FlashAttnV3Gaudi()
 
-        if not self.use_sp and parallel_state.sequence_parallel_is_initialized() \
-            and self.cp_size > 1:
+        if not self.use_sp and parallel_state.sequence_parallel_is_initialized() and self.cp_size > 1:
             self.fused_scaled_dot_product_attention_distributed = (
-                GaudiDistributedAttention(self.fused_scaled_dot_product_attention)
-                if FusedSDPA
-                else None
+                GaudiDistributedAttention(self.fused_scaled_dot_product_attention) if FusedSDPA else None
             )
 
     def _native_attention(
@@ -790,10 +775,19 @@ class GaudiWanAttnProcessor:
                 "None",
             )
         else:
-            out = self.fused_scaled_dot_product_attention(query, key, value, attn_mask, dropout_p, is_causal, scale, fsdpa_mode,
-                    False,
-                    None,
-                    "None",)
+            out = self.fused_scaled_dot_product_attention(
+                query,
+                key,
+                value,
+                attn_mask,
+                dropout_p,
+                is_causal,
+                scale,
+                fsdpa_mode,
+                False,
+                None,
+                "None",
+            )
         return out
 
     def __call__(
@@ -862,7 +856,9 @@ class GaudiWanAttnProcessor:
             key = key.reshape(bs, kv_seq, -1)
             value = value.reshape(bs, kv_seq, -1)
             full_key = torch.empty(bs, kv_seq * self.cp_size, num_head * head_dim, dtype=key.dtype, device=key.device)
-            full_value = torch.empty(bs, kv_seq * self.cp_size, num_head * head_dim, dtype=value.dtype, device=value.device)
+            full_value = torch.empty(
+                bs, kv_seq * self.cp_size, num_head * head_dim, dtype=value.dtype, device=value.device
+            )
             gather1 = torch.distributed.all_gather_into_tensor(
                 full_key,
                 key,
@@ -880,7 +876,7 @@ class GaudiWanAttnProcessor:
             value = full_value.reshape(bs, kv_seq * self.cp_size, num_head, head_dim)
 
             if attention_mask is not None:
-                logger.warning(f"Applying attention_mask in SP is not well supported, set it as None.")
+                logger.warning("Applying attention_mask in SP is not well supported, set it as None.")
                 attention_mask = None
 
         hidden_states = self.fav3.forward(query, key, value, attention_mask, fsdpa_mode="fast",
@@ -917,6 +913,7 @@ class GaudiQwenDoubleStreamAttnProcessor2_0:
         self.is_training = is_training
         self.fused_scaled_dot_product_attention = ModuleFusedSDPA(FusedSDPA) if FusedSDPA else None
         self.cp_size = parallel_state.get_sequence_parallel_world_size()
+        self.fav3 = FlashAttnV3Gaudi()
 
     def __call__(
         self,
@@ -970,7 +967,6 @@ class GaudiQwenDoubleStreamAttnProcessor2_0:
             txt_key = apply_rotary_emb_qwen(txt_key, txt_freqs)
 
         if self.cp_size > 1:
-
             bs, img_kv_seq, num_head, head_dim = img_key.shape
             img_key = img_key.reshape(bs, img_kv_seq, -1)
             img_value = img_value.reshape(bs, img_kv_seq, -1)
@@ -1004,19 +1000,24 @@ class GaudiQwenDoubleStreamAttnProcessor2_0:
         # Fast FSDPA is not supported in training mode
         fsdpa_mode = "None" if self.is_training else "fast"
 
-        joint_hidden_states = self.fused_scaled_dot_product_attention(
-            joint_query,
-            joint_key,
-            joint_value,
-            attention_mask,
-            0.0,
-            False,
-            None,
-            fsdpa_mode,
-            False,
-            None,
-            "None",
-        )
+        if joint_key.shape[1] < 8192:
+            joint_hidden_states = self.fused_scaled_dot_product_attention(
+                joint_query,
+                joint_key,
+                joint_value,
+                attention_mask,
+                0.0,
+                False,
+                None,
+                fsdpa_mode,
+                False,
+                None,
+                "None",
+            )
+        else:
+            joint_hidden_states = self.fav3.forward(
+                joint_query, joint_key, joint_value, fsdpa_mode=fsdpa_mode, cp_size=self.cp_size
+            )
 
         if self.cp_size > 1:
             torch.hpu.synchronize()
