@@ -94,6 +94,110 @@ class ScaledDotProductAttention(nn.Module):
             return self.bmm2(attn_weight, value)
 
 
+class FlashAttnV3Gaudi:
+    def __init__ (self):
+        self.q_chunk = int(os.environ.get("FA3_Q_CHUNK", 8192))
+        self.kv_chunk = int(os.environ.get("FA3_KV_CHUNK", 8192))
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        fsdpa_mode: str = "fast",
+        cp_size: int = 1,
+        pad_len: int = 0,
+        ) -> torch.Tensor:
+
+        # Change to (batch, heads, seq_len, head_dim)
+        query, key, value = (x.permute(0, 2, 1, 3).contiguous() for x in (query, key, value))
+        query_len = query.size(-2)
+        key_len = key.size(-2)
+
+        # In the case of cross-attn, use FusedSDPA.
+        if  (query_len * cp_size) != key_len:
+            output = FusedSDPA.apply(
+                query,
+                key,
+                value,
+                attention_mask,
+                0.0,
+                False,
+                None,
+                fsdpa_mode,
+                None
+            )
+            return output.permute(0, 2, 1, 3).contiguous()
+ 
+        #Flash Attention V3 for Full Attention
+        linv_factor = 128.0 if fsdpa_mode == "fast" else 1.0
+
+        if pad_len > 0:
+            key = key[:, :, :-pad_len, :]
+            value = value[:, :, :-pad_len, :]
+            key_len = key.size(-2)
+
+        num_query_chunk = int((query_len - 1) / self.q_chunk) + 1
+        num_kv_chunk = int((key_len - 1) / self.kv_chunk) + 1
+
+        final_hidden_list = []
+
+        for query_idx in range(num_query_chunk):
+
+            query_start = query_idx * self.q_chunk
+            query_end = (query_idx + 1) * self.q_chunk if query_idx < num_query_chunk - 1 else query_len
+            query_slice = query[..., query_start:query_end, :]
+
+            out = None
+            m = None
+            linv = None
+
+            for kv_idx in range(num_kv_chunk):
+
+                kv_start = kv_idx * self.kv_chunk
+                kv_end = (kv_idx + 1) * self.kv_chunk if kv_idx < num_kv_chunk - 1 else key_len
+
+                key_slice = key[..., kv_start:kv_end, :]
+                value_slice = value[..., kv_start:kv_end, :]
+
+                block_out, block_m, block_linv, _ = torch.ops.hpu.sdpa_recomp_fwd(
+                    query_slice,
+                    key_slice,
+                    value_slice,
+                    None,
+                    0.0,
+                    1 / math.sqrt(query.shape[-1]),
+                    False,
+                    True,
+                    fsdpa_mode,
+                    None, #vsl,
+                    "left",
+                )
+
+                if kv_idx == 0:
+                    out = block_out.to(torch.float32)
+                    m = block_m.to(torch.float32)
+                    linv = block_linv.to(torch.float32) * linv_factor
+                else:
+                    block_linv = block_linv.to(torch.float32) * linv_factor
+                    block_m = block_m.to(torch.float32)
+                    block_out = block_out.to(torch.float32)
+                    new_m = torch.maximum(m, block_m)
+                    l_rescaled = (1.0 / linv) * torch.exp(m - new_m)
+                    block_l_rescaled = (1.0 / block_linv) * torch.exp(block_m - new_m)
+                    new_linv = 1.0 / (l_rescaled + block_l_rescaled)
+                    out = (l_rescaled * new_linv) * out + (block_l_rescaled * new_linv) * block_out
+                    linv = new_linv
+                    m = new_m
+
+            final_hidden_list.append(out.to(query.dtype))
+
+        output = torch.cat(final_hidden_list, dim=-2)
+
+        return output.permute(0, 2, 1, 3).contiguous()
+
+
 # Copied from diffusers.models.attention_processor.AttnProcessor2_0
 class AttnProcessor2_0:
     r"""
@@ -646,6 +750,7 @@ class GaudiWanAttnProcessor:
         self.fused_scaled_dot_product_attention_distributed = None
         self.use_sp = os.getenv("USE_SP", "True").lower() not in ("0", "false", "False")
         self.cp_size = parallel_state.get_sequence_parallel_world_size()
+        self.fav3 = FlashAttnV3Gaudi()
 
         if not self.use_sp and parallel_state.sequence_parallel_is_initialized() \
             and self.cp_size > 1:
@@ -697,6 +802,7 @@ class GaudiWanAttnProcessor:
         encoder_hidden_states: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        pad_len: int = 0,
     ) -> torch.Tensor:
         encoder_hidden_states_img = None
         if attn.add_k_proj is not None:
@@ -776,11 +882,11 @@ class GaudiWanAttnProcessor:
                 logger.warning(f"Applying attention_mask in SP is not well supported, set it as None.")
                 attention_mask = None
 
-        hidden_states = self._native_attention(query, key, value, attention_mask, 0.0, False, None)
+        hidden_states = self.fav3.forward(query, key, value, attention_mask, fsdpa_mode="fast",
+                                          cp_size=self.cp_size, pad_len=pad_len)
 
         if self.use_sp and self.cp_size > 1:
             torch.hpu.synchronize()
-
 
         hidden_states = hidden_states.flatten(2, 3)
         hidden_states = hidden_states.type_as(query)

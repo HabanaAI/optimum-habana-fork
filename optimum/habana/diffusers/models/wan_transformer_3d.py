@@ -137,12 +137,13 @@ def WanTransformer3DModleForwardGaudi(
     if torch.is_grad_enabled() and self.gradient_checkpointing:
         for block in self.blocks:
             hidden_states = self._gradient_checkpointing_func(
-                block, hidden_states, encoder_hidden_states, timestep_proj, rotary_emb, attention_mask
-            )
+                block, hidden_states, encoder_hidden_states, timestep_proj,
+                rotary_emb, attention_mask, pad_len=pad_len)
             htcore.mark_step()
     else:
         for block in self.blocks:
-            hidden_states = block(hidden_states, encoder_hidden_states, timestep_proj, rotary_emb, attention_mask)
+            hidden_states = block(hidden_states, encoder_hidden_states, timestep_proj,
+                                  rotary_emb, attention_mask, pad_len=pad_len)
             htcore.mark_step()
 
     # 5. Output norm, projection & unpatchify
@@ -225,6 +226,7 @@ def WanTransformerBlockForwardGaudi (
     temb: torch.Tensor,
     rotary_emb: torch.Tensor,
     attention_mask: Optional[torch.Tensor] = None,
+    pad_len: int = 0,
 ) -> torch.Tensor:
     if temb.ndim == 4:
         # temb: batch_size, seq_len, 6, inner_dim (wan2.2 ti2v)
@@ -245,7 +247,7 @@ def WanTransformerBlockForwardGaudi (
         ).chunk(6, dim=1)
     # 1. Self-attention
     norm_hidden_states = (self.norm1(hidden_states.float()) * (1 + scale_msa) + shift_msa).type_as(hidden_states)
-    attn_output = self.attn1(norm_hidden_states, None, attention_mask, rotary_emb)
+    attn_output = self.attn1(norm_hidden_states, None, attention_mask, rotary_emb, pad_len=pad_len)
     hidden_states = (hidden_states.float() + attn_output * gate_msa).type_as(hidden_states)
     # 2. Cross-attention
     norm_hidden_states = self.norm2(hidden_states.float()).type_as(hidden_states)
