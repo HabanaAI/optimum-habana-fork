@@ -626,6 +626,7 @@ class GaudiFluxAttnProcessor2_0:
         if not hasattr(F, "scaled_dot_product_attention"):
             raise ImportError("FluxAttnProcessor2_0 requires PyTorch 2.0, to use it, please upgrade PyTorch to 2.0.")
         self.is_training = is_training
+        self.fav3 = FlashAttnV3Gaudi()
 
     def __call__(
         self,
@@ -710,9 +711,9 @@ class GaudiFluxAttnProcessor2_0:
 
         # Fast FSDPA is not supported in training mode
         fsdpa_mode = "None" if self.is_training else "fast"
-        hidden_states = FusedSDPA.apply(query, key, value, None, 0.0, False, None, fsdpa_mode, None)
+        hidden_states = self.fav3.forward(query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2), attention_mask, fsdpa_mode)
 
-        hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim)
+        hidden_states = hidden_states.reshape(batch_size, -1, attn.heads * head_dim)
         hidden_states = hidden_states.to(query.dtype)
         if encoder_hidden_states is not None:
             encoder_hidden_states, hidden_states = (
