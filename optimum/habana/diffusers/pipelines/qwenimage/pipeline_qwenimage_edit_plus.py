@@ -158,6 +158,9 @@ class GaudiQwenImageEditPlusPipeline(GaudiDiffusionPipeline, QwenImageEditPlusPi
             self.transformer = wrap_in_hpu_graph(self.transformer)
             self.text_encoder = wrap_in_hpu_graph(self.text_encoder)
 
+        self.vae_decode_latents_buckets = [188] 
+        self.vae_encode_buckets = [1504]  
+
     def prepare_latents(
         self,
         images,
@@ -189,11 +192,10 @@ class GaudiQwenImageEditPlusPipeline(GaudiDiffusionPipeline, QwenImageEditPlusPi
 
                 if image.shape[1] != self.latent_channels:
                     # padding
-                    buckets_list = [832, 1024, 1280, 1504]
                     _, _, _, h, w = image.shape
                     h_pad = -1
                     w_pad = -1
-                    for bucket in buckets_list:
+                    for bucket in self.vae_encode_buckets:
                         if h_pad >= 0 and w_pad >= 0:
                             break
                         if h <= bucket and h_pad == -1:
@@ -688,11 +690,10 @@ class GaudiQwenImageEditPlusPipeline(GaudiDiffusionPipeline, QwenImageEditPlusPi
             )
             latents = latents / latents_std + latents_mean
 
-            buckets_list = [104, 128, 160, 188]
             _, _, _, h, w = latents.shape
             h_pad = -1
             w_pad = -1
-            for bucket in buckets_list:
+            for bucket in self.vae_decode_latents_buckets:
                 if h_pad >= 0 and w_pad >= 0:
                     break
                 if h <= bucket and h_pad == -1:
