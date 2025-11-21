@@ -15,8 +15,10 @@ import os
 import types
 from typing import Any, Callable, Dict, List, Optional, Union
 
+import habana_frameworks.torch.core as htcore
 import numpy as np
 import torch
+import torch.nn.functional as F
 from diffusers.image_processor import PipelineImageInput
 from diffusers.models import AutoencoderKLQwenImage, QwenImageTransformer2DModel
 from diffusers.models.autoencoders.autoencoder_kl_qwenimage import QwenImageAttentionBlock
@@ -29,6 +31,7 @@ from diffusers.pipelines.qwenimage.pipeline_qwenimage_edit import (
 )
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 from diffusers.utils import logging, replace_example_docstring
+from diffusers.utils.torch_utils import randn_tensor
 from transformers import Qwen2_5_VLForConditionalGeneration, Qwen2Tokenizer, Qwen2VLProcessor
 
 from ....transformers.gaudi_configuration import GaudiConfig
@@ -103,6 +106,12 @@ class GaudiQwenImageEditPipeline(GaudiDiffusionPipeline, QwenImageEditPipeline):
         sdp_on_bf16: bool = False,
         is_training: bool = False,
     ):
+        if use_hpu_graphs:
+            use_hpu_graphs = False
+            logger.warning(
+                "GaudiQwenImageEditPipeline HPU graph mode may have OOM problem when image size changes. So changed to use_hpu_graphs=False !"
+            )
+
         os.environ["QWEN25VL_FP32_SOFTMAX"] = "True"
         GaudiDiffusionPipeline.__init__(
             self,
@@ -147,8 +156,98 @@ class GaudiQwenImageEditPipeline(GaudiDiffusionPipeline, QwenImageEditPipeline):
         if use_hpu_graphs:
             from habana_frameworks.torch.hpu import wrap_in_hpu_graph
 
-            self.transformer = wrap_in_hpu_graph(self.transformer)
+            for block in self.transformer.transformer_blocks:
+                block = wrap_in_hpu_graph(block)
             self.text_encoder = wrap_in_hpu_graph(self.text_encoder)
+
+        self.vae_decode_latents_buckets = [188]
+        self.vae_encode_buckets = [1504]
+        self.transformer.hidden_states_buckets = [8272]
+        self.transformer.encoder_hidden_states_buckets = [256, 512, 1024, 1376]
+
+    def prepare_latents(
+        self,
+        image,
+        batch_size,
+        num_channels_latents,
+        height,
+        width,
+        dtype,
+        device,
+        generator,
+        latents=None,
+    ):
+        # HPU: add bucket to _encode_vae_image to reduce recompile time
+
+        # VAE applies 8x compression on images but we must also account for packing which requires
+        # latent height and width to be divisible by 2.
+        height = 2 * (int(height) // (self.vae_scale_factor * 2))
+        width = 2 * (int(width) // (self.vae_scale_factor * 2))
+
+        shape = (batch_size, 1, num_channels_latents, height, width)
+
+        image_latents = None
+        if image is not None:
+            print("_encode_vae_image image shape=", image.shape)
+            image = image.to(device=device, dtype=dtype)
+            if image.shape[1] != self.latent_channels:
+                # padding
+                _, _, _, h, w = image.shape
+                h_pad = -1
+                w_pad = -1
+                for bucket in self.vae_encode_buckets:
+                    if h_pad >= 0 and w_pad >= 0:
+                        break
+                    if h <= bucket and h_pad == -1:
+                        h_pad = bucket - h
+                    if w <= bucket and w_pad == -1:
+                        w_pad = bucket - w
+                if h_pad < 0:
+                    h_pad = 0
+                if w_pad < 0:
+                    w_pad = 0
+                image = F.pad(image, (0, w_pad, 0, h_pad), "constant", 0)
+                down_sample_scales = 2 ** (len(self.vae.encoder.dim_mult) - 1)
+                h_out = int(h / down_sample_scales)
+                w_out = int(w / down_sample_scales)
+
+                htcore.mark_step()
+                image_latents = self._encode_vae_image(image=image, generator=generator)
+                htcore.mark_step()
+                # remove padding
+                image_latents = image_latents[:, :, :, :h_out, :w_out]
+            else:
+                image_latents = image
+            if batch_size > image_latents.shape[0] and batch_size % image_latents.shape[0] == 0:
+                # expand init_latents for batch_size
+                additional_image_per_prompt = batch_size // image_latents.shape[0]
+                image_latents = torch.cat([image_latents] * additional_image_per_prompt, dim=0)
+            elif batch_size > image_latents.shape[0] and batch_size % image_latents.shape[0] != 0:
+                raise ValueError(
+                    f"Cannot duplicate `image` of batch size {image_latents.shape[0]} to {batch_size} text prompts."
+                )
+            else:
+                image_latents = torch.cat([image_latents], dim=0)
+
+            image_latent_height, image_latent_width = image_latents.shape[3:]
+            image_latents = self._pack_latents(
+                image_latents, batch_size, num_channels_latents, image_latent_height, image_latent_width
+            )
+
+        if isinstance(generator, list) and len(generator) != batch_size:
+            raise ValueError(
+                f"You have passed a list of generators of length {len(generator)}, but requested an effective batch"
+                f" size of {batch_size}. Make sure the batch size matches the length of the generators."
+            )
+        if latents is None:
+            rand_device = "cpu" if device.type == "hpu" else device
+            rand_device = torch.device(rand_device)
+            latents = randn_tensor(shape, generator=generator, device=rand_device, dtype=dtype).to(device)
+            latents = self._pack_latents(latents, batch_size, num_channels_latents, height, width)
+        else:
+            latents = latents.to(device=device, dtype=dtype)
+
+        return latents, image_latents
 
     def _get_qwen_prompt_embeds(
         self,
@@ -323,7 +422,6 @@ class GaudiQwenImageEditPipeline(GaudiDiffusionPipeline, QwenImageEditPipeline):
             [`~pipelines.qwenimage.QwenImagePipelineOutput`] if `return_dict` is True, otherwise a `tuple`. When
             returning a tuple, the first element is a list with the generated images.
         """
-        import habana_frameworks.torch.core as htcore
 
         image_size = image[0].size if isinstance(image, list) else image.size
         calculated_width, calculated_height, _ = calculate_dimensions(1024 * 1024, image_size[0] / image_size[1])
@@ -473,6 +571,47 @@ class GaudiQwenImageEditPipeline(GaudiDiffusionPipeline, QwenImageEditPipeline):
             negative_prompt_embeds_mask.sum(dim=1).tolist() if negative_prompt_embeds_mask is not None else None
         )
 
+        # padding hidden_states to bucket
+        image_latents_pad_len = 0
+        latents_pad_len = 0
+        if image_latents is not None:
+            for bucket in self.transformer.hidden_states_buckets:
+                if (latents.shape[1] + image_latents.shape[1]) <= bucket:
+                    image_latents_pad_len = bucket - (latents.shape[1] + image_latents.shape[1])
+                    image_latents_padded = F.pad(image_latents, (0, 0, 0, image_latents_pad_len), "constant", 0)
+                    image_latents = image_latents_padded
+                    break
+        else:
+            for bucket in self.transformer.hidden_states_buckets:
+                if latents.shape[1] <= bucket:
+                    latents_pad_len = bucket - latents.shape[1]
+                    latents_padded = F.pad(latents, (0, 0, 0, latents_pad_len), "constant", 0)
+                    latents = latents_padded
+                    break
+
+        # padding prompt_embeds and  negative_prompt_embeds to bucket.
+        # prompt_embeds and negative_prompt_embeds use the same bucket, to save memory.
+        prompt_embeds_pad_len = 0
+        negative_prompt_embeds_pad_len = 0
+        max_prompt_embeds_len = max(prompt_embeds.shape[1], negative_prompt_embeds.shape[1])
+        for bucket in self.transformer.encoder_hidden_states_buckets:
+            if max_prompt_embeds_len <= bucket:
+                prompt_embeds_pad_len = bucket - prompt_embeds.shape[1]
+                prompt_embeds_padded = F.pad(prompt_embeds, (0, 0, 0, prompt_embeds_pad_len), "constant", 0)
+                prompt_embeds = prompt_embeds_padded
+                prompt_embeds_mask_padded = F.pad(prompt_embeds_mask, (0, prompt_embeds_pad_len), "constant", 0)
+                prompt_embeds_mask = prompt_embeds_mask_padded
+                negative_prompt_embeds_pad_len = bucket - negative_prompt_embeds.shape[1]
+                negative_prompt_embeds_padded = F.pad(
+                    negative_prompt_embeds, (0, 0, 0, negative_prompt_embeds_pad_len), "constant", 0
+                )
+                negative_prompt_embeds = negative_prompt_embeds_padded
+                negative_prompt_embeds_mask_padded = F.pad(
+                    negative_prompt_embeds_mask, (0, negative_prompt_embeds_pad_len), "constant", 0
+                )
+                negative_prompt_embeds_mask = negative_prompt_embeds_mask_padded
+                break
+
         # 6. Denoising loop
         self.scheduler.set_begin_index(0)
         with self.progress_bar(total=num_inference_steps) as progress_bar:
@@ -499,6 +638,8 @@ class GaudiQwenImageEditPipeline(GaudiDiffusionPipeline, QwenImageEditPipeline):
                         txt_seq_lens=txt_seq_lens,
                         attention_kwargs=self.attention_kwargs,
                         return_dict=False,
+                        hidden_states_pad_len=image_latents_pad_len + latents_pad_len,
+                        encoder_hidden_states_pad_len=prompt_embeds_pad_len,
                     )[0]
                     noise_pred = noise_pred[:, : latents.size(1)]
 
@@ -514,6 +655,8 @@ class GaudiQwenImageEditPipeline(GaudiDiffusionPipeline, QwenImageEditPipeline):
                             txt_seq_lens=negative_txt_seq_lens,
                             attention_kwargs=self.attention_kwargs,
                             return_dict=False,
+                            hidden_states_pad_len=image_latents_pad_len + latents_pad_len,
+                            encoder_hidden_states_pad_len=negative_prompt_embeds_pad_len,
                         )[0]
                     neg_noise_pred = neg_noise_pred[:, : latents.size(1)]
                     comb_pred = neg_noise_pred + true_cfg_scale * (noise_pred - neg_noise_pred)
@@ -547,6 +690,10 @@ class GaudiQwenImageEditPipeline(GaudiDiffusionPipeline, QwenImageEditPipeline):
                 if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
                     progress_bar.update()
 
+            # remove bucket padding
+            if latents_pad_len > 0:
+                latents = latents[:, :-latents_pad_len, :]
+
             if not self.use_hpu_graphs:
                 htcore.mark_step()
             hb_profiler.step()
@@ -566,7 +713,31 @@ class GaudiQwenImageEditPipeline(GaudiDiffusionPipeline, QwenImageEditPipeline):
                 latents.device, latents.dtype
             )
             latents = latents / latents_std + latents_mean
+
+            _, _, _, h, w = latents.shape
+            h_pad = -1
+            w_pad = -1
+            for bucket in self.vae_decode_latents_buckets:
+                if h_pad >= 0 and w_pad >= 0:
+                    break
+                if h <= bucket and h_pad == -1:
+                    h_pad = bucket - h
+                if w <= bucket and w_pad == -1:
+                    w_pad = bucket - w
+            if h_pad < 0:
+                h_pad = 0
+            if w_pad < 0:
+                w_pad = 0
+            x_padded = F.pad(latents, (0, w_pad, 0, h_pad), "constant", 0)
+            down_sample_scales = 2 ** (len(self.vae.encoder.dim_mult) - 1)
+            latents = x_padded
+
+            htcore.mark_step()
             image = self.vae.decode(latents, return_dict=False)[0][:, :, 0]
+            htcore.mark_step()
+
+            image = image[:, :, : h * down_sample_scales, : w * down_sample_scales]
+
             image = self.image_processor.postprocess(image, output_type=output_type)
 
         hb_profiler.stop()

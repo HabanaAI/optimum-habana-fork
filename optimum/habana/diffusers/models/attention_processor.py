@@ -923,6 +923,7 @@ class GaudiQwenDoubleStreamAttnProcessor2_0:
         encoder_hidden_states_mask: torch.FloatTensor = None,
         attention_mask: Optional[torch.FloatTensor] = None,
         image_rotary_emb: Optional[torch.Tensor] = None,
+        encoder_hidden_states_pad_len: int = 0,
     ) -> torch.FloatTensor:
         if encoder_hidden_states is None:
             raise ValueError("GaudiQwenDoubleStreamAttnProcessor2_0 requires encoder_hidden_states (text stream)")
@@ -992,6 +993,10 @@ class GaudiQwenDoubleStreamAttnProcessor2_0:
             gather2.wait()
             img_key = img_full_key.reshape(bs, img_kv_seq * self.cp_size, num_head, head_dim)
             img_value = img_full_value.reshape(bs, img_kv_seq * self.cp_size, num_head, head_dim)
+
+        if encoder_hidden_states_pad_len > 0:
+            txt_key = txt_key[:, :-encoder_hidden_states_pad_len, :]
+            txt_value = txt_value[:, :-encoder_hidden_states_pad_len, :]
 
         joint_query = torch.cat([txt_query, img_query], dim=1)
         joint_key = torch.cat([txt_key, img_key], dim=1)

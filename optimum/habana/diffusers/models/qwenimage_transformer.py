@@ -84,6 +84,8 @@ def QwenImageTransformer2DModelGaudi(
     guidance: torch.Tensor = None,  # TODO: this should probably be removed
     attention_kwargs: Optional[Dict[str, Any]] = None,
     return_dict: bool = True,
+    hidden_states_pad_len: int = 0,
+    encoder_hidden_states_pad_len: int = 0,
 ) -> Union[torch.Tensor, Transformer2DModelOutput]:
     r"""
     Adapted from: https://github.com/huggingface/diffusers/blob/df267ee4e8500a2ef5960879f6d1ea49cc8ec40d/src/diffusers/models/transformers/transformer_qwenimage.py#L548
@@ -119,16 +121,23 @@ def QwenImageTransformer2DModelGaudi(
         else self.time_text_embed(timestep, guidance, hidden_states)
     )
 
-    image_rotary_emb = self.pos_embed(img_shapes, txt_seq_lens, device=hidden_states.device)
+    (vid_freqs_cos, vid_freqs_sin), (txt_freqs_cos, txt_freqs_sin) = self.pos_embed(
+        img_shapes, txt_seq_lens, device=hidden_states.device
+    )
+
+    if hidden_states_pad_len > 0:
+        vid_freqs_cos = F.pad(vid_freqs_cos, (0, 0, 0, hidden_states_pad_len))
+        vid_freqs_sin = F.pad(vid_freqs_sin, (0, 0, 0, hidden_states_pad_len))
+    if encoder_hidden_states_pad_len > 0:
+        txt_freqs_cos = F.pad(txt_freqs_cos, (0, 0, 0, encoder_hidden_states_pad_len))
+        txt_freqs_sin = F.pad(txt_freqs_sin, (0, 0, 0, encoder_hidden_states_pad_len))
 
     pad_len_img = 0
     attention_mask = None
     if parallel_state.sequence_parallel_is_initialized():
         bs, seq_len_img, _ = hidden_states.shape
-        bs, seq_len_txt, _ = encoder_hidden_states.shape
 
         cp_size = parallel_state.get_sequence_parallel_world_size()
-        (vid_freqs_cos, vid_freqs_sin), (txt_freqs_cos, txt_freqs_sin) = image_rotary_emb
         # We need to ensure seq_len can be divided by cp_size
         if seq_len_img % cp_size != 0:
             padded_seq_len_img = (seq_len_img // cp_size + 1) * cp_size
@@ -140,18 +149,15 @@ def QwenImageTransformer2DModelGaudi(
 
             seq_len_img = padded_seq_len_img
 
-        image_rotary_emb = (vid_freqs_cos, vid_freqs_sin), (txt_freqs_cos, txt_freqs_sin)
-
         sp_seq_len_img = seq_len_img // parallel_state.get_sequence_parallel_world_size()
         start_img = sp_seq_len_img * parallel_state.get_sequence_parallel_rank()
         end_img = sp_seq_len_img * (parallel_state.get_sequence_parallel_rank() + 1)
         hidden_states = hidden_states[:, start_img:end_img, :]
 
-        (vid_freqs_cos, vid_freqs_sin), (txt_freqs_cos, txt_freqs_sin) = image_rotary_emb
         vid_freqs_cos = vid_freqs_cos[start_img:end_img, :]
         vid_freqs_sin = vid_freqs_sin[start_img:end_img, :]
 
-        image_rotary_emb = (vid_freqs_cos, vid_freqs_sin), (txt_freqs_cos, txt_freqs_sin)
+    image_rotary_emb = (vid_freqs_cos, vid_freqs_sin), (txt_freqs_cos, txt_freqs_sin)
 
     for index_block, block in enumerate(self.transformer_blocks):
         if torch.is_grad_enabled() and self.gradient_checkpointing:
@@ -163,8 +169,8 @@ def QwenImageTransformer2DModelGaudi(
                 temb,
                 image_rotary_emb,
                 attention_mask,
+                encoder_hidden_states_pad_len,
             )
-            htcore.mark_step()
 
         else:
             encoder_hidden_states, hidden_states = block(
@@ -175,13 +181,14 @@ def QwenImageTransformer2DModelGaudi(
                 image_rotary_emb=image_rotary_emb,
                 joint_attention_kwargs=attention_kwargs,
                 attention_mask=attention_mask,
+                encoder_hidden_states_pad_len=encoder_hidden_states_pad_len,
             )
-            htcore.mark_step()
+
+        htcore.mark_step()
 
     if parallel_state.sequence_parallel_is_initialized():
         cp_size = parallel_state.get_sequence_parallel_world_size()
         bs, seq, dim = hidden_states.shape
-        _, seq_txt, _ = encoder_hidden_states.shape
 
         gather_hidden = torch.empty(bs, seq * cp_size, dim, dtype=hidden_states.dtype, device=hidden_states.device)
         gather1 = torch.distributed.all_gather_into_tensor(
@@ -219,6 +226,7 @@ def QwenImageTransformerBlockForwardGaudi(
     image_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     joint_attention_kwargs: Optional[Dict[str, Any]] = None,
     attention_mask: Optional[torch.Tensor] = None,
+    encoder_hidden_states_pad_len: int = 0,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Adapted from https://github.com/huggingface/diffusers/blob/df267ee4e8500a2ef5960879f6d1ea49cc8ec40d/src/diffusers/models/transformers/transformer_qwenimage.py#L405
@@ -253,6 +261,7 @@ def QwenImageTransformerBlockForwardGaudi(
         encoder_hidden_states_mask=encoder_hidden_states_mask,
         image_rotary_emb=image_rotary_emb,
         attention_mask=attention_mask,
+        encoder_hidden_states_pad_len=encoder_hidden_states_pad_len,
         **joint_attention_kwargs,
     )
 
