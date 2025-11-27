@@ -212,11 +212,11 @@ from .models import (
     GaudiT5ForConditionalGeneration,
     GaudiVideoLlavaForConditionalGeneration,
     GaudiVisionSdpaAttention,
+    GaudiWhisperAttention,
     GaudiWhisperDecoder,
     GaudiWhisperDecoderLayer,
     GaudiWhisperForConditionalGeneration,
     GaudiWhisperModel,
-    GaudiWhisperSdpaAttention,
     GaudiXGLMForCausalLM,
     GLM4VConfig,
     GLM4VForConditionalGeneration,
@@ -335,7 +335,6 @@ from .models import (
     gaudi_XLMRoberta_Sdpa_SelfAttention_forward,
 )
 from .models.deepseek_v2.modeling_deepseek_v2 import DeepseekV2ForCausalLM as GaudiDeepseekV2ForCausalLM
-from .pipelines import GaudiImageToTextPipeline
 from .quantizers.quantizer_finegrained_fp8 import GaudiFineGrainedFP8HfQuantizer
 
 
@@ -417,8 +416,13 @@ def adapt_transformers_to_gaudi():
     transformers.generation.MaxTimeCriteria.__call__ = gaudi_MaxTimeCriteria_call
     transformers.generation.EosTokenCriteria.__call__ = gaudi_EosTokenCriteria_call
     transformers.generation.StoppingCriteriaList.__call__ = gaudi_StoppingCriteriaList_call
-    transformers.pipelines.image_to_text.ImageToTextPipeline._default_generation_config = (
-        GaudiImageToTextPipeline._default_generation_config
+    transformers.pipelines.image_to_text.ImageToTextPipeline._default_generation_config = GaudiGenerationConfig(
+        max_new_tokens=256,
+    )
+    transformers.pipelines.visual_question_answering.VisualQuestionAnsweringPipeline._default_generation_config = (
+        GaudiGenerationConfig(
+            max_new_tokens=256,
+        )
     )
 
     # Optimization for BLOOM generation on Gaudi
@@ -828,7 +832,7 @@ def adapt_transformers_to_gaudi():
     )
 
     # Optimization for Whisper on Gaudi
-    transformers.models.whisper.modeling_whisper.WhisperAttention = GaudiWhisperSdpaAttention
+    transformers.models.whisper.modeling_whisper.WhisperAttention = GaudiWhisperAttention
     transformers.models.whisper.modeling_whisper.WhisperDecoderLayer = GaudiWhisperDecoderLayer
     transformers.models.whisper.modeling_whisper.WhisperDecoder = GaudiWhisperDecoder
     transformers.models.whisper.modeling_whisper.WhisperModel = GaudiWhisperModel
@@ -893,6 +897,7 @@ def adapt_transformers_to_gaudi():
         transformers.AutoModelForSeq2SeqLM.register(GLM4VConfig, GLM4VForConditionalGeneration)
         transformers.AutoModelForVision2Seq.register(GLM4VConfig, GLM4VForConditionalGeneration)
         transformers.AutoModelForSequenceClassification.register(GLM4VConfig, GLM4VForSequenceClassification)
+        transformers.pipelines.image_to_text.ImageToTextPipeline._load_image_processor = False
     else:
         # Register chatglm with optimization on Gaudi
         transformers.AutoConfig.register("chatglm", ChatGLMConfig)
