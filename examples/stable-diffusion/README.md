@@ -577,6 +577,26 @@ PT_HPU_LAZY_MODE=1 python image_to_video_generation.py \
     --bf16
 ```
 
+### Text-to-Video with Kolors
+download Kolors model from https://huggingface.co/Kwai-Kolors/Kolors
+
+run Kolors demo:
+```
+bash run_kolors_demo.sh
+```
+
+
+### image in painting with Kolors-Inpainting
+
+download Kolors Inpainting  model from  https://huggingface.co/Kwai-Kolors/Kolors-Inpainting
+
+download test data from https://github.com/Kwai-Kolors/Kolors/tree/master/inpainting
+
+run Kolors Inpainting demo:
+```
+bash run_kolors_inpainting_demo.sh
+```
+
 # Important Notes for Gaudi3 Users
 
  - **Batch Size Limitation**: Due to a known issue, batch sizes for some Stable Diffusion models need to be reduced.
