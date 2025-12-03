@@ -520,12 +520,12 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
 
         # 2. Define call parameters
         if prompt is not None and isinstance(prompt, str):
-            batch_size = 1
+            num_prompts = 1
         elif prompt is not None and isinstance(prompt, list):
-            batch_size = len(prompt)
+            num_prompts = len(prompt)
         else:
-            batch_size = prompt_embeds.shape[0]
-        num_batches = num_images_per_prompt
+            num_prompts = prompt_embeds.shape[0]
+        num_batches = math.ceil((num_images_per_prompt * num_prompts) / batch_size)
 
         device = self._execution_device
 
@@ -585,7 +585,7 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
         num_channels_latents = self.transformer.config.in_channels // 4
         latents, image_latents, latent_ids, image_ids = self.prepare_latents(
             image,
-            batch_size * num_images_per_prompt,
+            num_prompts * num_images_per_prompt,
             num_channels_latents,
             image_height,
             image_width,
@@ -647,18 +647,18 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
                 ip_adapter_image,
                 ip_adapter_image_embeds,
                 device,
-                batch_size * num_images_per_prompt,
+                num_prompts * num_images_per_prompt,
             )
         if negative_ip_adapter_image is not None or negative_ip_adapter_image_embeds is not None:
             negative_image_embeds = self.prepare_ip_adapter_image_embeds(
                 negative_ip_adapter_image,
                 negative_ip_adapter_image_embeds,
                 device,
-                batch_size * num_images_per_prompt,
+                num_prompts * num_images_per_prompt,
             )
 
         logger.info(
-            f"{batch_size} prompt(s) received, {num_images_per_prompt} generation(s) per prompt,"
+            f"{num_prompts} prompt(s) received, {num_images_per_prompt} generation(s) per prompt,"
             f" {batch_size} sample(s) per batch, {num_batches} total batch(es)."
         )
         if num_batches < 3:
