@@ -360,19 +360,17 @@ class GaudiWhisperEncoderLayer(WhisperEncoderLayer):
     ) -> Tuple[torch.FloatTensor]:
         if self.training and getattr(self, "gradient_checkpointing", False):
 
-            def custom_forward(hidden_states, attention_mask, layer_head_mask):
+            def custom_forward(hidden_states):
                 return super(GaudiWhisperEncoderLayer, self).forward(
                     hidden_states=hidden_states,
-                    attention_mask=attention_mask,
-                    layer_head_mask=layer_head_mask,
+                    attention_mask=None,  # whisper encoder never uses it
+                    layer_head_mask=None,  # hf disables head mask in checkpointing
                     output_attentions=False,
                 )
 
             return torch.utils.checkpoint.checkpoint(
                 custom_forward,
                 hidden_states,
-                attention_mask,
-                layer_head_mask,
                 use_reentrant=False,
             )
 
@@ -454,7 +452,7 @@ class GaudiWhisperEncoder(WhisperEncoder):
             else:
                 layer_outputs = encoder_layer(
                     hidden_states,
-                    attention_mask,
+                    None,  # Whisper encoder never uses it
                     layer_head_mask=(head_mask[idx] if head_mask is not None else None),
                     output_attentions=output_attentions,
                 )
