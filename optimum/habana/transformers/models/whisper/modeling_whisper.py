@@ -18,6 +18,8 @@ from transformers.models.whisper.modeling_whisper import (
     WhisperAttention,
     WhisperDecoder,
     WhisperDecoderLayer,
+    WhisperEncoder,
+    WhisperEncoderLayer,
     WhisperForConditionalGeneration,
     WhisperModel,
     eager_attention_forward,
@@ -345,6 +347,138 @@ class GaudiWhisperDecoder(WhisperDecoder):
             hidden_states=all_hidden_states,
             attentions=all_self_attns,
             cross_attentions=all_cross_attns,
+        )
+
+
+class GaudiWhisperEncoderLayer(WhisperEncoderLayer):
+    def forward(
+        self,
+        hidden_states: torch.FloatTensor,
+        attention_mask: Optional[torch.LongTensor] = None,
+        layer_head_mask: Optional[torch.Tensor] = None,
+        output_attentions: bool = False,
+        past_key_value: Optional = None,
+        use_cache: bool = True,
+        cache_position: Optional[torch.LongTensor] = None,
+        token_idx: Optional[torch.Tensor] = None,
+    ):
+        # copy HF logic for training + checkpointing
+        if self.training and getattr(self, "gradient_checkpointing", False):
+            # disable cache for checkpointing
+            use_cache = False
+            past_key_value = None
+
+            def create_custom_forward(
+                module,
+                hidden_states,
+                attention_mask,
+                layer_head_mask,
+                output_attentions,
+                cache_position,
+                token_idx,
+            ):
+                def custom_forward():
+                    return module(
+                        hidden_states=hidden_states,
+                        attention_mask=attention_mask,
+                        layer_head_mask=layer_head_mask,
+                        output_attentions=output_attentions,
+                        past_key_value=None,
+                        use_cache=False,
+                        cache_position=cache_position,
+                        token_idx=token_idx,
+                    )
+
+                return custom_forward
+
+            # checkpoint the layer call
+            layer_outputs = torch.utils.checkpoint.checkpoint(
+                create_custom_forward(
+                    self,
+                    hidden_states,
+                    attention_mask,
+                    layer_head_mask,
+                    output_attentions,
+                    cache_position,
+                    token_idx,
+                ),
+                use_reentrant=False,
+            )
+        else:
+            layer_outputs = super().forward(
+                hidden_states,
+                attention_mask=attention_mask,
+                layer_head_mask=layer_head_mask,
+                output_attentions=output_attentions,
+                past_key_value=past_key_value,
+                use_cache=use_cache,
+                cache_position=cache_position,
+                token_idx=token_idx,
+            )
+
+        return layer_outputs
+
+
+class GaudiWhisperEncoder(WhisperEncoder):
+    def __init__(self, config):
+        super().__init__(config)
+        # replace layers with our Gaudi version
+        self.layers = torch.nn.ModuleList([GaudiWhisperEncoderLayer(config) for _ in range(len(self.layers))])
+
+    def forward(
+        self,
+        input_features: Optional[torch.FloatTensor] = None,
+        head_mask: Optional[torch.Tensor] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+    ):
+        # copy logic from WhisperEncoder.forward, but keep layers patched
+        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_hidden_states = (
+            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        )
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        hidden_states = input_features
+        all_hidden_states = () if output_hidden_states else None
+        all_self_attns = () if output_attentions else None
+
+        for idx, encoder_layer in enumerate(self.layers):
+            if output_hidden_states:
+                all_hidden_states += (hidden_states,)
+
+            layer_head = head_mask[idx] if head_mask is not None else None
+
+            # no special checkpoint here — the layer itself handles checkpointing
+            layer_outputs = encoder_layer(
+                hidden_states,
+                attention_mask=None,  # or pass appropriate mask if you have one
+                layer_head_mask=layer_head,
+                output_attentions=output_attentions,
+                past_key_value=None,
+                use_cache=False,
+                cache_position=None,
+                token_idx=None,
+            )
+
+            hidden_states = layer_outputs[0]
+            if output_attentions:
+                all_self_attns += (layer_outputs[1],)
+
+        hidden_states = self.layer_norm(hidden_states)
+        if output_hidden_states:
+            all_hidden_states += (hidden_states,)
+
+        if not return_dict:
+            return (hidden_states, all_hidden_states, all_self_attns)
+
+        from transformers.modeling_outputs import BaseModelOutput
+
+        return BaseModelOutput(
+            last_hidden_state=hidden_states,
+            hidden_states=all_hidden_states,
+            attentions=all_self_attns,
         )
 
 

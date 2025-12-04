@@ -214,6 +214,8 @@ from .models import (
     GaudiWhisperAttention,
     GaudiWhisperDecoder,
     GaudiWhisperDecoderLayer,
+    GaudiWhisperEncoder,
+    GaudiWhisperEncoderLayer,
     GaudiWhisperForConditionalGeneration,
     GaudiWhisperModel,
     GaudiXGLMForCausalLM,
@@ -841,6 +843,8 @@ def adapt_transformers_to_gaudi():
     transformers.models.whisper.modeling_whisper.WhisperAttention = GaudiWhisperAttention
     transformers.models.whisper.modeling_whisper.WhisperDecoderLayer = GaudiWhisperDecoderLayer
     transformers.models.whisper.modeling_whisper.WhisperDecoder = GaudiWhisperDecoder
+    transformers.models.whisper.modeling_whisper.WhisperEncoderLayer = GaudiWhisperEncoderLayer
+    transformers.models.whisper.modeling_whisper.WhisperEncoder = GaudiWhisperEncoder
     transformers.models.whisper.modeling_whisper.WhisperModel = GaudiWhisperModel
     transformers.models.whisper.modeling_whisper.WhisperForConditionalGeneration = GaudiWhisperForConditionalGeneration
 
