@@ -263,7 +263,7 @@ class GaudiWhisperDecoder(WhisperDecoder):
 
             if self.training and getattr(self, "gradient_checkpointing", False):
 
-                def custom_forward(hid_states, attn_mask):
+                def custom_forward(hid_states, attn_mask, cache_pos):
                     return decoder_layer(
                         hidden_states=hid_states,
                         attention_mask=attn_mask,
@@ -273,7 +273,7 @@ class GaudiWhisperDecoder(WhisperDecoder):
                         past_key_value=None,
                         output_attentions=output_attentions,
                         use_cache=False,
-                        cache_position=cache_position,
+                        cache_position=cache_pos,
                         token_idx=token_idx,
                     )
 
@@ -281,6 +281,7 @@ class GaudiWhisperDecoder(WhisperDecoder):
                     custom_forward,
                     hidden_states,
                     causal_mask,
+                    cache_position,
                     use_reentrant=False,
                 )
             else:
