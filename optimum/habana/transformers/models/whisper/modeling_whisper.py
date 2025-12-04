@@ -187,9 +187,13 @@ class GaudiWhisperDecoder(WhisperDecoder):
         use_cache = use_cache if use_cache is not None else self.config.use_cache
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        if self.training and getattr(self, "gradient_checkpointing", False):
+        gc_enabled = self.training and getattr(self, "gradient_checkpointing", False)
+        if gc_enabled:
             use_cache = False
             past_key_values = None
+            for layer in self.layers:
+                if hasattr(layer, "gradient_checkpointing"):
+                    layer.gradient_checkpointing = False
 
         if input_ids is None and inputs_embeds is None:
             raise ValueError("You must specify exactly one of decoder_input_ids or decoder_inputs_embeds (both None).")
@@ -261,18 +265,41 @@ class GaudiWhisperDecoder(WhisperDecoder):
             layer_head = head_mask[idx] if head_mask is not None else None
             cross_layer_head = cross_attn_head_mask[idx] if cross_attn_head_mask is not None else None
 
-            layer_outputs = decoder_layer(
-                hidden_states,
-                attention_mask=causal_mask,
-                encoder_hidden_states=encoder_hidden_states,
-                layer_head_mask=layer_head,
-                cross_attn_layer_head_mask=cross_layer_head,
-                past_key_value=past_key_values if use_cache else None,
-                output_attentions=output_attentions,
-                use_cache=use_cache,
-                cache_position=cache_position,
-                token_idx=token_idx,
-            )
+            if gc_enabled:
+                def custom_forward(hid_states, attn_mask, cache_pos):
+                    return decoder_layer(
+                        hid_states,
+                        attention_mask=attn_mask,
+                        encoder_hidden_states=encoder_hidden_states,
+                        layer_head_mask=layer_head,
+                        cross_attn_layer_head_mask=cross_layer_head,
+                        past_key_value=None,
+                        output_attentions=output_attentions,
+                        use_cache=False,
+                        cache_position=cache_pos,
+                        token_idx=token_idx,
+                    )
+
+                layer_outputs = torch.utils.checkpoint.checkpoint(
+                    custom_forward,
+                    hidden_states,
+                    causal_mask,
+                    cache_position,
+                    use_reentrant=False,
+                )
+            else:
+                layer_outputs = decoder_layer(
+                    hidden_states,
+                    attention_mask=causal_mask,
+                    encoder_hidden_states=encoder_hidden_states,
+                    layer_head_mask=layer_head,
+                    cross_attn_layer_head_mask=cross_layer_head,
+                    past_key_value=past_key_values if use_cache else None,
+                    output_attentions=output_attentions,
+                    use_cache=use_cache,
+                    cache_position=cache_position,
+                    token_idx=token_idx,
+                )
 
             hidden_states = layer_outputs[0]
             if output_attentions:
