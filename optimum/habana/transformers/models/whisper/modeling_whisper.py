@@ -266,7 +266,9 @@ class GaudiWhisperDecoder(WhisperDecoder):
             cross_layer_head = cross_attn_head_mask[idx] if cross_attn_head_mask is not None else None
 
             if gc_enabled:
-                def custom_forward(hid_states, attn_mask, cache_pos):
+                current_cache_position = cache_position
+
+                def custom_forward(hid_states, attn_mask):
                     return decoder_layer(
                         hid_states,
                         attention_mask=attn_mask,
@@ -276,7 +278,7 @@ class GaudiWhisperDecoder(WhisperDecoder):
                         past_key_value=None,
                         output_attentions=output_attentions,
                         use_cache=False,
-                        cache_position=cache_pos,
+                        cache_position=current_cache_position,
                         token_idx=token_idx,
                     )
 
@@ -284,7 +286,6 @@ class GaudiWhisperDecoder(WhisperDecoder):
                     custom_forward,
                     hidden_states,
                     causal_mask,
-                    cache_position,
                     use_reentrant=False,
                 )
             else:
