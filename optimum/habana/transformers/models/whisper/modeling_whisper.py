@@ -360,17 +360,12 @@ class GaudiWhisperEncoderLayer(WhisperEncoderLayer):
     ) -> Tuple[torch.FloatTensor]:
         if self.training and getattr(self, "gradient_checkpointing", False):
 
-            def custom_forward(
-                hidden_states,
-                attention_mask,
-                layer_head_mask,
-                output_attentions,
-            ):
+            def custom_forward(hidden_states, attention_mask, layer_head_mask):
                 return super(GaudiWhisperEncoderLayer, self).forward(
                     hidden_states=hidden_states,
                     attention_mask=attention_mask,
                     layer_head_mask=layer_head_mask,
-                    output_attentions=output_attentions,
+                    output_attentions=False,
                 )
 
             return torch.utils.checkpoint.checkpoint(
@@ -378,7 +373,6 @@ class GaudiWhisperEncoderLayer(WhisperEncoderLayer):
                 hidden_states,
                 attention_mask,
                 layer_head_mask,
-                output_attentions,
                 use_reentrant=False,
             )
 
@@ -424,6 +418,10 @@ class GaudiWhisperEncoder(WhisperEncoder):
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
+        # HF 4.55: force attentions off during checkpointing
+        if self.training and self.gradient_checkpointing:
+            output_attentions = False
+
         inputs_embeds = nn.functional.gelu(self.conv1(input_features))
         inputs_embeds = nn.functional.gelu(self.conv2(inputs_embeds))
 
@@ -448,16 +446,15 @@ class GaudiWhisperEncoder(WhisperEncoder):
 
             to_drop = False
             if self.training:
-                dropout_probability = torch.rand([])
-                if dropout_probability < self.layerdrop:
+                if torch.rand([]) < self.layerdrop:
                     to_drop = True
 
             if to_drop:
-                layer_outputs = (None, None)
+                layer_outputs = (hidden_states, None)
             else:
                 layer_outputs = encoder_layer(
                     hidden_states,
-                    None,
+                    attention_mask,
                     layer_head_mask=(head_mask[idx] if head_mask is not None else None),
                     output_attentions=output_attentions,
                 )
@@ -467,6 +464,7 @@ class GaudiWhisperEncoder(WhisperEncoder):
                 all_attentions = all_attentions + (layer_outputs[1],)
 
         hidden_states = self.layer_norm(hidden_states)
+
         if output_hidden_states:
             encoder_states = encoder_states + (hidden_states,)
 
