@@ -263,7 +263,22 @@ class GaudiWhisperDecoder(WhisperDecoder):
 
             if self.training and getattr(self, "gradient_checkpointing", False):
 
-                def custom_forward(hid_states, attn_mask, cache_pos):
+                def custom_forward(*inputs):
+                    if len(inputs) == 1:
+                        (hid_states,) = inputs
+                        attn_mask = causal_mask
+                        cache_pos = cache_position
+                    elif len(inputs) == 2:
+                        hid_states, attn_mask = inputs
+                        cache_pos = cache_position
+                    elif len(inputs) == 3:
+                        hid_states, attn_mask, cache_pos = inputs
+                    else:
+                        raise ValueError(
+                            f"Unexpected number of inputs to custom_forward: {len(inputs)}; "
+                            "expected 1, 2 or 3."
+                        )
+
                     return decoder_layer(
                         hidden_states=hid_states,
                         attention_mask=attn_mask,
@@ -297,7 +312,6 @@ class GaudiWhisperDecoder(WhisperDecoder):
                     cache_position=cache_position,
                     token_idx=token_idx,
                 )
-
 
             hidden_states = layer_outputs[0]
             if output_attentions:
