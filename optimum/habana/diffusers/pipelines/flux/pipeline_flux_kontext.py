@@ -180,13 +180,13 @@ class GaudiFluxKontextPipeline(GaudiDiffusionPipeline, FluxKontextPipeline):
         )
         FluxKontextPipeline.__init__(
             self,
+            scheduler=scheduler,
             vae=vae,
             text_encoder=text_encoder,
             text_encoder_2=text_encoder_2,
             tokenizer=tokenizer,
             tokenizer_2=tokenizer_2,
             transformer=transformer,
-            scheduler=scheduler,
             image_encoder=image_encoder,
             feature_extractor=feature_extractor,
         )
