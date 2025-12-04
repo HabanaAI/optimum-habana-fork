@@ -264,40 +264,27 @@ class GaudiWhisperDecoder(WhisperDecoder):
 
             if self.training and getattr(self, "gradient_checkpointing", False):
 
-                def custom_forward(
-                    hid_states,
-                    attn_mask,
-                    enc_states,
-                    layer_head_mask,
-                    cross_layer_head_mask,
-                    cache_pos,
-                    tok_idx,
-                ):
+                def custom_forward(hid_states, attn_mask, cache_pos):
                     return decoder_layer(
                         hidden_states=hid_states,
                         attention_mask=attn_mask,
-                        encoder_hidden_states=enc_states,
-                        layer_head_mask=layer_head_mask,
-                        cross_attn_layer_head_mask=cross_layer_head_mask,
+                        encoder_hidden_states=encoder_hidden_states,   # from closure
+                        layer_head_mask=layer_head,                   # from closure
+                        cross_attn_layer_head_mask=cross_layer_head,  # from closure
                         past_key_value=None,
                         output_attentions=output_attentions,
                         use_cache=False,
                         cache_position=cache_pos,
-                        token_idx=tok_idx,
+                        token_idx=token_idx,                          # from closure
                     )
 
                 layer_outputs = torch.utils.checkpoint.checkpoint(
                     custom_forward,
                     hidden_states,
                     causal_mask,
-                    encoder_hidden_states,
-                    layer_head,
-                    cross_layer_head,
                     cache_position,
-                    token_idx,
                     use_reentrant=False,
                 )
-
             else:
                 layer_outputs = decoder_layer(
                     hidden_states,
