@@ -26,6 +26,7 @@ import habana_frameworks.torch as ht
 import habana_frameworks.torch.core as htcore
 import habana_frameworks.torch.gpu_migration
 from habana_frameworks.torch.hpex.kernels import FusedSDPA
+from habana_frameworks.torch.hpex.kernels import RotaryPosEmbeddingMode, apply_rotary_pos_emb
 
 class ZSingleStreamAttnProcessorGaudi:
     """
@@ -68,12 +69,11 @@ class ZSingleStreamAttnProcessorGaudi:
                              use_real_unbind_dim:int = -1, 
         )-> torch.Tensor:
             if use_real:
-                x_real, x_imag = x_in.reshape(*x_in.shape[:-1], -1, 2).unbind(-1)
                 freqs_cis = freqs_cis.unsqueeze(2)
-                f_real, f_imag =  freqs_cis.unbind(-1)
-                o_real = x_real*f_real - x_imag*f_imag
-                o_imag = x_imag*f_real + x_real*f_imag
-                out = rearrange([o_real,o_imag], 'w b s n h -> b s n (h w)')
+                cos, sin=  freqs_cis.unbind(-1)
+                cos = torch.repeat_interleave(cos, 2, dim=-1)
+                sin = torch.repeat_interleave(sin, 2, dim=-1)
+                out = apply_rotary_pos_emb(x_in, cos, sin, None, 0, RotaryPosEmbeddingMode.PAIRWISE)
 
                 return out.type_as(x_in)
             else:
@@ -127,18 +127,20 @@ class RopeEmbedderGaudi:
 
     @staticmethod
     def precompute_freqs_cis(dim: List[int], end: List[int], theta: float = 256.0):
-        with torch.device("cpu"):
+        with torch.device("hpu"):
             freqs_cis = []
             for i, (d, e) in enumerate(zip(dim, end)):
                 freqs = 1.0 / (theta ** (torch.arange(0, d, 2, dtype=torch.float64, device="cpu") / d))
                 timestep = torch.arange(e, device=freqs.device, dtype=torch.float64)
                 freqs = torch.outer(timestep, freqs).float()
-                freqs_cis_i = torch.polar(torch.ones_like(freqs), freqs).to(torch.complex64)  # complex64
 
-                #+++++++++++++++++++++++++++++debug code++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-                freqs_cis_i = torch.view_as_real(freqs_cis_i)
+                #freqs_cis_i = torch.polar(torch.ones_like(freqs), freqs).to(torch.complex64)  # complex64
+                #freqs_cis_i = torch.view_as_real(freqs_cis_i)
                 #freqs_cis_i = freqs_cis_i.reshape(*freqs_cis_i.shape[:-2], -1)
-                #-----------------------------debug code------------------------------------------------------------
+
+                cos = torch.cos(freqs).unsqueeze(-1)
+                sin = torch.sin(freqs).unsqueeze(-1)
+                freqs_cis_i = rearrange([cos, sin], ' b s n h -> s n (h b)')
 
                 freqs_cis.append(freqs_cis_i)
 
