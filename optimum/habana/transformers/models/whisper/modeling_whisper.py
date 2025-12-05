@@ -191,9 +191,6 @@ class GaudiWhisperDecoder(WhisperDecoder):
         if gc_enabled:
             use_cache = False
             past_key_values = None
-            for layer in self.layers:
-                if hasattr(layer, "gradient_checkpointing"):
-                    layer.gradient_checkpointing = False
 
         if input_ids is None and inputs_embeds is None:
             raise ValueError("You must specify exactly one of decoder_input_ids or decoder_inputs_embeds (both None).")
@@ -269,13 +266,13 @@ class GaudiWhisperDecoder(WhisperDecoder):
                 current_cache_position = cache_position
                 current_causal_mask = causal_mask
 
-                def custom_forward(hid_states, *unused):
+                def custom_forward(hid_states, attn_mask, enc_hidden_states, l_head, cross_l_head):
                     return decoder_layer(
                         hid_states,
-                        attention_mask=current_causal_mask,
-                        encoder_hidden_states=encoder_hidden_states,
-                        layer_head_mask=layer_head,
-                        cross_attn_layer_head_mask=cross_layer_head,
+                        attention_mask=attn_mask,
+                        encoder_hidden_states=enc_hidden_states,
+                        layer_head_mask=l_head,
+                        cross_attn_layer_head_mask=cross_l_head,
                         past_key_value=None,
                         output_attentions=output_attentions,
                         use_cache=False,
@@ -283,10 +280,13 @@ class GaudiWhisperDecoder(WhisperDecoder):
                         token_idx=token_idx,
                     )
 
-                layer_outputs = torch.utils.checkpoint.checkpoint(
+                layer_outputs = self._gradient_checkpointing_func(
                     custom_forward,
                     hidden_states,
-                    use_reentrant=False,
+                    current_causal_mask,
+                    encoder_hidden_states,
+                    layer_head,
+                    cross_layer_head,
                 )
             else:
                 layer_outputs = decoder_layer(
@@ -307,7 +307,6 @@ class GaudiWhisperDecoder(WhisperDecoder):
                 all_self_attns += (layer_outputs[1],)
                 if encoder_hidden_states is not None:
                     all_cross_attns += (layer_outputs[2],)
-
 
         hidden_states = self.layer_norm(hidden_states)
         if output_hidden_states:
