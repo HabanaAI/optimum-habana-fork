@@ -165,6 +165,11 @@ class GaudiWhisperDecoderLayer(WhisperDecoderLayer):
 
 
 class GaudiWhisperDecoder(WhisperDecoder):
+    def _set_gradient_checkpointing(self, module, value=False):
+        self.gradient_checkpointing = False
+        for layer in self.layers:
+            layer.gradient_checkpointing = False
+
     def forward(
         self,
         input_ids=None,
