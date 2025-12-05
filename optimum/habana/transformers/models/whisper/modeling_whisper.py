@@ -187,11 +187,6 @@ class GaudiWhisperDecoder(WhisperDecoder):
         use_cache = use_cache if use_cache is not None else self.config.use_cache
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        gc_enabled = self.training and getattr(self, "gradient_checkpointing", False)
-        if gc_enabled:
-            use_cache = False
-            past_key_values = None
-
         if input_ids is None and inputs_embeds is None:
             raise ValueError("You must specify exactly one of decoder_input_ids or decoder_inputs_embeds (both None).")
         if input_ids is not None and inputs_embeds is not None:
@@ -222,8 +217,13 @@ class GaudiWhisperDecoder(WhisperDecoder):
             if past_key_values is not None
             else 0
         )
+
         if cache_position is None:
-            cache_position = torch.arange(past_kv_len, past_kv_len + input_shape[1], device=inputs_embeds.device)
+            cache_position = torch.arange(
+                past_kv_len,
+                past_kv_len + input_shape[1],
+                device=inputs_embeds.device,
+            )
 
         if position_ids is None:
             position_ids = (
@@ -262,52 +262,28 @@ class GaudiWhisperDecoder(WhisperDecoder):
             layer_head = head_mask[idx] if head_mask is not None else None
             cross_layer_head = cross_attn_head_mask[idx] if cross_attn_head_mask is not None else None
 
-            if gc_enabled:
-                current_cache_position = cache_position
-                current_causal_mask = causal_mask
-                current_encoder_hidden_states = encoder_hidden_states
-                current_layer_head = layer_head
-                current_cross_layer_head = cross_layer_head
-
-                def custom_forward(hid_states):
-                    return decoder_layer(
-                        hid_states,
-                        attention_mask=current_causal_mask,
-                        encoder_hidden_states=current_encoder_hidden_states,
-                        layer_head_mask=current_layer_head,
-                        cross_attn_layer_head_mask=current_cross_layer_head,
-                        past_key_value=None,
-                        output_attentions=output_attentions,
-                        use_cache=False,
-                        cache_position=current_cache_position,
-                        token_idx=token_idx,
-                    )
-
-                layer_outputs = torch.utils.checkpoint.checkpoint(
-                    custom_forward,
-                    hidden_states,
-                )
-            else:
-                layer_outputs = decoder_layer(
-                    hidden_states,
-                    attention_mask=causal_mask,
-                    encoder_hidden_states=encoder_hidden_states,
-                    layer_head_mask=layer_head,
-                    cross_attn_layer_head_mask=cross_layer_head,
-                    past_key_value=past_key_values if use_cache else None,
-                    output_attentions=output_attentions,
-                    use_cache=use_cache,
-                    cache_position=cache_position,
-                    token_idx=token_idx,
-                )
+            layer_outputs = decoder_layer(
+                hidden_states,
+                attention_mask=causal_mask,
+                encoder_hidden_states=encoder_hidden_states,
+                layer_head_mask=layer_head,
+                cross_attn_layer_head_mask=cross_layer_head,
+                past_key_value=past_key_values if use_cache else None,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+                cache_position=cache_position,
+                token_idx=token_idx,  # nasze rozszerzenie przechodzi dalej do GaudiWhisperDecoderLayer/GaudiWhisperAttention
+            )
 
             hidden_states = layer_outputs[0]
+
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
                 if encoder_hidden_states is not None:
                     all_cross_attns += (layer_outputs[2],)
 
         hidden_states = self.layer_norm(hidden_states)
+
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
 
@@ -339,17 +315,19 @@ class GaudiWhisperEncoderLayer(WhisperEncoderLayer):
     ) -> Tuple[torch.FloatTensor]:
         if self.training and getattr(self, "gradient_checkpointing", False):
 
-            def custom_forward(hidden_states):
+            def custom_forward(hidden_states, attention_mask, layer_head_mask):
                 return super(GaudiWhisperEncoderLayer, self).forward(
                     hidden_states=hidden_states,
-                    attention_mask=None,
-                    layer_head_mask=None,
+                    attention_mask=attention_mask,
+                    layer_head_mask=layer_head_mask,
                     output_attentions=False,
                 )
 
             return torch.utils.checkpoint.checkpoint(
                 custom_forward,
                 hidden_states,
+                attention_mask,
+                layer_head_mask,
                 use_reentrant=False,
             )
 
