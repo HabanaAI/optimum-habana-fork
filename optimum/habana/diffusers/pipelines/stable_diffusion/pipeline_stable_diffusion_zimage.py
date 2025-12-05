@@ -210,9 +210,16 @@ def transformer_forward_gaudi(
 
     x = pad_sequence(x, batch_first=True, padding_value=0.0)
     x_freqs_cis = pad_sequence(x_freqs_cis, batch_first=True, padding_value=0.0)
-    x_attn_mask = torch.zeros((bsz, x_max_item_seqlen), dtype=torch.bool, device=device)
-    for i, seq_len in enumerate(x_item_seqlens):
-        x_attn_mask[i, :seq_len] = 1
+
+    if 1 == len(x):
+        x_attn_mask = None
+    else:
+        x_attn_mask = torch.zeros((bsz, x_max_item_seqlen), dtype=torch.bool, device=device)
+        for i, seq_len in enumerate(x_item_seqlens):
+            x_attn_mask[i, :seq_len] = 1
+    #x_attn_mask = torch.zeros((bsz, x_max_item_seqlen), dtype=torch.bool, device=device)
+    #for i, seq_len in enumerate(x_item_seqlens):
+    #    x_attn_mask[i, :seq_len] = 1
 
     if torch.is_grad_enabled() and self.gradient_checkpointing:
         for layer in self.noise_refiner:
@@ -235,9 +242,17 @@ def transformer_forward_gaudi(
 
     cap_feats = pad_sequence(cap_feats, batch_first=True, padding_value=0.0)
     cap_freqs_cis = pad_sequence(cap_freqs_cis, batch_first=True, padding_value=0.0)
-    cap_attn_mask = torch.zeros((bsz, cap_max_item_seqlen), dtype=torch.bool, device=device)
-    for i, seq_len in enumerate(cap_item_seqlens):
-        cap_attn_mask[i, :seq_len] = 1
+
+    if 1 == len(cap_feats):
+         cap_attn_mask = None
+    else:
+        cap_attn_mask = torch.zeros((bsz, cap_max_item_seqlen), dtype=torch.bool, device=device)
+        for i, seq_len in enumerate(cap_item_seqlens):
+            cap_attn_mask[i, :seq_len] = 1
+
+    #cap_attn_mask = torch.zeros((bsz, cap_max_item_seqlen), dtype=torch.bool, device=device)
+    #for i, seq_len in enumerate(cap_item_seqlens):
+    #    cap_attn_mask[i, :seq_len] = 1
 
     if torch.is_grad_enabled() and self.gradient_checkpointing:
         for layer in self.context_refiner:
@@ -261,9 +276,16 @@ def transformer_forward_gaudi(
 
     unified = pad_sequence(unified, batch_first=True, padding_value=0.0)
     unified_freqs_cis = pad_sequence(unified_freqs_cis, batch_first=True, padding_value=0.0)
-    unified_attn_mask = torch.zeros((bsz, unified_max_item_seqlen), dtype=torch.bool, device=device)
-    for i, seq_len in enumerate(unified_item_seqlens):
-        unified_attn_mask[i, :seq_len] = 1
+    if bsz == 1:
+        unified_attn_mask = None
+    else:
+        unified_attn_mask = torch.zeros((bsz, unified_max_item_seqlen), dtype=torch.bool, device=device)
+        for i, seq_len in enumerate(unified_item_seqlens):
+            unified_attn_mask[i, :seq_len] = 1
+
+    #unified_attn_mask = torch.zeros((bsz, unified_max_item_seqlen), dtype=torch.bool, device=device)
+    #for i, seq_len in enumerate(unified_item_seqlens):
+    #    unified_attn_mask[i, :seq_len] = 1
 
     if torch.is_grad_enabled() and self.gradient_checkpointing:
         for layer in self.layers:
@@ -316,6 +338,16 @@ class GaudiStableDiffusionZImagePipeline(GaudiDiffusionPipeline, ZImagePipeline)
             tokenizer,
             transformer,
         )
+        n_refiner_layers =len(self.transformer.noise_refiner)
+        for i in range(n_refiner_layers):
+            self.transformer.noise_refiner[i] = ht.hpu.wrap_in_hpu_graph(self.transformer.noise_refiner[i])
+
+        for i in range(n_refiner_layers):
+            self.transformer.context_refiner[i] = ht.hpu.wrap_in_hpu_graph(self.transformer.context_refiner[i])
+
+        for i in range(len(self.transformer.layers)):
+            self.transformer.layers[i] = ht.hpu.wrap_in_hpu_graph(self.transformer.layers[i])
+
         self.to(self._device)
 
 
