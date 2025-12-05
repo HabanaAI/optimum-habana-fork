@@ -269,7 +269,7 @@ class GaudiWhisperDecoder(WhisperDecoder):
                 current_cache_position = cache_position
                 current_causal_mask = causal_mask
 
-                def custom_forward(hid_states):
+                def custom_forward(hid_states, *unused):
                     return decoder_layer(
                         hid_states,
                         attention_mask=current_causal_mask,
