@@ -165,6 +165,8 @@ class GaudiWhisperDecoderLayer(WhisperDecoderLayer):
 
 
 class GaudiWhisperDecoder(WhisperDecoder):
+    supports_gradient_checkpointing = False
+    
     def _set_gradient_checkpointing(self, module, value=False):
         self.gradient_checkpointing = False
         for layer in self.layers:
@@ -527,6 +529,44 @@ class GaudiWhisperForConditionalGeneration(WhisperForConditionalGeneration):
     def __init__(self, config):
         super().__init__(config)
         self._supports_cache_class = True
+
+    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
+        if gradient_checkpointing_kwargs is None:
+            gradient_checkpointing_kwargs = {}
+
+        self._gradient_checkpointing = True
+        self._gradient_checkpointing_kwargs = gradient_checkpointing_kwargs
+
+        if hasattr(self.model, "encoder"):
+            encoder = self.model.encoder
+            encoder.gradient_checkpointing = True
+            for layer in getattr(encoder, "layers", []):
+                setattr(layer, "gradient_checkpointing", True)
+
+        if hasattr(self.model, "decoder"):
+            decoder = self.model.decoder
+            decoder.gradient_checkpointing = False
+            for layer in getattr(decoder, "layers", []):
+                if hasattr(layer, "gradient_checkpointing"):
+                    setattr(layer, "gradient_checkpointing", False)
+
+    def gradient_checkpointing_disable(self):
+        self._gradient_checkpointing = False
+        self._gradient_checkpointing_kwargs = {}
+
+        if hasattr(self.model, "encoder"):
+            encoder = self.model.encoder
+            encoder.gradient_checkpointing = False
+            for layer in getattr(encoder, "layers", []):
+                if hasattr(layer, "gradient_checkpointing"):
+                    setattr(layer, "gradient_checkpointing", False)
+
+        if hasattr(self.model, "decoder"):
+            decoder = self.model.decoder
+            decoder.gradient_checkpointing = False
+            for layer in getattr(decoder, "layers", []):
+                if hasattr(layer, "gradient_checkpointing"):
+                    setattr(layer, "gradient_checkpointing", False)
 
     def forward(
         self,
