@@ -21,7 +21,7 @@ import numpy as np
 import PIL
 import torch
 from diffusers.models import AutoencoderKLFlux2, Flux2Transformer2DModel
-from diffusers.pipelines.flux.pipeline_flux2 import Flux2Pipeline, compute_empirical_mu, retrieve_timesteps
+from diffusers.pipelines.flux2.pipeline_flux2 import Flux2Pipeline, compute_empirical_mu, retrieve_timesteps
 from diffusers.utils import BaseOutput, replace_example_docstring
 from optimum.utils import logging
 from transformers import AutoProcessor, Mistral3ForConditionalGeneration
