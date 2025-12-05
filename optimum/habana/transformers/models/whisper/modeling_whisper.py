@@ -317,7 +317,7 @@ class GaudiWhisperDecoder(WhisperDecoder):
 
 class GaudiWhisperEncoderLayer(WhisperEncoderLayer):
     supports_gradient_checkpointing = False
-    
+
     def forward(
         self,
         hidden_states: torch.FloatTensor,
@@ -352,6 +352,8 @@ class GaudiWhisperEncoderLayer(WhisperEncoderLayer):
 
 
 class GaudiWhisperEncoder(WhisperEncoder):
+    supports_gradient_checkpointing = False
+
     def __init__(self, config):
         super().__init__(config)
 
@@ -442,6 +444,8 @@ class GaudiWhisperEncoder(WhisperEncoder):
 
 
 class GaudiWhisperModel(WhisperModel):
+    supports_gradient_checkpointing = False
+
     def _set_gradient_checkpointing(self, module, value=False):
         # disable for encoder layers
         if isinstance(module, GaudiWhisperEncoderLayer):
@@ -538,6 +542,8 @@ class GaudiWhisperModel(WhisperModel):
 
 
 class GaudiWhisperForConditionalGeneration(WhisperForConditionalGeneration):
+    supports_gradient_checkpointing = False
+    
     def __init__(self, config):
         super().__init__(config)
         self._supports_cache_class = True
