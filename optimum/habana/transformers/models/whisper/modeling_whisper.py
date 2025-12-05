@@ -438,6 +438,12 @@ class GaudiWhisperEncoder(WhisperEncoder):
 
 
 class GaudiWhisperModel(WhisperModel):
+    def _set_gradient_checkpointing(self, module, value=False):
+        if isinstance(module, GaudiWhisperDecoder):
+            module.gradient_checkpointing = False
+        if isinstance(module, GaudiWhisperEncoder):
+            module.gradient_checkpointing = False
+
     def forward(
         self,
         input_features: Optional[torch.FloatTensor] = None,
