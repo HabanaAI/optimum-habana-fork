@@ -272,8 +272,8 @@ class GaudiQwenImagePipeline(GaudiDiffusionPipeline, QwenImagePipeline):
             self.text_encoder = wrap_in_hpu_graph(self.text_encoder)
 
         self.vae_decode_latents_buckets = [256]
-        self.transformer.hidden_states_buckets = [4096,6032,6532,6896]
-        self.transformer.encoder_hidden_states_buckets = [32, 64, 128]
+        self.transformer.hidden_states_buckets_step = 256
+        self.transformer.encoder_hidden_states_buckets_step = 128
 
     def _get_qwen_prompt_embeds(
         self,
@@ -538,34 +538,32 @@ class GaudiQwenImagePipeline(GaudiDiffusionPipeline, QwenImagePipeline):
 
         # padding hidden_states to bucket.
         latents_pad_len = 0
-        for bucket in self.transformer.hidden_states_buckets:
-            if latents.shape[1] <= bucket:
-                latents_pad_len = bucket - latents.shape[1]
-                latents_padded = F.pad(latents, (0, 0, 0, latents_pad_len), "constant", 0)
-                latents = latents_padded
-                break
+        if (latents.shape[1])%self.transformer.hidden_states_buckets_step !=0:
+            bucket = int(latents.shape[1]/self.transformer.hidden_states_buckets_step + 1)*self.transformer.hidden_states_buckets_step
+            latents_pad_len = bucket - latents.shape[1]
+            latents_padded = F.pad(latents, (0, 0, 0, latents_pad_len), "constant", 0)
+            latents = latents_padded
         # padding prompt_embeds and  negative_prompt_embeds to bucket.
         # prompt_embeds and negative_prompt_embeds use the same bucket, to save memory.
         prompt_embeds_pad_len = 0
         negative_prompt_embeds_pad_len = 0
         max_prompt_embeds_len = max(prompt_embeds.shape[1], negative_prompt_embeds.shape[1])
-        for bucket in self.transformer.encoder_hidden_states_buckets:
-            if max_prompt_embeds_len <= bucket:
-                prompt_embeds_pad_len = bucket - prompt_embeds.shape[1]
-                prompt_embeds_padded = F.pad(prompt_embeds, (0, 0, 0, prompt_embeds_pad_len), "constant", 0)
-                prompt_embeds = prompt_embeds_padded
-                prompt_embeds_mask_padded = F.pad(prompt_embeds_mask, (0, prompt_embeds_pad_len), "constant", 0)
-                prompt_embeds_mask = prompt_embeds_mask_padded
-                negative_prompt_embeds_pad_len = bucket - negative_prompt_embeds.shape[1]
-                negative_prompt_embeds_padded = F.pad(
-                    negative_prompt_embeds, (0, 0, 0, negative_prompt_embeds_pad_len), "constant", 0
-                )
-                negative_prompt_embeds = negative_prompt_embeds_padded
-                negative_prompt_embeds_mask_padded = F.pad(
-                    negative_prompt_embeds_mask, (0, negative_prompt_embeds_pad_len), "constant", 0
-                )
-                negative_prompt_embeds_mask = negative_prompt_embeds_mask_padded
-                break
+        if max_prompt_embeds_len%self.transformer.encoder_hidden_states_buckets_step != 0:
+            bucket= int(max_prompt_embeds_len/self.transformer.encoder_hidden_states_buckets_step+1)*self.transformer.encoder_hidden_states_buckets_step
+            prompt_embeds_pad_len = bucket - prompt_embeds.shape[1]
+            prompt_embeds_padded = F.pad(prompt_embeds, (0, 0, 0, prompt_embeds_pad_len), "constant", 0)
+            prompt_embeds = prompt_embeds_padded
+            prompt_embeds_mask_padded = F.pad(prompt_embeds_mask, (0, prompt_embeds_pad_len), "constant", 0)
+            prompt_embeds_mask = prompt_embeds_mask_padded
+            negative_prompt_embeds_pad_len = bucket - negative_prompt_embeds.shape[1]
+            negative_prompt_embeds_padded = F.pad(
+                negative_prompt_embeds, (0, 0, 0, negative_prompt_embeds_pad_len), "constant", 0
+            )
+            negative_prompt_embeds = negative_prompt_embeds_padded
+            negative_prompt_embeds_mask_padded = F.pad(
+                negative_prompt_embeds_mask, (0, negative_prompt_embeds_pad_len), "constant", 0
+            )
+            negative_prompt_embeds_mask = negative_prompt_embeds_mask_padded
 
         # 6. Denoising loop
         self.scheduler.set_begin_index(0)
