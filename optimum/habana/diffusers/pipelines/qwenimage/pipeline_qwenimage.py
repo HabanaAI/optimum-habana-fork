@@ -225,6 +225,10 @@ class GaudiQwenImagePipeline(GaudiDiffusionPipeline, QwenImagePipeline):
         sdp_on_bf16: bool = False,
         is_training: bool = False,
     ):
+        if use_hpu_graphs:
+            logger.warning(
+                "WARNING:!!!GaudiQwenImagePipeline HPU graph mode may have OOM problem when output images size various. If output image size is not fixed, please set use_hpu_graphs=False!!!"
+            )
         os.environ["QWEN25VL_FP32_SOFTMAX"] = "True"
         GaudiDiffusionPipeline.__init__(
             self,
@@ -265,15 +269,24 @@ class GaudiQwenImagePipeline(GaudiDiffusionPipeline, QwenImagePipeline):
             theta=10000, axes_dim=list(config["axes_dims_rope"]), scale_rope=True
         )
 
+        vae_decode_latents_max = int(os.environ.get("QWENIMAGE_VAE_DECODE_BUCKET_MAX", 256))
+        self.vae_decode_latents_buckets = [vae_decode_latents_max]
+
+        hidden_states_buckets_step = int(os.environ.get("QWENIMAGE_TRANSFORMER_BUCKETS_STEP", 256))
+        encoder_hidden_states_buckets_step = int(os.environ.get("QWENIMAGE_TRANSFORMER_ENCODER_BUCKETS_STEP", 128))
+        #Set use_hpu_graphs=True can get best performance.
+        #If output image size is various, graph mode have OOM problem. In this situation,please set use_hpu_graphs= False.
         if use_hpu_graphs:
             from habana_frameworks.torch.hpu import wrap_in_hpu_graph
-
             self.transformer = wrap_in_hpu_graph(self.transformer)
             self.text_encoder = wrap_in_hpu_graph(self.text_encoder)
+            #To get best performance not use bucket in transformer
+            hidden_states_buckets_step = 1
+            encoder_hidden_states_buckets_step = 1
+        #use bucket in transformer to reduce recompile
+        self.transformer.hidden_states_buckets_step = hidden_states_buckets_step
+        self.transformer.encoder_hidden_states_buckets_step = encoder_hidden_states_buckets_step
 
-        self.vae_decode_latents_buckets = [256]
-        self.transformer.hidden_states_buckets_step = 256
-        self.transformer.encoder_hidden_states_buckets_step = 128
 
     def _get_qwen_prompt_embeds(
         self,

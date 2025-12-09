@@ -112,9 +112,8 @@ class GaudiQwenImageEditPlusPipeline(GaudiDiffusionPipeline, QwenImageEditPlusPi
         is_training: bool = False,
     ):
         if use_hpu_graphs:
-            use_hpu_graphs = False
             logger.warning(
-                "GaudiQwenImageEditPlusPipeline HPU graph mode may have OOM problem when image size changes. So changed to use_hpu_graphs=False !"
+                "WARNING:!!!GaudiQwenImageEditPlusPipeline HPU graph mode may have OOM problem when image size changes. Please set use_hpu_graphs=False!!!"
             )
 
         os.environ["QWEN25VL_FP32_SOFTMAX"] = "True"
@@ -158,17 +157,24 @@ class GaudiQwenImageEditPlusPipeline(GaudiDiffusionPipeline, QwenImageEditPlusPi
             theta=10000, axes_dim=list(config["axes_dims_rope"]), scale_rope=True
         )
 
+        vae_decode_latents_max = int(os.environ.get("QWENIMAGEEDITPLUS_VAE_DECODE_BUCKET_MAX", 188))
+        self.vae_decode_latents_buckets = [vae_decode_latents_max]
+        vae_encode_max = int(os.environ.get("QWENIMAGEEDITPLUS_VAE_ENCODE_BUCKET_MAX", 1504))
+        self.vae_encode_buckets = [vae_encode_max]
+
+        hidden_states_buckets_step = int(os.environ.get("QWENIMAGEEDITPLUS_TRANSFORMER_BUCKETS_STEP", 256))
+        encoder_hidden_states_buckets_step = int(os.environ.get("QWENIMAGEEDITPLUS_TRANSFORMER_ENCODER_BUCKETS_STEP", 256))
         if use_hpu_graphs:
             from habana_frameworks.torch.hpu import wrap_in_hpu_graph
-
             for block in self.transformer.transformer_blocks:
                 block = wrap_in_hpu_graph(block)
             self.text_encoder = wrap_in_hpu_graph(self.text_encoder)
-
-        self.vae_decode_latents_buckets = [188]
-        self.vae_encode_buckets = [1504]
-        self.transformer.hidden_states_buckets_step = 256
-        self.transformer.encoder_hidden_states_buckets_step = 256
+            #To get best performance ,not use bucket in transformer
+            hidden_states_buckets_step = 1
+            encoder_hidden_states_buckets_step = 1
+        #Use buckets in transformer to reduce recompile
+        self.transformer.hidden_states_buckets_step = hidden_states_buckets_step
+        self.transformer.encoder_hidden_states_buckets_step = encoder_hidden_states_buckets_step
 
     def prepare_latents(
         self,
