@@ -14,6 +14,7 @@
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import habana_frameworks.torch.core as htcore
+import numpy as np
 import torch
 import torch.nn.functional as F
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
@@ -83,13 +84,16 @@ def QwenImageTransformer2DModelGaudi(
     txt_seq_lens: Optional[List[int]] = None,
     guidance: torch.Tensor = None,  # TODO: this should probably be removed
     attention_kwargs: Optional[Dict[str, Any]] = None,
+    controlnet_block_samples=None,
     return_dict: bool = True,
     hidden_states_pad_len: int = 0,
     encoder_hidden_states_pad_len: int = 0,
 ) -> Union[torch.Tensor, Transformer2DModelOutput]:
     r"""
-    Adapted from: https://github.com/huggingface/diffusers/blob/df267ee4e8500a2ef5960879f6d1ea49cc8ec40d/src/diffusers/models/transformers/transformer_qwenimage.py#L548
+    Adapted from: https://github.com/huggingface/diffusers/blob/v0.36.0/src/diffusers/models/transformers/transformer_qwenimage.py#L479
     Add mark_step.
+    replace rope complex computation to real.
+    Add cp support.
     """
     if attention_kwargs is not None:
         attention_kwargs = attention_kwargs.copy()
@@ -186,6 +190,12 @@ def QwenImageTransformer2DModelGaudi(
 
         htcore.mark_step()
 
+        # controlnet residual
+        if controlnet_block_samples is not None:
+            interval_control = len(self.transformer_blocks) / len(controlnet_block_samples)
+            interval_control = int(np.ceil(interval_control))
+            hidden_states = hidden_states + controlnet_block_samples[index_block // interval_control]
+
     if parallel_state.sequence_parallel_is_initialized():
         cp_size = parallel_state.get_sequence_parallel_world_size()
         bs, seq, dim = hidden_states.shape
@@ -229,7 +239,7 @@ def QwenImageTransformerBlockForwardGaudi(
     encoder_hidden_states_pad_len: int = 0,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Adapted from https://github.com/huggingface/diffusers/blob/df267ee4e8500a2ef5960879f6d1ea49cc8ec40d/src/diffusers/models/transformers/transformer_qwenimage.py#L405
+    Adapted from https://github.com/huggingface/diffusers/blob/v0.36.0/src/diffusers/models/transformers/transformer_qwenimage.py#L411
     Add attention_mask.
     """
     # Get modulation parameters for both streams

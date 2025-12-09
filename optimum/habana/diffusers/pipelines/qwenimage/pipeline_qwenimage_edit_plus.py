@@ -83,7 +83,7 @@ EXAMPLE_DOC_STRING = """
 
 class GaudiQwenImageEditPlusPipeline(GaudiDiffusionPipeline, QwenImageEditPlusPipeline):
     r"""
-    Adapted from: https://github.com/huggingface/diffusers/blob/df267ee4e8500a2ef5960879f6d1ea49cc8ec40d/src/diffusers/pipelines/qwenimage/pipeline_qwenimage_edit_plus.py#L168
+    Adapted from: https://github.com/huggingface/diffusers/blob/v0.36.0/src/diffusers/pipelines/qwenimage/pipeline_qwenimage_edit_plus.py#L168
 
     This class inherits from `QwenImageEditPlusPipeline` and overrides methods to use Gaudi-specific implementations.
     add args use_habana

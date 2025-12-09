@@ -28,7 +28,7 @@ CACHE_T = 2
 
 def QwenImageEncoder3dForwardGaudi(self, x, feat_cache=None, feat_idx=[0]):
     r"""
-    Adapted from: https://github.com/huggingface/diffusers/blob/53a10518b9a5ac998d9ed40ae3f3edcaa4eadd89/src/diffusers/models/autoencoders/autoencoder_kl_qwenimage.py#L440
+    Adapted from: https://github.com/huggingface/diffusers/blob/v0.36.0/src/diffusers/models/autoencoders/autoencoder_kl_qwenimage.py#L440
     only add mark_step() for memory optimization and reduce compile time.
     """
 
@@ -78,7 +78,7 @@ def QwenImageEncoder3dForwardGaudi(self, x, feat_cache=None, feat_idx=[0]):
 
 def QwenImageDecoder3dForwardGaudi(self, x, feat_cache=None, feat_idx=[0]):
     r"""
-    Adapted from: https://github.com/huggingface/diffusers/blob/53a10518b9a5ac998d9ed40ae3f3edcaa4eadd89/src/diffusers/models/autoencoders/autoencoder_kl_qwenimage.py#L628
+    Adapted from: https://github.com/huggingface/diffusers/blob/v0.36.0/src/diffusers/models/autoencoders/autoencoder_kl_qwenimage.py#L628
     only add mark_step() for memory optimization and reduce compile time.
     """
 
@@ -126,7 +126,7 @@ def QwenImageDecoder3dForwardGaudi(self, x, feat_cache=None, feat_idx=[0]):
 
 def QwenImageAttentionBlockForwardGaudi(self, x):
     r"""
-    Adapted from: https://github.com/huggingface/diffusers/blob/53a10518b9a5ac998d9ed40ae3f3edcaa4eadd89/src/diffusers/models/autoencoders/autoencoder_kl_qwenimage.py#L306
+    Adapted from: https://github.com/huggingface/diffusers/blob/v0.36.0/src/diffusers/models/autoencoders/autoencoder_kl_qwenimage.py#L306
     Replace scaled_dot_product_attention with Gaudi's FusedSDPA and add mark_step()
     """
     identity = x

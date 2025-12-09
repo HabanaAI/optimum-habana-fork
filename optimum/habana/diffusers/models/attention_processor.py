@@ -899,8 +899,11 @@ class GaudiWanAttnProcessor:
 class GaudiQwenDoubleStreamAttnProcessor2_0:
     """
     Adapted from:
-    https://github.com/huggingface/diffusers/blob/e682af202787c44da4c7e583b95ec7f42dc45029/src/diffusers/models/transformers/transformer_qwenimage.py#L255
-        * Modified SDPA to use Gaudi fused SDPA kernel
+    https://github.com/huggingface/diffusers/blob/v0.36.0/src/diffusers/models/transformers/transformer_qwenimage.py#L261
+        * Modified SDPA to use Gaudi fused SDPA kernel/FA3
+        * apply_rotary_emb_qwen use_real=True
+        * support cp
+        * Padding for encoder_hidden_states
     """
 
     _attention_backend = None

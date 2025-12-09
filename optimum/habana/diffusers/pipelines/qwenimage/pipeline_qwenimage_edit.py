@@ -81,7 +81,7 @@ EXAMPLE_DOC_STRING = """
 
 class GaudiQwenImageEditPipeline(GaudiDiffusionPipeline, QwenImageEditPipeline):
     r"""
-    Adapted from: https://github.com/huggingface/diffusers/blob/df267ee4e8500a2ef5960879f6d1ea49cc8ec40d/src/diffusers/pipelines/qwenimage/pipeline_qwenimage_edit.py#L165
+    Adapted from: https://github.com/huggingface/diffusers/blob/v0.36.0/src/diffusers/pipelines/qwenimage/pipeline_qwenimage_edit.py#L165
 
     This class inherits from `QwenImageEditPipeline` and overrides methods to use Gaudi-specific implementations.
     add args use_habana
@@ -195,7 +195,6 @@ class GaudiQwenImageEditPipeline(GaudiDiffusionPipeline, QwenImageEditPipeline):
 
         image_latents = None
         if image is not None:
-            print("_encode_vae_image image shape=", image.shape)
             image = image.to(device=device, dtype=dtype)
             if image.shape[1] != self.latent_channels:
                 # padding
