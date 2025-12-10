@@ -27,7 +27,7 @@ from torch import nn
 
 from ...distributed import parallel_state
 from .embeddings import RotaryPosEmbedding
-from .qwenimage_transformer import apply_rotary_emb_qwen
+from .qwenimage_transformer import apply_rotary_emb_qwen,apply_rotary_emb_qwen_gaudi
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
@@ -965,11 +965,10 @@ class GaudiQwenDoubleStreamAttnProcessor2_0:
         # Apply RoPE
         if image_rotary_emb is not None:
             img_freqs, txt_freqs = image_rotary_emb
-            img_query = apply_rotary_emb_qwen(img_query, img_freqs)
-            img_key = apply_rotary_emb_qwen(img_key, img_freqs)
-            txt_query = apply_rotary_emb_qwen(txt_query, txt_freqs)
-            txt_key = apply_rotary_emb_qwen(txt_key, txt_freqs)
-
+            img_query = apply_rotary_emb_qwen_gaudi(img_query, img_freqs)
+            img_key = apply_rotary_emb_qwen_gaudi(img_key, img_freqs)
+            txt_query = apply_rotary_emb_qwen_gaudi(txt_query, txt_freqs)
+            txt_key = apply_rotary_emb_qwen_gaudi(txt_key, txt_freqs)
         if self.cp_size > 1:
             bs, img_kv_seq, num_head, head_dim = img_key.shape
             img_key = img_key.reshape(bs, img_kv_seq, -1)
