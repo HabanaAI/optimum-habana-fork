@@ -163,16 +163,19 @@ class GaudiQwenImageEditPlusPipeline(GaudiDiffusionPipeline, QwenImageEditPlusPi
         self.vae_encode_buckets = [vae_encode_max]
 
         hidden_states_buckets_step = int(os.environ.get("QWENIMAGEEDITPLUS_TRANSFORMER_BUCKETS_STEP", 256))
-        encoder_hidden_states_buckets_step = int(os.environ.get("QWENIMAGEEDITPLUS_TRANSFORMER_ENCODER_BUCKETS_STEP", 256))
+        encoder_hidden_states_buckets_step = int(
+            os.environ.get("QWENIMAGEEDITPLUS_TRANSFORMER_ENCODER_BUCKETS_STEP", 256)
+        )
         if use_hpu_graphs:
             from habana_frameworks.torch.hpu import wrap_in_hpu_graph
+
             for block in self.transformer.transformer_blocks:
                 block = wrap_in_hpu_graph(block)
             self.text_encoder = wrap_in_hpu_graph(self.text_encoder)
-            #To get best performance ,not use bucket in transformer
+            # To get best performance ,not use bucket in transformer
             hidden_states_buckets_step = 1
             encoder_hidden_states_buckets_step = 1
-        #Use buckets in transformer to reduce recompile
+        # Use buckets in transformer to reduce recompile
         self.transformer.hidden_states_buckets_step = hidden_states_buckets_step
         self.transformer.encoder_hidden_states_buckets_step = encoder_hidden_states_buckets_step
 
@@ -620,14 +623,20 @@ class GaudiQwenImageEditPlusPipeline(GaudiDiffusionPipeline, QwenImageEditPlusPi
         image_latents_pad_len = 0
         latents_pad_len = 0
         if image_latents is not None:
-            if (latents.shape[1] + image_latents.shape[1])%self.transformer.hidden_states_buckets_step !=0:
-                bucket = int((latents.shape[1] + image_latents.shape[1])/self.transformer.hidden_states_buckets_step + 1)*self.transformer.hidden_states_buckets_step
+            if (latents.shape[1] + image_latents.shape[1]) % self.transformer.hidden_states_buckets_step != 0:
+                bucket = (
+                    int((latents.shape[1] + image_latents.shape[1]) / self.transformer.hidden_states_buckets_step + 1)
+                    * self.transformer.hidden_states_buckets_step
+                )
                 image_latents_pad_len = bucket - (latents.shape[1] + image_latents.shape[1])
                 image_latents_padded = F.pad(image_latents, (0, 0, 0, image_latents_pad_len), "constant", 0)
                 image_latents = image_latents_padded
         else:
-            if (latents.shape[1])%self.transformer.hidden_states_buckets_step !=0:
-                bucket = int(latents.shape[1]/self.transformer.hidden_states_buckets_step + 1)*self.transformer.hidden_states_buckets_step
+            if (latents.shape[1]) % self.transformer.hidden_states_buckets_step != 0:
+                bucket = (
+                    int(latents.shape[1] / self.transformer.hidden_states_buckets_step + 1)
+                    * self.transformer.hidden_states_buckets_step
+                )
                 latents_pad_len = bucket - latents.shape[1]
                 latents_padded = F.pad(latents, (0, 0, 0, latents_pad_len), "constant", 0)
                 latents = latents_padded
@@ -637,8 +646,11 @@ class GaudiQwenImageEditPlusPipeline(GaudiDiffusionPipeline, QwenImageEditPlusPi
         prompt_embeds_pad_len = 0
         negative_prompt_embeds_pad_len = 0
         max_prompt_embeds_len = max(prompt_embeds.shape[1], negative_prompt_embeds.shape[1])
-        if max_prompt_embeds_len%self.transformer.encoder_hidden_states_buckets_step != 0:
-            bucket= int(max_prompt_embeds_len/self.transformer.encoder_hidden_states_buckets_step+1)*self.transformer.encoder_hidden_states_buckets_step
+        if max_prompt_embeds_len % self.transformer.encoder_hidden_states_buckets_step != 0:
+            bucket = (
+                int(max_prompt_embeds_len / self.transformer.encoder_hidden_states_buckets_step + 1)
+                * self.transformer.encoder_hidden_states_buckets_step
+            )
             prompt_embeds_pad_len = bucket - prompt_embeds.shape[1]
             prompt_embeds_padded = F.pad(prompt_embeds, (0, 0, 0, prompt_embeds_pad_len), "constant", 0)
             prompt_embeds = prompt_embeds_padded

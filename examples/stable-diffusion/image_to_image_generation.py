@@ -15,7 +15,6 @@
 
 import argparse
 import logging
-import os
 import sys
 from pathlib import Path
 
@@ -30,7 +29,6 @@ from optimum.habana.diffusers import (
     GaudiEulerDiscreteScheduler,
     GaudiFlowMatchEulerDiscreteScheduler,
 )
-from optimum.habana.transformers.gaudi_configuration import GaudiConfig
 from optimum.habana.utils import set_seed
 
 
@@ -234,7 +232,6 @@ def main():
     flux_kontext_models = ["FLUX.1-Kontext"]
     flux_models = ["FLUX.1"]
     flux = False
-    qwenimage = False
 
     kwargs = {
         "use_habana": args.use_habana,
@@ -265,27 +262,8 @@ def main():
         from optimum.habana.diffusers import GaudiStableDiffusionImageVariationPipeline as Img2ImgPipeline
 
         kwargs["revision"] = "v2.0"
-    elif "Qwen-Image-Edit-2509" in args.model_name_or_path:
-        from optimum.habana.diffusers import GaudiQwenImageEditPlusPipeline as Img2ImgPipeline
-        from optimum.habana.transformers.modeling_utils import adapt_transformers_to_gaudi
-
-        adapt_transformers_to_gaudi()
-        qwenimage = True
-    elif "Qwen-Image-Edit" in args.model_name_or_path:
-        from optimum.habana.diffusers import GaudiQwenImageEditPipeline as Img2ImgPipeline
-
-        qwenimage = True
     else:
         from optimum.habana.diffusers import GaudiStableDiffusionImg2ImgPipeline as Img2ImgPipeline
-
-    if qwenimage:
-        os.environ["QWEN25VL_FP32_SOFTMAX"] = "True"
-        kwargs["use_hpu_graphs"] = True
-        gaudi_config_kwargs = {"use_fused_adam": True, "use_fused_clip_norm": True}
-        gaudi_config_kwargs["use_torch_autocast"] = True
-        gaudi_config = GaudiConfig(**gaudi_config_kwargs)
-        kwargs["gaudi_config"] = gaudi_config
-        kwargs_call["generator"] = torch.manual_seed(0)
 
     if "image-variations" in args.model_name_or_path:
         im = PIL.Image.open(requests.get(args.src_image_path, stream=True).raw)

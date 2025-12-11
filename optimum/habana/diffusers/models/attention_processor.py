@@ -27,7 +27,7 @@ from torch import nn
 
 from ...distributed import parallel_state
 from .embeddings import RotaryPosEmbedding
-from .qwenimage_transformer import apply_rotary_emb_qwen,apply_rotary_emb_qwen_gaudi
+from .qwenimage_transformer import apply_rotary_emb_qwen_gaudi
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name

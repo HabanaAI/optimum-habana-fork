@@ -274,19 +274,19 @@ class GaudiQwenImagePipeline(GaudiDiffusionPipeline, QwenImagePipeline):
 
         hidden_states_buckets_step = int(os.environ.get("QWENIMAGE_TRANSFORMER_BUCKETS_STEP", 256))
         encoder_hidden_states_buckets_step = int(os.environ.get("QWENIMAGE_TRANSFORMER_ENCODER_BUCKETS_STEP", 128))
-        #Set use_hpu_graphs=True can get best performance.
-        #If output image size is various, graph mode have OOM problem. In this situation,please set use_hpu_graphs= False.
+        # Set use_hpu_graphs=True can get best performance.
+        # If output image size is various, graph mode have OOM problem. In this situation,please set use_hpu_graphs= False.
         if use_hpu_graphs:
             from habana_frameworks.torch.hpu import wrap_in_hpu_graph
+
             self.transformer = wrap_in_hpu_graph(self.transformer)
             self.text_encoder = wrap_in_hpu_graph(self.text_encoder)
-            #To get best performance not use bucket in transformer
+            # To get best performance not use bucket in transformer
             hidden_states_buckets_step = 1
             encoder_hidden_states_buckets_step = 1
-        #use bucket in transformer to reduce recompile
+        # use bucket in transformer to reduce recompile
         self.transformer.hidden_states_buckets_step = hidden_states_buckets_step
         self.transformer.encoder_hidden_states_buckets_step = encoder_hidden_states_buckets_step
-
 
     def _get_qwen_prompt_embeds(
         self,
@@ -577,8 +577,11 @@ class GaudiQwenImagePipeline(GaudiDiffusionPipeline, QwenImagePipeline):
 
         # padding hidden_states to bucket.
         latents_pad_len = 0
-        if (latents.shape[1])%self.transformer.hidden_states_buckets_step !=0:
-            bucket = int(latents.shape[1]/self.transformer.hidden_states_buckets_step + 1)*self.transformer.hidden_states_buckets_step
+        if (latents.shape[1]) % self.transformer.hidden_states_buckets_step != 0:
+            bucket = (
+                int(latents.shape[1] / self.transformer.hidden_states_buckets_step + 1)
+                * self.transformer.hidden_states_buckets_step
+            )
             latents_pad_len = bucket - latents.shape[1]
             latents_padded = F.pad(latents, (0, 0, 0, latents_pad_len), "constant", 0)
             latents = latents_padded
@@ -587,8 +590,11 @@ class GaudiQwenImagePipeline(GaudiDiffusionPipeline, QwenImagePipeline):
         prompt_embeds_pad_len = 0
         negative_prompt_embeds_pad_len = 0
         max_prompt_embeds_len = max(prompt_embeds.shape[1], negative_prompt_embeds.shape[1])
-        if max_prompt_embeds_len%self.transformer.encoder_hidden_states_buckets_step != 0:
-            bucket= int(max_prompt_embeds_len/self.transformer.encoder_hidden_states_buckets_step+1)*self.transformer.encoder_hidden_states_buckets_step
+        if max_prompt_embeds_len % self.transformer.encoder_hidden_states_buckets_step != 0:
+            bucket = (
+                int(max_prompt_embeds_len / self.transformer.encoder_hidden_states_buckets_step + 1)
+                * self.transformer.encoder_hidden_states_buckets_step
+            )
             prompt_embeds_pad_len = bucket - prompt_embeds.shape[1]
             prompt_embeds_padded = F.pad(prompt_embeds, (0, 0, 0, prompt_embeds_pad_len), "constant", 0)
             prompt_embeds = prompt_embeds_padded

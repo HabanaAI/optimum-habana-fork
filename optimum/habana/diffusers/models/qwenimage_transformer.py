@@ -14,12 +14,12 @@
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import habana_frameworks.torch.core as htcore
-from habana_frameworks.torch.hpex.kernels import RotaryPosEmbeddingMode, apply_rotary_pos_emb
 import numpy as np
 import torch
 import torch.nn.functional as F
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
 from diffusers.utils import USE_PEFT_BACKEND, logging, scale_lora_layers, unscale_lora_layers
+from habana_frameworks.torch.hpex.kernels import RotaryPosEmbeddingMode, apply_rotary_pos_emb
 
 from ...distributed import parallel_state
 
@@ -74,17 +74,17 @@ def apply_rotary_emb_qwen(
 
         return x_out.type_as(x)
 
+
 def apply_rotary_emb_qwen_gaudi(
     x: torch.Tensor,
     freqs_cis: Union[torch.Tensor, Tuple[torch.Tensor]],
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-
     cos, sin = freqs_cis  # [S, D]
     cos = torch.repeat_interleave(cos.unsqueeze(1), 2, dim=2, output_size=128)
     sin = torch.repeat_interleave(sin.unsqueeze(1), 2, dim=2, output_size=128)
 
     ori_dtype = x.dtype
-    x=x.to(cos.dtype)
+    x = x.to(cos.dtype)
 
     out = apply_rotary_pos_emb(x, cos, sin, None, 0, RotaryPosEmbeddingMode.PAIRWISE)
 
