@@ -495,7 +495,7 @@ class GaudiFlux2Pipeline(GaudiDiffusionPipeline, Flux2Pipeline):
             prompt_embeds_batches,
             guidance_batches,
             num_dummy_samples,
-        ) = self._split_inputs_into_batches(batch_size, latents, prompt_embeds, guidance)
+        ) = self._split_inputs_into_batches(batch_size, latents, prompt_embeds, None, guidance)
 
         outputs = {
             "images": [],
