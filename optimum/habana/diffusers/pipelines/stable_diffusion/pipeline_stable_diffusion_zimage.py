@@ -63,10 +63,10 @@ class ZSingleStreamAttnProcessorGaudi:
             key = attn.norm_k(key)
 
         # Apply RoPE
-        def apply_rotary_emb(x_in: torch.Tensor, 
-                             freqs_cis: torch.Tensor, 
+        def apply_rotary_emb(x_in: torch.Tensor,
+                             freqs_cis: torch.Tensor,
                              use_real: bool = True,
-                             use_real_unbind_dim:int = -1, 
+                             use_real_unbind_dim:int = -1,
         )-> torch.Tensor:
             if use_real:
                 freqs_cis = freqs_cis.unsqueeze(2)
@@ -77,9 +77,7 @@ class ZSingleStreamAttnProcessorGaudi:
 
                 return out.type_as(x_in)
             else:
-                #with torch.amp.autocast("cuda", enabled=False):
-                with torch.amp.autocast("cpu", enabled=True):
-                    x_in = x_in.to('cpu')
+                with torch.amp.autocast("cuda", enabled=False):
                     x = torch.view_as_complex(x_in.float().reshape(*x_in.shape[:-1], -1, 2))
                     freqs_cis = freqs_cis.unsqueeze(2)
                     x_out = torch.view_as_real(x * freqs_cis).flatten(3)
@@ -98,12 +96,14 @@ class ZSingleStreamAttnProcessorGaudi:
             attention_mask = attention_mask[:, None, None, :]
 
         query, key, value = (x.permute(0, 2, 1, 3) for x in (query, key, value))
+        query = query.contiguous()
+        key = key.contiguous()
+        value = value.contiguous()
         hidden_states = FusedSDPA.apply(query, key, value, attention_mask, 0.0, False, None, "fast")
         hidden_states = hidden_states.permute(0, 2, 1, 3)
 
         # Reshape back
         hidden_states = hidden_states.flatten(2, 3)
-        hidden_states = hidden_states.to(dtype)
 
         output = attn.to_out[0](hidden_states)
         if len(attn.to_out) > 1:  # dropout
@@ -133,15 +133,9 @@ class RopeEmbedderGaudi:
                 freqs = 1.0 / (theta ** (torch.arange(0, d, 2, dtype=torch.float64, device="cpu") / d))
                 timestep = torch.arange(e, device=freqs.device, dtype=torch.float64)
                 freqs = torch.outer(timestep, freqs).float()
-
-                #freqs_cis_i = torch.polar(torch.ones_like(freqs), freqs).to(torch.complex64)  # complex64
-                #freqs_cis_i = torch.view_as_real(freqs_cis_i)
-                #freqs_cis_i = freqs_cis_i.reshape(*freqs_cis_i.shape[:-2], -1)
-
                 cos = torch.cos(freqs).unsqueeze(-1)
                 sin = torch.sin(freqs).unsqueeze(-1)
                 freqs_cis_i = rearrange([cos, sin], ' b s n h -> s n (h b)')
-
                 freqs_cis.append(freqs_cis_i)
 
             return freqs_cis
@@ -167,6 +161,7 @@ class RopeEmbedderGaudi:
         return torch.cat(result, dim=-2)
 
 SEQ_MULTI_OF = 32
+BUCKET_SIZE = 256
 def transformer_forward_gaudi(
     self,
     x: List[torch.Tensor],
@@ -211,13 +206,16 @@ def transformer_forward_gaudi(
     x = pad_sequence(x, batch_first=True, padding_value=0.0)
     x_freqs_cis = pad_sequence(x_freqs_cis, batch_first=True, padding_value=0.0)
 
-    if 1 == len(x):
-        x_attn_mask = None
-    else:
-        x_attn_mask = torch.zeros((bsz, x_max_item_seqlen), dtype=torch.bool, device=device)
-        for i, seq_len in enumerate(x_item_seqlens):
-            x_attn_mask[i, :seq_len] = 1
-    #x_attn_mask = torch.zeros((bsz, x_max_item_seqlen), dtype=torch.bool, device=device)
+    #+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+    bucket_total_len = (x_max_item_seqlen // BUCKET_SIZE + 1)*BUCKET_SIZE
+    bucket_pad_len = bucket_total_len - x_max_item_seqlen
+
+    x = torch.nn.functional.pad(x, (0, 0, 0, bucket_pad_len), value=0.0)
+    x_freqs_cis =  torch.nn.functional.pad(x_freqs_cis, (0, 0, 0, 0, 0, bucket_pad_len), value=0.0)
+    x_attn_mask = torch.zeros((bsz, 1, bucket_total_len, bucket_total_len), dtype=torch.bool, device=device)
+    for i, seq_len in enumerate(x_item_seqlens):
+        x_attn_mask[i, :, :seq_len, :seq_len] = 1
+    #-----------------------------------------------------------------------------------------
     #for i, seq_len in enumerate(x_item_seqlens):
     #    x_attn_mask[i, :seq_len] = 1
 
@@ -226,8 +224,9 @@ def transformer_forward_gaudi(
             x = self._gradient_checkpointing_func(layer, x, x_attn_mask, x_freqs_cis, adaln_input)
     else:
         for layer in self.noise_refiner:
-            htcore.mark_step()
             x = layer(x, x_attn_mask, x_freqs_cis, adaln_input)
+            htcore.mark_step()
+    x = x[:, :seq_len, ...]
 
     # cap embed & refine
     cap_item_seqlens = [len(_) for _ in cap_feats]
@@ -246,21 +245,17 @@ def transformer_forward_gaudi(
     if 1 == len(cap_feats):
          cap_attn_mask = None
     else:
-        cap_attn_mask = torch.zeros((bsz, cap_max_item_seqlen), dtype=torch.bool, device=device)
+        cap_attn_mask = torch.zeros((bsz,1, cap_max_item_seqlen, cap_max_item_seqlen), dtype=torch.bool, device=device)
         for i, seq_len in enumerate(cap_item_seqlens):
-            cap_attn_mask[i, :seq_len] = 1
-
-    #cap_attn_mask = torch.zeros((bsz, cap_max_item_seqlen), dtype=torch.bool, device=device)
-    #for i, seq_len in enumerate(cap_item_seqlens):
-    #    cap_attn_mask[i, :seq_len] = 1
+            cap_attn_mask[i, :, :seq_len, :seq_len] = 1
 
     if torch.is_grad_enabled() and self.gradient_checkpointing:
         for layer in self.context_refiner:
             cap_feats = self._gradient_checkpointing_func(layer, cap_feats, cap_attn_mask, cap_freqs_cis)
     else:
         for layer in self.context_refiner:
-            htcore.mark_step()
             cap_feats = layer(cap_feats, cap_attn_mask, cap_freqs_cis)
+            htcore.mark_step()
 
     # unified
     unified = []
@@ -276,16 +271,17 @@ def transformer_forward_gaudi(
 
     unified = pad_sequence(unified, batch_first=True, padding_value=0.0)
     unified_freqs_cis = pad_sequence(unified_freqs_cis, batch_first=True, padding_value=0.0)
-    if bsz == 1:
-        unified_attn_mask = None
-    else:
-        unified_attn_mask = torch.zeros((bsz, unified_max_item_seqlen), dtype=torch.bool, device=device)
-        for i, seq_len in enumerate(unified_item_seqlens):
-            unified_attn_mask[i, :seq_len] = 1
+    #print(f'baymax line 342  unified:{unified.shape} unified_freqs_cis:{unified_freqs_cis.shape} adaln_input:{adaln_input.shape}')
+    #+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+    bucket_total_len = (unified_max_item_seqlen // BUCKET_SIZE + 1)*BUCKET_SIZE
+    bucket_pad_len = bucket_total_len - unified_max_item_seqlen
 
-    #unified_attn_mask = torch.zeros((bsz, unified_max_item_seqlen), dtype=torch.bool, device=device)
-    #for i, seq_len in enumerate(unified_item_seqlens):
-    #    unified_attn_mask[i, :seq_len] = 1
+    unified = torch.nn.functional.pad(unified, (0, 0, 0, bucket_pad_len), value=0.0)
+    unified_freqs_cis =  torch.nn.functional.pad(unified_freqs_cis, (0, 0, 0, 0, 0, bucket_pad_len), value=0.0)
+    unified_attn_mask = torch.zeros((bsz, 1, bucket_total_len, bucket_total_len), dtype=torch.bool, device=device)
+    for i, seq_len in enumerate(unified_item_seqlens):
+        unified_attn_mask[i, :, :seq_len, :seq_len] = 1
+    #-----------------------------------------------------------------------------------------
 
     if torch.is_grad_enabled() and self.gradient_checkpointing:
         for layer in self.layers:
@@ -294,8 +290,10 @@ def transformer_forward_gaudi(
             )
     else:
         for layer in self.layers:
-            htcore.mark_step()
             unified = layer(unified, unified_attn_mask, unified_freqs_cis, adaln_input)
+            htcore.mark_step()
+    unified = unified[:, :unified_max_item_seqlen, ...]
+    #unified_freqs_cis = unified_freqs_cis[:, :unified_max_item_seqlen, :, :]
 
     unified = self.all_final_layer[f"{patch_size}-{f_patch_size}"](unified, adaln_input)
     unified = list(unified.unbind(dim=0))
@@ -348,6 +346,9 @@ class GaudiStableDiffusionZImagePipeline(GaudiDiffusionPipeline, ZImagePipeline)
         for i in range(len(self.transformer.layers)):
             self.transformer.layers[i] = ht.hpu.wrap_in_hpu_graph(self.transformer.layers[i])
 
+        self.vae.forward = self.vae.decode
+        self.vae = ht.hpu.wrap_in_hpu_graph(self.vae)
+
         self.to(self._device)
 
 
@@ -377,7 +378,6 @@ class GaudiStableDiffusionZImagePipeline(GaudiDiffusionPipeline, ZImagePipeline)
     ):
         r"""
         Function invoked when calling the pipeline for generation.
-
         Args:
             prompt (`str` or `List[str]`, *optional*):
                 The prompt or prompts to guide the image generation. If not defined, one has to pass `prompt_embeds`.
@@ -444,9 +444,7 @@ class GaudiStableDiffusionZImagePipeline(GaudiDiffusionPipeline, ZImagePipeline)
                 `._callback_tensor_inputs` attribute of your pipeline class.
             max_sequence_length (`int`, *optional*, defaults to 512):
                 Maximum sequence length to use with the `prompt`.
-
         Examples:
-
         Returns:
             [`~pipelines.z_image.ZImagePipelineOutput`] or `tuple`: [`~pipelines.z_image.ZImagePipelineOutput`] if
             `return_dict` is True, otherwise a `tuple`. When returning a tuple, the first element is a list with the
@@ -479,6 +477,7 @@ class GaudiStableDiffusionZImagePipeline(GaudiDiffusionPipeline, ZImagePipeline)
             batch_size = 1
         elif prompt is not None and isinstance(prompt, list):
             batch_size = len(prompt)
+            prompt = prompt.copy()
         else:
             batch_size = len(prompt_embeds)
 
@@ -585,7 +584,6 @@ class GaudiStableDiffusionZImagePipeline(GaudiDiffusionPipeline, ZImagePipeline)
                 latent_model_input = latent_model_input.unsqueeze(2)
                 latent_model_input_list = list(latent_model_input.unbind(dim=0))
 
-                #model_out_list = self.transformer_hpu(
                 model_out_list = self.transformer(
                     latent_model_input_list,
                     timestep_model_input,
@@ -647,7 +645,16 @@ class GaudiStableDiffusionZImagePipeline(GaudiDiffusionPipeline, ZImagePipeline)
             latents = latents.to(self.vae.dtype)
             latents = (latents / self.vae.config.scaling_factor) + self.vae.config.shift_factor
 
-            image = self.vae.decode(latents, return_dict=False)[0]
+            width_total_len = (latents.shape[-1] // 16 + 1) *16
+            width_pad_len = width_total_len - latents.shape[-1]
+            height_total_len = (latents.shape[-2] // 16 + 1) *16
+            height_pad_len = height_total_len - latents.shape[-2]
+            latents = torch.nn.functional.pad(latents, (0, width_pad_len, 0, height_pad_len), value=0.0)
+
+            #image = self.vae.decode(latents, return_dict=False)[0]
+            image = self.vae(latents, return_dict=False)[0]
+            image = image[..., :height, :width]
+
             image = self.image_processor.postprocess(image, output_type=output_type)
 
         # Offload all models
@@ -657,51 +664,3 @@ class GaudiStableDiffusionZImagePipeline(GaudiDiffusionPipeline, ZImagePipeline)
             return (image,)
 
         return ZImagePipelineOutput(images=image)
-
-    @torch.no_grad()
-    def transformer_hpu(
-        self,
-        latent_model_input_list,
-        timestep_model_input,
-        prompt_embeds_model_input
-    ):
-        if self.use_hpu_graphs:
-            return self.capture_replay(latent_model_input_list, timestep_model_input, prompt_embeds_model_input)
-        else:
-            return self.transformer(
-                latent_model_input_list,
-                timestep_model_input,
-                prompt_embeds_model_input
-            )
-    
-    @torch.no_grad()
-    def capture_replay(
-        self, 
-        latent_model_input_list,
-        timestep_model_input,
-        prompt_embeds_model_input
-    ):
-        inputs = [latent_model_input_list, timestep_model_input, prompt_embeds_model_input]
-        h = self.ht.hpu.graphs.input_hash(inputs)
-        cached = self.cache.get(h)
-        if cached is None:
-            # Capture the graph and cache it
-            with self.ht.hpu.stream(self.hpu_stream):
-                graph = self.ht.hpu.HPUGraph()
-                graph.capture_begin()
-                outputs = self.transformer(inputs[0], inputs[1], inputs[2])
-                graph.capture_end()
-                graph_inputs = inputs
-                graph_outputs = outputs
-                self.cache[h] = self.ht.hpu.graphs.CachedParams(graph_inputs, graph_outputs, graph)
-            return outputs
-    
-        # Replay the cached graph with updated inputs
-        self.ht.hpu.graphs.copy_to(cached.graph_inputs, inputs)
-        cached.graph.replay()
-        self.ht.core.hpu.default_stream().synchronize()
-    
-        return cached.graph_outputs
-
-
-
