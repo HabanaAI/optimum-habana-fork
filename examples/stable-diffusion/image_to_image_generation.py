@@ -306,8 +306,9 @@ def main():
         pipeline.scheduler = GaudiEulerAncestralDiscreteScheduler.from_config(pipeline.scheduler.config)
     elif pipeline.scheduler.config._class_name == "EulerDiscreteScheduler":
         pipeline.scheduler = GaudiEulerDiscreteScheduler.from_config(pipeline.scheduler.config)
-    # elif pipeline.scheduler.config._class_name == "FlowMatchEulerDiscreteScheduler":
-    #     pipeline.scheduler = GaudiFlowMatchEulerDiscreteScheduler.from_config(pipeline.scheduler.config)
+    elif pipeline.scheduler.config._class_name == "FlowMatchEulerDiscreteScheduler":
+        pass
+        # pipeline.scheduler = GaudiFlowMatchEulerDiscreteScheduler.from_config(pipeline.scheduler.config)
     else:
         pipeline.scheduler = GaudiDDIMScheduler.from_config(pipeline.scheduler.config)
 
