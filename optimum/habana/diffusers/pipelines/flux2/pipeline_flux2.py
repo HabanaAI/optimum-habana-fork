@@ -204,7 +204,7 @@ class GaudiFlux2Pipeline(GaudiDiffusionPipeline, Flux2Pipeline):
         # Stack batches in the same tensor
         latents_batches = torch.stack(latents_batches)
         prompt_embeds_batches = torch.stack(prompt_embeds_batches)
-        pooled_prompt_embeds_batches = torch.stack(pooled_prompt_embeds_batches)
+        pooled_prompt_embeds_batches = torch.stack(pooled_prompt_embeds_batches) if pooled_prompt_embeds is not None else None
         guidance_batches = torch.stack(guidance_batches) if guidance is not None else None
 
         return (
@@ -493,6 +493,7 @@ class GaudiFlux2Pipeline(GaudiDiffusionPipeline, Flux2Pipeline):
         (
             latents_batches,
             prompt_embeds_batches,
+            pooled_prompt_embeds_batches,
             guidance_batches,
             num_dummy_samples,
         ) = self._split_inputs_into_batches(batch_size, latents, prompt_embeds, None, guidance)
