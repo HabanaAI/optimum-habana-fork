@@ -56,7 +56,7 @@ Please refer to the Intel Gaudi AI Accelerator official [installation guide](htt
 To use the example associated with the latest stable release, run:
 ```bash
 git clone github.com/HabanaAI/optimum-habana-fork.git -b aice/v1.22.0
-cd optimum-habana-fork && pip install -r requirements.txt
+cd optimum-habana-fork
 pip install -e .
 ```
 
