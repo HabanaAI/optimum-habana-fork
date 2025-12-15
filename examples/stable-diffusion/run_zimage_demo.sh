@@ -3,6 +3,7 @@
 export PT_HPU_LAZY_MODE=1
 export PT_HPU_GPU_MIGRATION=1
 export USE_ZIMAGE_BUCKET=1
+export FP32_SOFTMAX_VISION="fast"
 
 python3 ./text_to_image_zimage.py \
     --model_name_or_path 'Tongyi-MAI/Z-Image-Turbo' \

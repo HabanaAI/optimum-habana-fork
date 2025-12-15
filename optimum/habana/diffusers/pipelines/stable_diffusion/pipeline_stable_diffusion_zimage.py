@@ -100,7 +100,9 @@ class ZSingleStreamAttnProcessorGaudi:
         query = query.contiguous()
         key = key.contiguous()
         value = value.contiguous()
-        hidden_states = FusedSDPA.apply(query, key, value, attention_mask, 0.0, False, None, "fast")
+
+        softmax_mode = os.getenv("FP32_SOFTMAX_VISION", "fast")
+        hidden_states = FusedSDPA.apply(query, key, value, attention_mask, 0.0, False, None, softmax_mode)
         hidden_states = hidden_states.permute(0, 2, 1, 3)
 
         # Reshape back
