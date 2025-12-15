@@ -88,7 +88,7 @@ def main():
             width=args.width,
             num_inference_steps=args.num_inference_steps,  # This actually results in 8 DiT forwards
             guidance_scale=args.guidance_scale,     # Guidance should be 0 for the Turbo models
-            generator=torch.Generator("cpu").manual_seed(42),
+            generator=torch.Generator("cpu").manual_seed(args.seed),
         ).images[0]
     torch.cuda.synchronize()
 
@@ -102,7 +102,7 @@ def main():
             width=args.width,
             num_inference_steps=args.num_inference_steps,  # This actually results in 8 DiT forwards
             guidance_scale=args.guidance_scale,     # Guidance should be 0 for the Turbo models
-            generator=torch.Generator("cpu").manual_seed(42),
+            generator=torch.Generator("cpu").manual_seed(args.seed),
         ).images[0]
 
     torch.cuda.synchronize()
