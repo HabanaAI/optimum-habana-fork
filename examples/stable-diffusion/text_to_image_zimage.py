@@ -11,8 +11,7 @@ import habana_frameworks.torch.gpu_migration
 from optimum.habana.transformers.gaudi_configuration import GaudiConfig
 from optimum.habana.diffusers import GaudiStableDiffusionZImagePipeline
 
-def set_seed():
-    seed = 5451
+def set_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -21,7 +20,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--model_name_or_path",
-        default="Kolors",
+        default="Tongyi-MAI/Z-Image-Turbo",
         type=str,
         help="Path to pre-trained model",
     )
@@ -32,9 +31,34 @@ def main():
         default="An image of a squirrel in Picasso style",
         help="The prompt or prompts to guide the image generation.",
     )
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for initialization.")
+    parser.add_argument(
+        "--num_inference_steps",
+        type=int,
+        default=9,
+        help="number of transformer inference steps",
+    )
+    parser.add_argument(
+        "--height",
+        type=int,
+        default=512,
+        help="The height in pixels of the generated images (0=default from model config).",
+    )
+    parser.add_argument(
+        "--width",
+        type=int,
+        default=512,
+        help="The width in pixels of the generated images (0=default from model config).",
+    )
+    parser.add_argument(
+        "--guidance_scale",
+        type=float,
+        default=0.0,
+        help="A lora scale that will be applied to all LoRA layers of the text encoder if LoRA layers are loaded.",
+    )
     args = parser.parse_args()
 
-    set_seed()
+    set_seed(args.seed)
     gaudi_config_kwargs = {"use_fused_adam": True, "use_fused_clip_norm": True}
     gaudi_config_kwargs["use_torch_autocast"] = False
     gaudi_config = GaudiConfig(**gaudi_config_kwargs)
@@ -55,19 +79,15 @@ def main():
     )
     pipe.to("hpu")
     
-    prompt = args.prompts
     warmup = 5
-    width = 512
-    height = 512
-
     for i in range(warmup):
         # 2. Generate Image
         pipe(
-            prompt=prompt,
-            height=height,
-            width=width,
-            num_inference_steps=9,  # This actually results in 8 DiT forwards
-            guidance_scale=0.0,     # Guidance should be 0 for the Turbo models
+            prompt=args.prompts,
+            height=args.height,
+            width=args.width,
+            num_inference_steps=args.num_inference_steps,  # This actually results in 8 DiT forwards
+            guidance_scale=args.guidance_scale,     # Guidance should be 0 for the Turbo models
             generator=torch.Generator("cpu").manual_seed(42),
         ).images[0]
     torch.cuda.synchronize()
@@ -77,11 +97,11 @@ def main():
     for i in range(inf_cnt):
         # 2. Generate Image
         image = pipe(
-            prompt=prompt,
-            height=height,
-            width=width,
-            num_inference_steps=9,  # This actually results in 8 DiT forwards
-            guidance_scale=0.0,     # Guidance should be 0 for the Turbo models
+            prompt=args.prompts,
+            height=args.height,
+            width=args.width,
+            num_inference_steps=args.num_inference_steps,  # This actually results in 8 DiT forwards
+            guidance_scale=args.guidance_scale,     # Guidance should be 0 for the Turbo models
             generator=torch.Generator("cpu").manual_seed(42),
         ).images[0]
 
