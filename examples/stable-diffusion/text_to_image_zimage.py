@@ -1,4 +1,5 @@
 import torch
+import argparse
 import random
 import numpy as np
 import time as tm_perf
@@ -17,6 +18,22 @@ def set_seed():
     torch.manual_seed(seed)
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--model_name_or_path",
+        default="Kolors",
+        type=str,
+        help="Path to pre-trained model",
+    )
+    parser.add_argument(
+        "--prompts",
+        type=str,
+        nargs="*",
+        default="An image of a squirrel in Picasso style",
+        help="The prompt or prompts to guide the image generation.",
+    )
+    args = parser.parse_args()
+
     set_seed()
     gaudi_config_kwargs = {"use_fused_adam": True, "use_fused_clip_norm": True}
     gaudi_config_kwargs["use_torch_autocast"] = False
@@ -27,7 +44,7 @@ def main():
         "gaudi_config": gaudi_config,
     }
 
-    model_name_path = 'Z-Image-Turbo'
+    model_name_path = args.model_name_or_path
     # 1. Load the pipeline
     # Use bfloat16 for optimal performance on supported GPUs
     pipe = GaudiStableDiffusionZImagePipeline.from_pretrained(
@@ -38,7 +55,7 @@ def main():
     )
     pipe.to("hpu")
     
-    prompt = "Young Chinese woman in red Hanfu, intricate embroidery. Impeccable makeup, red floral forehead pattern. Elaborate high bun, golden phoenix headdress, red flowers, beads. Holds round folding fan with lady, trees, bird. Neon lightning-bolt lamp (⚡️), bright yellow glow, above extended left palm. Soft-lit outdoor night background, silhouetted tiered pagoda (西安大雁塔), blurred colorful distant lights."
+    prompt = args.prompts
     warmup = 5
     width = 512
     height = 512

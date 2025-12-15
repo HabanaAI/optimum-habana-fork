@@ -1,3 +1,4 @@
+import os
 import torch
 from diffusers import ZImagePipeline
 from typing import Any, Callable, Dict, List, Optional, Union
@@ -173,7 +174,6 @@ def transformer_forward_gaudi(
     assert patch_size in self.all_patch_size
     assert f_patch_size in self.all_f_patch_size
 
-    #print(f'run transformer_z_image forward gaudi!')
     bsz = len(x)
     device = x[0].device
     t = t * self.t_scale
@@ -206,18 +206,18 @@ def transformer_forward_gaudi(
     x = pad_sequence(x, batch_first=True, padding_value=0.0)
     x_freqs_cis = pad_sequence(x_freqs_cis, batch_first=True, padding_value=0.0)
 
-    #+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-    bucket_total_len = (x_max_item_seqlen // BUCKET_SIZE + 1)*BUCKET_SIZE
-    bucket_pad_len = bucket_total_len - x_max_item_seqlen
+    use_bucket = "1" == os.getenv("USE_ZIMAGE_BUCKET", "0")
+    if use_bucket:
+        bucket_total_len = (x_max_item_seqlen // BUCKET_SIZE + 1)*BUCKET_SIZE
+        bucket_pad_len = bucket_total_len - x_max_item_seqlen
 
-    x = torch.nn.functional.pad(x, (0, 0, 0, bucket_pad_len), value=0.0)
-    x_freqs_cis =  torch.nn.functional.pad(x_freqs_cis, (0, 0, 0, 0, 0, bucket_pad_len), value=0.0)
-    x_attn_mask = torch.zeros((bsz, 1, bucket_total_len, bucket_total_len), dtype=torch.bool, device=device)
-    for i, seq_len in enumerate(x_item_seqlens):
-        x_attn_mask[i, :, :seq_len, :seq_len] = 1
-    #-----------------------------------------------------------------------------------------
-    #for i, seq_len in enumerate(x_item_seqlens):
-    #    x_attn_mask[i, :seq_len] = 1
+        x = torch.nn.functional.pad(x, (0, 0, 0, bucket_pad_len), value=0.0)
+        x_freqs_cis =  torch.nn.functional.pad(x_freqs_cis, (0, 0, 0, 0, 0, bucket_pad_len), value=0.0)
+        x_attn_mask = torch.zeros((bsz, 1, bucket_total_len, bucket_total_len), dtype=torch.bool, device=device)
+        for i, seq_len in enumerate(x_item_seqlens):
+            x_attn_mask[i, :, :seq_len, :seq_len] = 1
+    else:
+        x_attn_mask = None
 
     if torch.is_grad_enabled() and self.gradient_checkpointing:
         for layer in self.noise_refiner:
@@ -226,7 +226,7 @@ def transformer_forward_gaudi(
         for layer in self.noise_refiner:
             x = layer(x, x_attn_mask, x_freqs_cis, adaln_input)
             htcore.mark_step()
-    x = x[:, :seq_len, ...]
+    x = x[:, :x_max_item_seqlen, ...]
 
     # cap embed & refine
     cap_item_seqlens = [len(_) for _ in cap_feats]
@@ -271,17 +271,19 @@ def transformer_forward_gaudi(
 
     unified = pad_sequence(unified, batch_first=True, padding_value=0.0)
     unified_freqs_cis = pad_sequence(unified_freqs_cis, batch_first=True, padding_value=0.0)
-    #print(f'baymax line 342  unified:{unified.shape} unified_freqs_cis:{unified_freqs_cis.shape} adaln_input:{adaln_input.shape}')
-    #+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-    bucket_total_len = (unified_max_item_seqlen // BUCKET_SIZE + 1)*BUCKET_SIZE
-    bucket_pad_len = bucket_total_len - unified_max_item_seqlen
 
-    unified = torch.nn.functional.pad(unified, (0, 0, 0, bucket_pad_len), value=0.0)
-    unified_freqs_cis =  torch.nn.functional.pad(unified_freqs_cis, (0, 0, 0, 0, 0, bucket_pad_len), value=0.0)
-    unified_attn_mask = torch.zeros((bsz, 1, bucket_total_len, bucket_total_len), dtype=torch.bool, device=device)
-    for i, seq_len in enumerate(unified_item_seqlens):
-        unified_attn_mask[i, :, :seq_len, :seq_len] = 1
-    #-----------------------------------------------------------------------------------------
+    use_bucket = "1" == os.getenv("USE_ZIMAGE_BUCKET", "0")
+    if use_bucket:
+        bucket_total_len = (unified_max_item_seqlen // BUCKET_SIZE + 1)*BUCKET_SIZE
+        bucket_pad_len = bucket_total_len - unified_max_item_seqlen
+
+        unified = torch.nn.functional.pad(unified, (0, 0, 0, bucket_pad_len), value=0.0)
+        unified_freqs_cis =  torch.nn.functional.pad(unified_freqs_cis, (0, 0, 0, 0, 0, bucket_pad_len), value=0.0)
+        unified_attn_mask = torch.zeros((bsz, 1, bucket_total_len, bucket_total_len), dtype=torch.bool, device=device)
+        for i, seq_len in enumerate(unified_item_seqlens):
+            unified_attn_mask[i, :, :seq_len, :seq_len] = 1
+    else:
+        unified_attn_mask = None
 
     if torch.is_grad_enabled() and self.gradient_checkpointing:
         for layer in self.layers:
@@ -293,7 +295,6 @@ def transformer_forward_gaudi(
             unified = layer(unified, unified_attn_mask, unified_freqs_cis, adaln_input)
             htcore.mark_step()
     unified = unified[:, :unified_max_item_seqlen, ...]
-    #unified_freqs_cis = unified_freqs_cis[:, :unified_max_item_seqlen, :, :]
 
     unified = self.all_final_layer[f"{patch_size}-{f_patch_size}"](unified, adaln_input)
     unified = list(unified.unbind(dim=0))
@@ -346,8 +347,10 @@ class GaudiStableDiffusionZImagePipeline(GaudiDiffusionPipeline, ZImagePipeline)
         for i in range(len(self.transformer.layers)):
             self.transformer.layers[i] = ht.hpu.wrap_in_hpu_graph(self.transformer.layers[i])
 
-        self.vae.forward = self.vae.decode
-        self.vae = ht.hpu.wrap_in_hpu_graph(self.vae)
+        use_bucket = "1" == os.getenv("USE_ZIMAGE_BUCKET", "0")
+        if use_bucket:
+            self.vae.forward = self.vae.decode
+            self.vae = ht.hpu.wrap_in_hpu_graph(self.vae)
 
         self.to(self._device)
 
@@ -645,15 +648,17 @@ class GaudiStableDiffusionZImagePipeline(GaudiDiffusionPipeline, ZImagePipeline)
             latents = latents.to(self.vae.dtype)
             latents = (latents / self.vae.config.scaling_factor) + self.vae.config.shift_factor
 
-            width_total_len = (latents.shape[-1] // 16 + 1) *16
-            width_pad_len = width_total_len - latents.shape[-1]
-            height_total_len = (latents.shape[-2] // 16 + 1) *16
-            height_pad_len = height_total_len - latents.shape[-2]
-            latents = torch.nn.functional.pad(latents, (0, width_pad_len, 0, height_pad_len), value=0.0)
-
-            #image = self.vae.decode(latents, return_dict=False)[0]
-            image = self.vae(latents, return_dict=False)[0]
-            image = image[..., :height, :width]
+            use_bucket = "1" == os.getenv("USE_ZIMAGE_BUCKET", "0")
+            if use_bucket:
+                width_total_len = (latents.shape[-1] // 16 + 1) *16 
+                width_pad_len = width_total_len - latents.shape[-1]
+                height_total_len = (latents.shape[-2] // 16 + 1) *16 
+                height_pad_len = height_total_len - latents.shape[-2]
+                latents = torch.nn.functional.pad(latents, (0, width_pad_len, 0, height_pad_len), value=0.0)
+                image = self.vae(latents, return_dict=False)[0]
+                image = image[..., :height, :width]
+            else:
+                image = self.vae.decode(latents, return_dict=False)[0]
 
             image = self.image_processor.postprocess(image, output_type=output_type)
 
