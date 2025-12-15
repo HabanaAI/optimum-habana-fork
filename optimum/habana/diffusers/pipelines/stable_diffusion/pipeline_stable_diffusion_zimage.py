@@ -112,7 +112,6 @@ class ZSingleStreamAttnProcessorGaudi:
 
         return output
 
-
 class RopeEmbedderGaudi:
     def __init__(
         self,
@@ -351,9 +350,7 @@ class GaudiStableDiffusionZImagePipeline(GaudiDiffusionPipeline, ZImagePipeline)
         if use_bucket:
             self.vae.forward = self.vae.decode
             self.vae = ht.hpu.wrap_in_hpu_graph(self.vae)
-
         self.to(self._device)
-
 
     @torch.no_grad()
     def __call__(
