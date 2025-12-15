@@ -576,6 +576,15 @@ PT_HPU_LAZY_MODE=1 python image_to_video_generation.py \
     --height 768 \
     --bf16
 ```
+### Text-to-Image with Z-Image
+download Z-Image model from https://huggingface.co/Tongyi-MAI/Z-Image-Turbo
+install diffusers module:
+pip install git+https://github.com/huggingface/diffusers
+
+run Z-Image demo:
+```
+bash run_zimage_demo.sh
+```
 
 ### Text-to-Video with Kolors
 download Kolors model from https://huggingface.co/Kwai-Kolors/Kolors
