@@ -26,6 +26,8 @@ from diffusers.utils import BaseOutput, replace_example_docstring
 from optimum.utils import logging
 from transformers import AutoProcessor, Mistral3ForConditionalGeneration
 
+from diffusers.models.transformers.transformer_flux2 import Flux2ParallelSelfAttnProcessor
+
 from ....transformers.gaudi_configuration import GaudiConfig
 from ....utils import HabanaProfile, speed_metrics, warmup_inference_steps_time_adjustment
 from ...models.attention_processor import GaudiFluxAttnProcessor2_0
@@ -149,7 +151,7 @@ class GaudiFlux2Pipeline(GaudiDiffusionPipeline, Flux2Pipeline):
         )
 
         for block in self.transformer.single_transformer_blocks:
-            block.attn.processor = GaudiFluxAttnProcessor2_0()
+            block.attn.processor = Flux2ParallelSelfAttnProcessor()
         for block in self.transformer.transformer_blocks:
             block.attn.processor = GaudiFluxAttnProcessor2_0()
 
@@ -383,7 +385,6 @@ class GaudiFlux2Pipeline(GaudiDiffusionPipeline, Flux2Pipeline):
             prompt = self.upsample_prompt(
                 prompt, images=image, temperature=caption_upsample_temperature, device=device
             )
-
         prompt_embeds, text_ids = self.encode_prompt(
             prompt=prompt,
             prompt_embeds=prompt_embeds,
@@ -393,7 +394,7 @@ class GaudiFlux2Pipeline(GaudiDiffusionPipeline, Flux2Pipeline):
             text_encoder_out_layers=text_encoder_out_layers,
         )
 
-        # 4. Process image
+        # 4. process images
         if image is not None and not isinstance(image, list):
             image = [image]
 
@@ -420,7 +421,7 @@ class GaudiFlux2Pipeline(GaudiDiffusionPipeline, Flux2Pipeline):
         height = height or self.default_sample_size * self.vae_scale_factor
         width = width or self.default_sample_size * self.vae_scale_factor
 
-        # 5. Prepare latent variables
+        # 5. prepare latent variables
         num_channels_latents = self.transformer.config.in_channels // 4
         latents, latent_ids = self.prepare_latents(
             batch_size=num_prompts * num_images_per_prompt,
