@@ -462,18 +462,17 @@ class GaudiStableDiffusionZImagePipeline(GaudiDiffusionPipeline, ZImagePipeline)
         vae_scale = self.vae_scale_factor * 2
         if height % vae_scale != 0:
             height = (height // vae_scale + 1) * vae_scale
-            if height > 2048:
-                height = 2048
-                logger.warning(f'resize height to {height}')
-            else:
-                logger.warning(f'pad height to {height}')
+            logger.warning(f'pad height to {height}')
         if width % vae_scale != 0:
             width = (width // vae_scale + 1) * vae_scale
-            if width > 2048:
-                width = 2048
-                logger.warning(f'resize width to {width}')
-            else:
-                logger.warning(f'pad width to {width}')
+            logger.warning(f'pad width to {width}')
+
+        if height > 2048:
+            height = 2048
+            logger.warning(f'resize height to {height}')
+        if width > 2048:
+            width = 2048
+            logger.warning(f'resize width to {width}')
         
 
         device = self._execution_device
