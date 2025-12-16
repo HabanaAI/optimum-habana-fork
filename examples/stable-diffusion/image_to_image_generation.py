@@ -229,6 +229,7 @@ def main():
         kwargs_call["height"] = args.height
     sdxl_models = ["stable-diffusion-xl", "sdxl"]
     sdxl = False
+    flux_kontext_models = ["FLUX.1-Kontext"]
     flux_models = ["FLUX.1"]
     flux = False
 
@@ -244,6 +245,10 @@ def main():
         from optimum.habana.diffusers import GaudiStableDiffusionXLImg2ImgPipeline as Img2ImgPipeline
 
         sdxl = True
+    elif any(model in args.model_name_or_path for model in flux_kontext_models):
+        from optimum.habana.diffusers import GaudiFluxKontextPipeline as Img2ImgPipeline
+
+        flux = True
     elif any(model in args.model_name_or_path for model in flux_models):
         from optimum.habana.diffusers import GaudiFluxImg2ImgPipeline as Img2ImgPipeline
 
@@ -302,7 +307,8 @@ def main():
     elif pipeline.scheduler.config._class_name == "EulerDiscreteScheduler":
         pipeline.scheduler = GaudiEulerDiscreteScheduler.from_config(pipeline.scheduler.config)
     elif pipeline.scheduler.config._class_name == "FlowMatchEulerDiscreteScheduler":
-        pipeline.scheduler = GaudiFlowMatchEulerDiscreteScheduler.from_config(pipeline.scheduler.config)
+        pass
+        # pipeline.scheduler = GaudiFlowMatchEulerDiscreteScheduler.from_config(pipeline.scheduler.config)
     else:
         pipeline.scheduler = GaudiDDIMScheduler.from_config(pipeline.scheduler.config)
 
