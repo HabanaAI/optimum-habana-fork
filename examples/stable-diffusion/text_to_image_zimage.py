@@ -78,7 +78,7 @@ def main():
         **kwargs,
     )
     pipe.to("hpu")
-    
+
     warmup = 5
     for i in range(warmup):
         # 2. Generate Image
@@ -109,7 +109,7 @@ def main():
     t1 = tm_perf.perf_counter()
     duration = (t1-t0)/inf_cnt
     print(f'Z-Image pipeline gaudi duration:{duration:.3f}')
-    
+
     file_name = f"z_image_output_{args.width}x{args.height}.png"
     image.save(file_name)
     print(f'save {file_name} done!')
