@@ -110,7 +110,9 @@ def main():
     duration = (t1-t0)/inf_cnt
     print(f'Z-Image pipeline gaudi duration:{duration:.3f}')
     
-    image.save("example.png")
+    file_name = f"z_image_output_{args.width}x{args.height}.png"
+    image.save(file_name)
+    print(f'save {file_name} done!')
 
 if "__main__" == __name__:
     main()

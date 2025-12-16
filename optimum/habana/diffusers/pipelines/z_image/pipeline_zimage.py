@@ -19,7 +19,9 @@ from diffusers.pipelines.z_image.pipeline_z_image import calculate_shift,retriev
 from diffusers.models.attention_processor import Attention
 from diffusers.models.transformers import transformer_z_image
 
+from optimum.utils import logging
 from optimum.habana.diffusers.pipelines.pipeline_utils import GaudiDiffusionPipeline
+from optimum.habana.diffusers.models.attention_processor import FlashAttnV3Gaudi
 from optimum.habana.transformers.gaudi_configuration import GaudiConfig
 from optimum.habana.diffusers.models.unet_2d_condition import set_default_attn_processor_hpu
 
@@ -28,6 +30,8 @@ import habana_frameworks.torch.core as htcore
 import habana_frameworks.torch.gpu_migration
 from habana_frameworks.torch.hpex.kernels import FusedSDPA
 from habana_frameworks.torch.hpex.kernels import RotaryPosEmbeddingMode, apply_rotary_pos_emb
+
+logger = logging.get_logger(__name__)
 
 class ZSingleStreamAttnProcessorGaudi:
     """
@@ -40,6 +44,7 @@ class ZSingleStreamAttnProcessorGaudi:
 
     def __init__(self):
         self.use_habana=True
+        self.fav3 = FlashAttnV3Gaudi()
 
     def __call__(
         self,
@@ -96,14 +101,12 @@ class ZSingleStreamAttnProcessorGaudi:
         if attention_mask is not None and attention_mask.ndim == 2:
             attention_mask = attention_mask[:, None, None, :]
 
-        query, key, value = (x.permute(0, 2, 1, 3) for x in (query, key, value))
         query = query.contiguous()
         key = key.contiguous()
         value = value.contiguous()
 
-        softmax_mode = os.getenv("FP32_SOFTMAX_VISION", "fast")
-        hidden_states = FusedSDPA.apply(query, key, value, attention_mask, 0.0, False, None, softmax_mode)
-        hidden_states = hidden_states.permute(0, 2, 1, 3)
+        fsdpa_mode = 'fp32' if os.environ.get('FP32_SOFTMAX_VISION', 'false').lower() in ['true', '1' ] else 'fast'
+        hidden_states = self.fav3.forward(query, key, value, attention_mask, fsdpa_mode)
 
         # Reshape back
         hidden_states = hidden_states.flatten(2, 3)
@@ -208,7 +211,7 @@ def transformer_forward_gaudi(
     x_freqs_cis = pad_sequence(x_freqs_cis, batch_first=True, padding_value=0.0)
 
     use_bucket = "1" == os.getenv("USE_ZIMAGE_BUCKET", "0")
-    if use_bucket:
+    if use_bucket and x_max_item_seqlen < 2048:
         bucket_total_len = (x_max_item_seqlen // BUCKET_SIZE + 1)*BUCKET_SIZE
         bucket_pad_len = bucket_total_len - x_max_item_seqlen
 
@@ -243,12 +246,12 @@ def transformer_forward_gaudi(
     cap_feats = pad_sequence(cap_feats, batch_first=True, padding_value=0.0)
     cap_freqs_cis = pad_sequence(cap_freqs_cis, batch_first=True, padding_value=0.0)
 
-    if 1 == len(cap_feats):
-         cap_attn_mask = None
-    else:
+    if len(cap_feats) > 1 and cap_max_item_seqlen < 2048:
         cap_attn_mask = torch.zeros((bsz,1, cap_max_item_seqlen, cap_max_item_seqlen), dtype=torch.bool, device=device)
         for i, seq_len in enumerate(cap_item_seqlens):
             cap_attn_mask[i, :, :seq_len, :seq_len] = 1
+    else:
+        cap_attn_mask = None
 
     if torch.is_grad_enabled() and self.gradient_checkpointing:
         for layer in self.context_refiner:
@@ -274,7 +277,7 @@ def transformer_forward_gaudi(
     unified_freqs_cis = pad_sequence(unified_freqs_cis, batch_first=True, padding_value=0.0)
 
     use_bucket = "1" == os.getenv("USE_ZIMAGE_BUCKET", "0")
-    if use_bucket:
+    if use_bucket and unified_max_item_seqlen < 2048:
         bucket_total_len = (unified_max_item_seqlen // BUCKET_SIZE + 1)*BUCKET_SIZE
         bucket_pad_len = bucket_total_len - unified_max_item_seqlen
 
@@ -339,17 +342,18 @@ class GaudiStableDiffusionZImagePipeline(GaudiDiffusionPipeline, ZImagePipeline)
             transformer,
         )
         n_refiner_layers =len(self.transformer.noise_refiner)
-        for i in range(n_refiner_layers):
-            self.transformer.noise_refiner[i] = ht.hpu.wrap_in_hpu_graph(self.transformer.noise_refiner[i])
+        if self.use_hpu_graphs:
+            for i in range(n_refiner_layers):
+                self.transformer.noise_refiner[i] = ht.hpu.wrap_in_hpu_graph(self.transformer.noise_refiner[i])
 
-        for i in range(n_refiner_layers):
-            self.transformer.context_refiner[i] = ht.hpu.wrap_in_hpu_graph(self.transformer.context_refiner[i])
+            for i in range(n_refiner_layers):
+                self.transformer.context_refiner[i] = ht.hpu.wrap_in_hpu_graph(self.transformer.context_refiner[i])
 
-        for i in range(len(self.transformer.layers)):
-            self.transformer.layers[i] = ht.hpu.wrap_in_hpu_graph(self.transformer.layers[i])
+            for i in range(len(self.transformer.layers)):
+                self.transformer.layers[i] = ht.hpu.wrap_in_hpu_graph(self.transformer.layers[i])
 
         use_bucket = "1" == os.getenv("USE_ZIMAGE_BUCKET", "0")
-        if use_bucket:
+        if use_bucket and self.use_hpu_graphs:
             self.vae.forward = self.vae.decode
             self.vae = ht.hpu.wrap_in_hpu_graph(self.vae)
         self.to(self._device)
@@ -457,15 +461,20 @@ class GaudiStableDiffusionZImagePipeline(GaudiDiffusionPipeline, ZImagePipeline)
 
         vae_scale = self.vae_scale_factor * 2
         if height % vae_scale != 0:
-            raise ValueError(
-                f"Height must be divisible by {vae_scale} (got {height}). "
-                f"Please adjust the height to a multiple of {vae_scale}."
-            )
+            height = (height // vae_scale + 1) * vae_scale
+            if height > 2048:
+                height = 2048
+                logger.warning(f'resize height to {height}')
+            else:
+                logger.warning(f'pad height to {height}')
         if width % vae_scale != 0:
-            raise ValueError(
-                f"Width must be divisible by {vae_scale} (got {width}). "
-                f"Please adjust the width to a multiple of {vae_scale}."
-            )
+            width = (width // vae_scale + 1) * vae_scale
+            if width > 2048:
+                width = 2048
+                logger.warning(f'resize width to {width}')
+            else:
+                logger.warning(f'pad width to {width}')
+        
 
         device = self._execution_device
 
@@ -648,7 +657,7 @@ class GaudiStableDiffusionZImagePipeline(GaudiDiffusionPipeline, ZImagePipeline)
             latents = (latents / self.vae.config.scaling_factor) + self.vae.config.shift_factor
 
             use_bucket = "1" == os.getenv("USE_ZIMAGE_BUCKET", "0")
-            if use_bucket:
+            if use_bucket and self.use_hpu_graphs:
                 width_total_len = (latents.shape[-1] // 16 + 1) *16 
                 width_pad_len = width_total_len - latents.shape[-1]
                 height_total_len = (latents.shape[-2] // 16 + 1) *16 

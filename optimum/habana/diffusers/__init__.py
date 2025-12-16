@@ -21,7 +21,6 @@ from .pipelines.stable_diffusion.pipeline_stable_diffusion_instruct_pix2pix impo
     GaudiStableDiffusionInstructPix2PixPipeline,
 )
 from .pipelines.stable_diffusion.pipeline_stable_diffusion_kolors import GaudiStableDiffusionKolorsPipeline
-from .pipelines.stable_diffusion.pipeline_stable_diffusion_zimage import GaudiStableDiffusionZImagePipeline
 from .pipelines.stable_diffusion.pipeline_stable_diffusion_ldm3d import GaudiStableDiffusionLDM3DPipeline
 from .pipelines.stable_diffusion.pipeline_stable_diffusion_upscale import GaudiStableDiffusionUpscalePipeline
 from .pipelines.stable_diffusion_3.pipeline_stable_diffusion_3 import GaudiStableDiffusion3Pipeline
@@ -32,6 +31,7 @@ from .pipelines.stable_video_diffusion.pipeline_stable_video_diffusion import Ga
 from .pipelines.text_to_video_synthesis.pipeline_text_to_video_synth import GaudiTextToVideoSDPipeline
 from .pipelines.wan.pipeline_wan import GaudiWanPipeline
 from .pipelines.wan.pipeline_wan_i2v import GaudiWanImageToVideoPipeline
+from .pipelines.z_image.pipeline_zimage import GaudiStableDiffusionZImagePipeline
 from .schedulers import (
     GaudiDDIMScheduler,
     GaudiEulerAncestralDiscreteScheduler,
