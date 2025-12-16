@@ -14,6 +14,7 @@
 # limitations under the License.
 """PyTorch Gaudi Qwen2.5-VL model."""
 
+import os
 from math import ceil
 from typing import List, Optional, Tuple, Union
 
@@ -104,6 +105,8 @@ class ModuleFusedSDPA(torch.nn.Module):
         self._hpu_kernel_fsdpa = fusedSDPA
 
     def forward(self, query, key, value, attn_mask, dropout_p, is_casual, scale, softmax_mode):
+        if os.environ.get("QWEN25VL_FP32_SOFTMAX", "false").lower() in ["true", "1"]:
+            softmax_mode = "fp32"
         return self._hpu_kernel_fsdpa.apply(query, key, value, attn_mask, dropout_p, is_casual, scale, softmax_mode)
 
 

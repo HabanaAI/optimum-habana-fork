@@ -33,10 +33,11 @@ INSTALL_REQUIRES = [
     "optimum ~= 2.0",
     "torch",
     "accelerate >= 1.7.0",
-    "diffusers >= 0.35.1",
+    "diffusers >= 0.36.0",
     "huggingface_hub[hf_xet] >= 0.24.7",
     "sentence-transformers == 3.3.1",
     "sentencepiece",
+    "kolors @ git+https://github.com/Kwai-Kolors/Kolors.git",
 ]
 
 TESTS_REQUIRE = [

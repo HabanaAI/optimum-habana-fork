@@ -45,3 +45,25 @@ PT_HPU_GPU_MIGRATION=1 PT_HPU_LAZY_MODE=1 torchrun --nproc_per_node=4 --standalo
     --save_file infinitetalk_res_multihpu \
     --ulysses_size=4
 ```
+
+4. run web_ui demo:
+multi device with sequence parallel
+```bash
+PT_HPU_GPU_MIGRATION=1 PT_HPU_LAZY_MODE=1 torchrun --nproc_per_node=8 --standalone generate_infinitetalk_UI.py \
+    --ckpt_dir  /mnt/new_disk/models/Wan2.1-I2V-14B-480P \
+    --wav2vec_dir '/mnt/new_disk/models/chinese-wav2vec2-base' \
+    --infinitetalk_dir  /mnt/new_disk/models/InfiniteTalk/single/infinitetalk.safetensors \
+    --size infinitetalk-480 \
+    --sample_steps 40 \
+    --mode streaming \
+    --motion_frame 9 \
+    --offload_model False \
+    --save_file infinitetalk_res_multihpu \
+    --ulysses_size=8
+```
+run web_demo in another terminal
+```bash
+python app.py --cp 8
+# wait until log print "* Running on local URL:  http:xxxx:xxxx"
+```
+
