@@ -352,9 +352,6 @@ class GaudiFlux2Pipeline(GaudiDiffusionPipeline, Flux2Pipeline):
                 self.transformer = convert(self.transformer, config)
             htcore.hpu_initialize(self.transformer, mark_only_scales_as_const=True)
 
-        height = height or self.default_sample_size * self.vae_scale_factor
-        width = width or self.default_sample_size * self.vae_scale_factor
-
         # 1. Check inputs. Raise error if not correct
         self.check_inputs(
             prompt=prompt,
