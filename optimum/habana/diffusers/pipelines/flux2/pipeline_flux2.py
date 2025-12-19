@@ -390,6 +390,7 @@ class GaudiFlux2Pipeline(GaudiDiffusionPipeline, Flux2Pipeline):
             max_sequence_length=max_sequence_length,
             text_encoder_out_layers=text_encoder_out_layers,
         )
+        prompt_embeds = prompt_embeds.to(device=device, dtype=self.transformer.dtype)
 
         # 4. process images
         if image is not None and not isinstance(image, list):
