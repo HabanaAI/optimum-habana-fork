@@ -19,7 +19,7 @@ from diffusers.pipelines.z_image.pipeline_z_image import calculate_shift,retriev
 from diffusers.models.attention_processor import Attention
 from diffusers.models.transformers import transformer_z_image
 from diffusers.models.upsampling import Upsample2D 
-from diffusers.models.resnet import Upsample2D 
+from diffusers.models.resnet import ResnetBlock2D
 
 from optimum.utils import logging
 from optimum.habana.diffusers.pipelines.pipeline_utils import GaudiDiffusionPipeline
