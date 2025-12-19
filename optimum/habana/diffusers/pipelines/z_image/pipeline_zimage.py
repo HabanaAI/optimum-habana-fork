@@ -18,6 +18,8 @@ from diffusers.pipelines.z_image.pipeline_output import ZImagePipelineOutput
 from diffusers.pipelines.z_image.pipeline_z_image import calculate_shift,retrieve_timesteps
 from diffusers.models.attention_processor import Attention
 from diffusers.models.transformers import transformer_z_image
+from diffusers.models.upsampling import Upsample2D 
+from diffusers.models.resnet import Upsample2D 
 
 from optimum.utils import logging
 from optimum.habana.diffusers.pipelines.pipeline_utils import GaudiDiffusionPipeline
@@ -32,6 +34,32 @@ from habana_frameworks.torch.hpex.kernels import FusedSDPA
 from habana_frameworks.torch.hpex.kernels import RotaryPosEmbeddingMode, apply_rotary_pos_emb
 
 logger = logging.get_logger(__name__)
+
+def conv_slice(conv, hidden_states):
+    h_array = []
+    slice_size = 128
+    if 0 ==hidden_states.size(-2) % slice_size:
+        slice_cnt = hidden_states.size(-2) // slice_size 
+    else:
+        slice_cnt = hidden_states.size(-2) // slice_size + 1
+    h_tmp  = conv(hidden_states[:,:,:slice_size+1, :])[:, :, :slice_size, :]
+    h_array.append(h_tmp)
+    print(f'baymax h_tmp:{h_tmp.shape} slice_cnt:{slice_cnt}')
+    
+    start_idx = slice_size-1
+    for i in range(1, slice_cnt-1):
+        end_idx = start_idx + slice_size + 2
+        h_tmp = conv(hidden_states[:,:,start_idx:end_idx, :])[:, :, 1:-1, :]
+        h_array.append(h_tmp)
+        #print(f'baymax h_tmp:{h_tmp.shape}')
+        start_idx += slice_size
+
+    h_tmp = conv(hidden_states[:,:,start_idx:, :])[:, :, 1:, :]
+    h_array.append(h_tmp)
+    #print(f'baymax h_tmp:{h_tmp.shape}')
+
+    h_out = torch.cat(h_array, dim=-2)
+    return h_out
 
 class ZSingleStreamAttnProcessorGaudi:
     """
@@ -307,6 +335,130 @@ def transformer_forward_gaudi(
     return x, {}
 
 
+def upsampler_forward_gaudi(self, hidden_states: torch.Tensor, output_size: Optional[int] = None, *args, **kwargs) -> torch.Tensor:
+    if len(args) > 0 or kwargs.get("scale", None) is not None:
+        deprecation_message = "The `scale` argument is deprecated and will be ignored. Please remove it, as passing it will raise an error in the future. `scale` should directly be passed while calling the underlying pipeline component i.e., via `cross_attention_kwargs`."
+        deprecate("scale", "1.0.0", deprecation_message)
+
+    assert hidden_states.shape[1] == self.channels
+
+    if self.norm is not None:
+        hidden_states = self.norm(hidden_states.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+
+    if self.use_conv_transpose:
+        return self.conv(hidden_states)
+
+    # Cast to float32 to as 'upsample_nearest2d_out_frame' op does not support bfloat16 until PyTorch 2.1
+    # https://github.com/pytorch/pytorch/issues/86679#issuecomment-1783978767
+    dtype = hidden_states.dtype
+    if dtype == torch.bfloat16 and is_torch_version("<", "2.1"):
+        hidden_states = hidden_states.to(torch.float32)
+
+    # upsample_nearest_nhwc fails with large batch sizes. see https://github.com/huggingface/diffusers/issues/984
+    if hidden_states.shape[0] >= 64:
+        hidden_states = hidden_states.contiguous()
+
+    # if `output_size` is passed we force the interpolation output
+    # size and do not make use of `scale_factor=2`
+    if self.interpolate:
+        # upsample_nearest_nhwc also fails when the number of output elements is large
+        # https://github.com/pytorch/pytorch/issues/141831
+        scale_factor = (
+            2 if output_size is None else max([f / s for f, s in zip(output_size, hidden_states.shape[-2:])])
+        )
+        if hidden_states.numel() * scale_factor > pow(2, 31):
+            hidden_states = hidden_states.contiguous()
+
+        if output_size is None:
+            hidden_states = F.interpolate(hidden_states, scale_factor=2.0, mode="nearest")
+        else:
+            hidden_states = F.interpolate(hidden_states, size=output_size, mode="nearest")
+
+    # Cast back to original dtype
+    if dtype == torch.bfloat16 and is_torch_version("<", "2.1"):
+        hidden_states = hidden_states.to(dtype)
+
+    # TODO(Suraj, Patrick) - clean up after weight dicts are correctly renamed
+    if self.use_conv:
+        if self.name == "conv":
+            if hidden_states.size(-2) >= 2048 and hidden_states.size(-1) >= 4096:
+                hidden_states = conv_slice(self.conv, hidden_states)
+            else:
+                hidden_states = self.conv(hidden_states)
+        else:
+            hidden_states = self.Conv2d_0(hidden_states)
+
+    return hidden_states
+
+
+
+def resnetblock2d_forward_gaudi(self, input_tensor: torch.Tensor, temb: torch.Tensor, *args, **kwargs) -> torch.Tensor:
+    if len(args) > 0 or kwargs.get("scale", None) is not None:
+        deprecation_message = "The `scale` argument is deprecated and will be ignored. Please remove it, as passing it will raise an error in the future. `scale` should directly be passed while calling the underlying pipeline component i.e., via `cross_attention_kwargs`."
+        deprecate("scale", "1.0.0", deprecation_message)
+
+    hidden_states = input_tensor
+
+    hidden_states = self.norm1(hidden_states)
+    hidden_states = self.nonlinearity(hidden_states)
+
+    if self.upsample is not None:
+        # upsample_nearest_nhwc fails with large batch sizes. see https://github.com/huggingface/diffusers/issues/984
+        if hidden_states.shape[0] >= 64:
+            input_tensor = input_tensor.contiguous()
+            hidden_states = hidden_states.contiguous()
+        input_tensor = self.upsample(input_tensor)
+        hidden_states = self.upsample(hidden_states)
+    elif self.downsample is not None:
+        input_tensor = self.downsample(input_tensor)
+        hidden_states = self.downsample(hidden_states)
+
+    if hidden_states.size(-2) >= 2048 and hidden_states.size(-1) >= 4096:
+        hidden_states = conv_slice(self.conv1, hidden_states)
+    else:
+        hidden_states = self.conv1(hidden_states)
+
+    if self.time_emb_proj is not None:
+        if not self.skip_time_act:
+            temb = self.nonlinearity(temb)
+        temb = self.time_emb_proj(temb)[:, :, None, None]
+
+    if self.time_embedding_norm == "default":
+        if temb is not None:
+            hidden_states = hidden_states + temb
+        hidden_states = self.norm2(hidden_states)
+    elif self.time_embedding_norm == "scale_shift":
+        if temb is None:
+            raise ValueError(
+                f" `temb` should not be None when `time_embedding_norm` is {self.time_embedding_norm}"
+            )
+        time_scale, time_shift = torch.chunk(temb, 2, dim=1)
+        hidden_states = self.norm2(hidden_states)
+        hidden_states = hidden_states * (1 + time_scale) + time_shift
+    else:
+        hidden_states = self.norm2(hidden_states)
+
+    hidden_states = self.nonlinearity(hidden_states)
+
+    hidden_states = self.dropout(hidden_states)
+    if hidden_states.size(-2) >= 2048 and hidden_states.size(-1) >= 4096:
+        hidden_states = conv_slice(self.conv2, hidden_states)
+    else:
+        hidden_states = self.conv2(hidden_states)
+
+    if self.conv_shortcut is not None:
+        if input_tensor.size(-2) >= 2048 and input_tensor.size(-1) >= 4096:
+            input_tensor = conv_slice(self.conv_shortcut, input_tensor.contiguous())
+        else:
+            input_tensor = self.conv_shortcut(input_tensor.contiguous())
+
+    output_tensor = (input_tensor + hidden_states) / self.output_scale_factor
+
+    return output_tensor
+
+
+setattr(Upsample2D, "forward", upsampler_forward_gaudi)
+setattr(ResnetBlock2D, "forward", resnetblock2d_forward_gaudi)
 setattr(transformer_z_image, "RopeEmbedder", RopeEmbedderGaudi)
 setattr(transformer_z_image, "ZSingleStreamAttnProcessor", ZSingleStreamAttnProcessorGaudi)
 setattr(ZImageTransformer2DModel, "forward", transformer_forward_gaudi)
