@@ -601,6 +601,8 @@ class GaudiFlux2Pipeline(GaudiDiffusionPipeline, Flux2Pipeline):
             # htcore.mark_step(sync=True)
 
         # 7. Stage after denoising
+        print(self.image_processor)
+        
         hb_profiler.stop()
 
         if quant_mode == "measure":
