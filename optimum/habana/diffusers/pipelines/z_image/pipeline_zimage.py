@@ -1,5 +1,6 @@
 import os
 import torch
+import torch.nn.functional as F
 from diffusers import ZImagePipeline
 from typing import Any, Callable, Dict, List, Optional, Union
 
@@ -348,12 +349,6 @@ def upsampler_forward_gaudi(self, hidden_states: torch.Tensor, output_size: Opti
     if self.use_conv_transpose:
         return self.conv(hidden_states)
 
-    # Cast to float32 to as 'upsample_nearest2d_out_frame' op does not support bfloat16 until PyTorch 2.1
-    # https://github.com/pytorch/pytorch/issues/86679#issuecomment-1783978767
-    dtype = hidden_states.dtype
-    if dtype == torch.bfloat16 and is_torch_version("<", "2.1"):
-        hidden_states = hidden_states.to(torch.float32)
-
     # upsample_nearest_nhwc fails with large batch sizes. see https://github.com/huggingface/diffusers/issues/984
     if hidden_states.shape[0] >= 64:
         hidden_states = hidden_states.contiguous()
@@ -374,9 +369,6 @@ def upsampler_forward_gaudi(self, hidden_states: torch.Tensor, output_size: Opti
         else:
             hidden_states = F.interpolate(hidden_states, size=output_size, mode="nearest")
 
-    # Cast back to original dtype
-    if dtype == torch.bfloat16 and is_torch_version("<", "2.1"):
-        hidden_states = hidden_states.to(dtype)
 
     # TODO(Suraj, Patrick) - clean up after weight dicts are correctly renamed
     if self.use_conv:
