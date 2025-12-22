@@ -46,7 +46,6 @@ def conv_slice(conv, hidden_states):
         slice_cnt = hidden_states.size(-2) // slice_size + 1
     h_tmp  = conv(hidden_states[:,:,:slice_size+1, :])[:, :, :slice_size, :]
     h_array.append(h_tmp)
-    print(f'baymax h_tmp:{h_tmp.shape} slice_cnt:{slice_cnt}')
     
     start_idx = slice_size-1
     for i in range(1, slice_cnt-1):
