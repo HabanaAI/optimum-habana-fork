@@ -333,7 +333,6 @@ def transformer_forward_gaudi(
 
     return x, {}
 
-
 def upsampler_forward_gaudi(self, hidden_states: torch.Tensor, output_size: Optional[int] = None, *args, **kwargs) -> torch.Tensor:
     if len(args) > 0 or kwargs.get("scale", None) is not None:
         deprecation_message = "The `scale` argument is deprecated and will be ignored. Please remove it, as passing it will raise an error in the future. `scale` should directly be passed while calling the underlying pipeline component i.e., via `cross_attention_kwargs`."
@@ -367,7 +366,6 @@ def upsampler_forward_gaudi(self, hidden_states: torch.Tensor, output_size: Opti
         else:
             hidden_states = F.interpolate(hidden_states, size=output_size, mode="nearest")
 
-
     # TODO(Suraj, Patrick) - clean up after weight dicts are correctly renamed
     if self.use_conv:
         if self.name == "conv":
@@ -379,8 +377,6 @@ def upsampler_forward_gaudi(self, hidden_states: torch.Tensor, output_size: Opti
             hidden_states = self.Conv2d_0(hidden_states)
 
     return hidden_states
-
-
 
 def resnetblock2d_forward_gaudi(self, input_tensor: torch.Tensor, temb: torch.Tensor, *args, **kwargs) -> torch.Tensor:
     if len(args) > 0 or kwargs.get("scale", None) is not None:
@@ -452,7 +448,6 @@ def Decoder_forward_gaudi(
     latent_embeds: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     r"""The forward method of the `Decoder` class."""
-    print(f'run Decoder forward gaudi!')
 
     sample = self.conv_in(sample)
 
@@ -483,7 +478,6 @@ def Decoder_forward_gaudi(
        sample = self.conv_out(sample)
 
     return sample
-
 
 setattr(Upsample2D, "forward", upsampler_forward_gaudi)
 setattr(ResnetBlock2D, "forward", resnetblock2d_forward_gaudi)
