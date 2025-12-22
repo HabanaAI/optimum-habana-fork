@@ -36,6 +36,7 @@ from .pipelines.stable_video_diffusion.pipeline_stable_video_diffusion import Ga
 from .pipelines.text_to_video_synthesis.pipeline_text_to_video_synth import GaudiTextToVideoSDPipeline
 from .pipelines.wan.pipeline_wan import GaudiWanPipeline
 from .pipelines.wan.pipeline_wan_i2v import GaudiWanImageToVideoPipeline
+from .pipelines.z_image.pipeline_zimage import GaudiStableDiffusionZImagePipeline
 from .schedulers import (
     GaudiDDIMScheduler,
     GaudiEulerAncestralDiscreteScheduler,

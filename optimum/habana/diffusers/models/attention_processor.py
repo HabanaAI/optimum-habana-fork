@@ -117,7 +117,7 @@ class FlashAttnV3Gaudi:
         key_len = key.size(-2)
 
         # In the case of cross-attn, use FusedSDPA.
-        if (query_len * cp_size) != key_len:
+        if (query_len * cp_size) != key_len or query_len <= 8192:
             output = FusedSDPA.apply(query, key, value, attention_mask, 0.0, False, None, fsdpa_mode, None)
             return output.permute(0, 2, 1, 3).contiguous()
 
@@ -183,6 +183,7 @@ class FlashAttnV3Gaudi:
             final_hidden_list.append(out.to(query.dtype))
 
         output = torch.cat(final_hidden_list, dim=-2)
+        torch.hpu.synchronize()
 
         return output.permute(0, 2, 1, 3).contiguous()
 
@@ -881,9 +882,6 @@ class GaudiWanAttnProcessor:
 
         hidden_states = self.fav3.forward(query, key, value, attention_mask, fsdpa_mode="fast",
                                           cp_size=self.cp_size, pad_len=pad_len)
-
-        if self.use_sp and self.cp_size > 1:
-            torch.hpu.synchronize()
 
         hidden_states = hidden_states.flatten(2, 3)
         hidden_states = hidden_states.type_as(query)
