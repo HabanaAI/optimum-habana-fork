@@ -14,6 +14,7 @@ from transformers import AutoTokenizer, PreTrainedModel
 
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 from diffusers.models.autoencoders import AutoencoderKL
+from diffusers.models.autoencoders.vae import Decoder
 from diffusers.models.transformers import ZImageTransformer2DModel
 from diffusers.pipelines.z_image.pipeline_output import ZImagePipelineOutput
 from diffusers.pipelines.z_image.pipeline_z_image import calculate_shift,retrieve_timesteps
@@ -52,12 +53,10 @@ def conv_slice(conv, hidden_states):
         end_idx = start_idx + slice_size + 2
         h_tmp = conv(hidden_states[:,:,start_idx:end_idx, :])[:, :, 1:-1, :]
         h_array.append(h_tmp)
-        #print(f'baymax h_tmp:{h_tmp.shape}')
         start_idx += slice_size
 
     h_tmp = conv(hidden_states[:,:,start_idx:, :])[:, :, 1:, :]
     h_array.append(h_tmp)
-    #print(f'baymax h_tmp:{h_tmp.shape}')
 
     h_out = torch.cat(h_array, dim=-2)
     return h_out
@@ -373,7 +372,7 @@ def upsampler_forward_gaudi(self, hidden_states: torch.Tensor, output_size: Opti
     # TODO(Suraj, Patrick) - clean up after weight dicts are correctly renamed
     if self.use_conv:
         if self.name == "conv":
-            if hidden_states.size(-2) >= 2048 and hidden_states.size(-1) >= 4096:
+            if hidden_states.size(-2) >= 2048 and hidden_states.size(-1) >= 2048:
                 hidden_states = conv_slice(self.conv, hidden_states)
             else:
                 hidden_states = self.conv(hidden_states)
@@ -405,7 +404,7 @@ def resnetblock2d_forward_gaudi(self, input_tensor: torch.Tensor, temb: torch.Te
         input_tensor = self.downsample(input_tensor)
         hidden_states = self.downsample(hidden_states)
 
-    if hidden_states.size(-2) >= 2048 and hidden_states.size(-1) >= 4096:
+    if hidden_states.size(-2) >= 2048 and hidden_states.size(-1) >= 2048:
         hidden_states = conv_slice(self.conv1, hidden_states)
     else:
         hidden_states = self.conv1(hidden_states)
@@ -433,13 +432,13 @@ def resnetblock2d_forward_gaudi(self, input_tensor: torch.Tensor, temb: torch.Te
     hidden_states = self.nonlinearity(hidden_states)
 
     hidden_states = self.dropout(hidden_states)
-    if hidden_states.size(-2) >= 2048 and hidden_states.size(-1) >= 4096:
+    if hidden_states.size(-2) >= 2048 and hidden_states.size(-1) >= 2048:
         hidden_states = conv_slice(self.conv2, hidden_states)
     else:
         hidden_states = self.conv2(hidden_states)
 
     if self.conv_shortcut is not None:
-        if input_tensor.size(-2) >= 2048 and input_tensor.size(-1) >= 4096:
+        if input_tensor.size(-2) >= 2048 and input_tensor.size(-1) >= 2048:
             input_tensor = conv_slice(self.conv_shortcut, input_tensor.contiguous())
         else:
             input_tensor = self.conv_shortcut(input_tensor.contiguous())
@@ -448,9 +447,48 @@ def resnetblock2d_forward_gaudi(self, input_tensor: torch.Tensor, temb: torch.Te
 
     return output_tensor
 
+def Decoder_forward_gaudi(
+    self,
+    sample: torch.Tensor,
+    latent_embeds: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    r"""The forward method of the `Decoder` class."""
+    print(f'run Decoder forward gaudi!')
+
+    sample = self.conv_in(sample)
+
+    if torch.is_grad_enabled() and self.gradient_checkpointing:
+        # middle
+        sample = self._gradient_checkpointing_func(self.mid_block, sample, latent_embeds)
+
+        # up
+        for up_block in self.up_blocks:
+            sample = self._gradient_checkpointing_func(up_block, sample, latent_embeds)
+    else:
+        # middle
+        sample = self.mid_block(sample, latent_embeds)
+
+        # up
+        for up_block in self.up_blocks:
+            sample = up_block(sample, latent_embeds)
+
+    # post-process
+    if latent_embeds is None:
+        sample = self.conv_norm_out(sample)
+    else:
+        sample = self.conv_norm_out(sample, latent_embeds)
+    sample = self.conv_act(sample)
+    if sample.size(-2) >= 2048 and sample.size(-1) >= 2048:
+        sample = conv_slice(self.conv_out, sample)
+    else:
+       sample = self.conv_out(sample)
+
+    return sample
+
 
 setattr(Upsample2D, "forward", upsampler_forward_gaudi)
 setattr(ResnetBlock2D, "forward", resnetblock2d_forward_gaudi)
+setattr(Decoder, "forward", Decoder_forward_gaudi)
 setattr(transformer_z_image, "RopeEmbedder", RopeEmbedderGaudi)
 setattr(transformer_z_image, "ZSingleStreamAttnProcessor", ZSingleStreamAttnProcessorGaudi)
 setattr(ZImageTransformer2DModel, "forward", transformer_forward_gaudi)
