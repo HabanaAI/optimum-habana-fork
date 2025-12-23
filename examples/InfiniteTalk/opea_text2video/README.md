@@ -80,13 +80,15 @@ python3 web_service.py > web.log 2>&1 &
 
 此服务负责处理视频生成任务。
 
+下面的示例使用 4 卡来启动 Gaudi 作业服务。
+
 ```bash
-PT_HPU_SYNC_LAUNCH=1 PT_HPU_GPU_MIGRATION=1 PT_HPU_LAZY_MODE=1 torchrun --nproc_per_node=8 --master-port 29502 --standalone job_service.py \
+PT_HPU_SYNC_LAUNCH=1 PT_HPU_GPU_MIGRATION=1 PT_HPU_LAZY_MODE=1 torchrun --nproc_per_node=4 --master-port 29502 --standalone job_service.py \
     --size infinitetalk-480 \
     --mode streaming \
     --motion_frame 9 \
     --offload_model False \
-    --ulysses_size=8 > job.log 2>&1 &
+    --ulysses_size=4 > job.log 2>&1 &
 ```
 
 ---
