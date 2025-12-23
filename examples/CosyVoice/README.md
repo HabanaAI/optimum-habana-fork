@@ -60,10 +60,10 @@ Required parameters: text, mode, prompt_text, prompt_audio
 Command example:
 ```shell
 curl http://10.239.15.29:9370/v1/audio/speech \
-    -F text="梯度是一个多变量微积分中的概念，用于描述一个标量场在某一点处的最大变化率，以及变化最快的方向。在物理学中，梯度通常用来表示某个物理量的空间变化情况。" \
+    -F text="收到好友从远方寄来的生日礼物，那份意外的惊喜与深深的祝福让我心中充满了甜蜜的快乐，笑容如花儿般绽放。" \
     -F mode="zero_shot" \
-    -F prompt_text="对，这就是我，万人敬仰的太乙真人，虽然有点婴儿肥，但也掩不住我逼人的帅气。" \
-    -F prompt_audio="@asset/ZH_2_prompt.wav"
+    -F prompt_text="希望你以后能够做的比我还好呦。" \
+    -F prompt_audio="@asset/zero_shot_prompt.wav"
 ```
 
 Output example:
@@ -81,7 +81,7 @@ Command example:
 curl http://10.239.15.29:9370/v1/audio/speech \
     -F text="If one knows how to be grateful and content with small things, then he is a happy person." \
     -F mode="cross_lingual" \
-    -F prompt_audio="@asset/9_ZH.wav"
+    -F prompt_audio="@asset/cross_lingual_prompt.wav"
 ```
 
 Output example:
