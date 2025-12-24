@@ -8,7 +8,7 @@ import time
 import torch
 from PIL import Image
 
-from optimum.habana.diffusers import GaudiQwenImageEditPlusPipeline
+from optimum.habana.diffusers import GaudiQwenImageEditPipeline
 from optimum.habana.transformers.gaudi_configuration import GaudiConfig
 from optimum.habana.transformers.modeling_utils import adapt_transformers_to_gaudi
 
@@ -57,7 +57,7 @@ def main():
     gaudi_config_kwargs["use_torch_autocast"] = True
     gaudi_config = GaudiConfig(**gaudi_config_kwargs)
 
-    pipeline = GaudiQwenImageEditPlusPipeline.from_pretrained(
+    pipeline = GaudiQwenImageEditPipeline.from_pretrained(
         args.model_name_or_path,
         torch_dtype=torch.bfloat16,
         use_habana=True,

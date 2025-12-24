@@ -1,7 +1,7 @@
 # 1.Qwen/Qwen-Image支持文生图
 测试样例
 
-PT_HPU_LAZY_MODE=1 python examples/stable-diffusion/text_to_image_qwenimage.py --model_name_or_path Qwen/Qwen-Image --prompt "A capybara wearing a suit holding a sign that reads Hello World." --num_inference_steps 20
+PT_HPU_LAZY_MODE=1 python examples/stable-diffusion/qwenimage/text_to_image_qwenimage.py --model_name_or_path Qwen/Qwen-Image --prompt "A capybara wearing a suit holding a sign that reads Hello World." --num_inference_steps 20
 
 参数设置：
 --model_name_or_path 模型路径
@@ -77,7 +77,7 @@ PT_HPU_LAZY_MODE=1 python examples/stable-diffusion/text_to_image_qwenimage.py -
 # 2.Qwen/Qwen-Image-Edit 支持单图编辑
 测试样例
 
-PT_HPU_LAZY_MODE=1 python examples/stable-diffusion/image_to_image_qwenimageedit.py --model_name_or_path Qwen/Qwen-Image-Edit --prompt "Change to Cartoon style." --image_path /path/test.png --num_inference_steps 10
+PT_HPU_LAZY_MODE=1 python examples/stable-diffusion/qwenimage/image_to_image_qwenimageedit.py --model_name_or_path Qwen/Qwen-Image-Edit --prompt "Change to Cartoon style." --image_path /path/test.png --num_inference_steps 10
 
 参数设置：
 
@@ -103,7 +103,7 @@ PT_HPU_LAZY_MODE=1 python examples/stable-diffusion/image_to_image_qwenimageedit
     gaudi_config_kwargs["use_torch_autocast"] = True
     gaudi_config = GaudiConfig(**gaudi_config_kwargs)
 
-    pipeline = GaudiQwenImageEditPlusPipeline.from_pretrained(
+    pipeline = GaudiQwenImageEditPipeline.from_pretrained(
         args.model_name_or_path,
         torch_dtype=torch.bfloat16,
         use_habana=True,
@@ -144,7 +144,7 @@ PT_HPU_LAZY_MODE=1 python examples/stable-diffusion/image_to_image_qwenimageedit
 # 3.Qwen/Qwen-Image-Edit-2509 支持单图及多图编辑
 测试样例
 
-PT_HPU_LAZY_MODE=1 python examples/stable-diffusion/image_to_image_qwenimageeditplus.py --model_name_or_path Qwen/Qwen-Image-Edit-2509 --prompt "Change the two images into one cartoon picture." --images_path /path/img1.png /path/img2.png --num_inference_steps 10
+PT_HPU_LAZY_MODE=1 python examples/stable-diffusion/qwenimage/image_to_image_qwenimageeditplus.py --model_name_or_path Qwen/Qwen-Image-Edit-2509 --prompt "Change the two images into one cartoon picture." --images_path /path/img1.png /path/img2.png --num_inference_steps 10
 
 参数设置：
 --model_name_or_path 模型路径
