@@ -269,8 +269,13 @@ class GaudiQwenImagePipeline(GaudiDiffusionPipeline, QwenImagePipeline):
             theta=10000, axes_dim=list(config["axes_dims_rope"]), scale_rope=True
         )
 
-        vae_decode_latents_max = int(os.environ.get("QWENIMAGE_VAE_DECODE_BUCKET_MAX", 256))
-        self.vae_decode_latents_buckets = [vae_decode_latents_max]
+        self.vae_decode_latents_buckets = [128,192,256]
+        envvar = os.environ.get("QWENIMAGE_VAE_DECODE_BUCKETS", "")
+        if envvar != "":
+            self.vae_decode_latents_buckets = [int(i) for i in envvar.split(',')]
+        logger.info(
+                f"vae_decode_latents_buckets is {self.vae_decode_latents_buckets}."
+            )
 
         hidden_states_buckets_step = int(os.environ.get("QWENIMAGE_TRANSFORMER_BUCKETS_STEP", 256))
         encoder_hidden_states_buckets_step = int(os.environ.get("QWENIMAGE_TRANSFORMER_ENCODER_BUCKETS_STEP", 128))
@@ -713,10 +718,13 @@ class GaudiQwenImagePipeline(GaudiDiffusionPipeline, QwenImagePipeline):
             h_pad = -1
             w_pad = -1
             for bucket in self.vae_decode_latents_buckets:
-                if h_pad >= 0 and w_pad >= 0:
+                if h_pad >= 0:
                     break
                 if h <= bucket and h_pad == -1:
                     h_pad = bucket - h
+            for bucket in self.vae_decode_latents_buckets:
+                if w_pad >= 0:
+                    break
                 if w <= bucket and w_pad == -1:
                     w_pad = bucket - w
             if h_pad < 0:
