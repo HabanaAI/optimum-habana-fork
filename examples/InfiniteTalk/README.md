@@ -17,6 +17,7 @@ huggingface-cli download MeiGen-AI/InfiniteTalk --local-dir ./weights/InfiniteTa
 3. run demo script:
 single device:
 ```bash
+PT_HPU_SYNC_LAUNCH=1 \
 PT_HPU_GPU_MIGRATION=1 PT_HPU_LAZY_MODE=1 python generate_infinitetalk.py \
     --ckpt_dir  /mnt/new_disk/models/Wan2.1-I2V-14B-480P \
     --wav2vec_dir '/mnt/new_disk/models/chinese-wav2vec2-base' \
@@ -32,6 +33,7 @@ PT_HPU_GPU_MIGRATION=1 PT_HPU_LAZY_MODE=1 python generate_infinitetalk.py \
 
 multi device with sequence parallel:
 ```bash
+PT_HPU_SYNC_LAUNCH=1 \
 PT_HPU_GPU_MIGRATION=1 PT_HPU_LAZY_MODE=1 torchrun --nproc_per_node=4 --standalone generate_infinitetalk.py \
     --ckpt_dir  /mnt/new_disk/models/Wan2.1-I2V-14B-480P \
     --wav2vec_dir '/mnt/new_disk/models/chinese-wav2vec2-base' \
@@ -49,6 +51,7 @@ PT_HPU_GPU_MIGRATION=1 PT_HPU_LAZY_MODE=1 torchrun --nproc_per_node=4 --standalo
 4. run web_ui demo:
 multi device with sequence parallel
 ```bash
+PT_HPU_SYNC_LAUNCH=1 \
 PT_HPU_GPU_MIGRATION=1 PT_HPU_LAZY_MODE=1 torchrun --nproc_per_node=8 --standalone generate_infinitetalk_UI.py \
     --ckpt_dir  /mnt/new_disk/models/Wan2.1-I2V-14B-480P \
     --wav2vec_dir '/mnt/new_disk/models/chinese-wav2vec2-base' \
