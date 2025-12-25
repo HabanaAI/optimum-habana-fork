@@ -5,6 +5,7 @@ OPEA Text-to-Video (文本到视频) 微服务，用于根据文本提示和音�
 ## 概述
 
 本项目提供 OPEA Text2Video 组件的独立部署方案。它通过 REST API 提供先进的视频生成能力，并针对英特尔 ® Habana® Gaudi® 加速器进行了优化。
+本指南提供了基于docker compose的自动部署和命令行的手工部署两种部署方式。
 
 ## 主要特性
 
@@ -15,6 +16,12 @@ OPEA Text-to-Video (文本到视频) 微服务，用于根据文本提示和音�
 - **容器化部署**: 支持 Docker 快速部署和环境隔离。
 
 ## 安装部署
+
+### 0. 硬件资源配置
+
+建议使用至少4卡部署，性能模式推荐8卡。
+对于Gaudi2E 8卡互联，请使用专用优化镜像部署该服务。
+
 
 ### 1. 构建 Docker 镜像
 
@@ -32,7 +39,107 @@ docker build -t text2video-gaudi:latest \
   -f Dockerfile .
 ```
 
-### 2. 创建 Docker 容器实例
+### 2. 下载模型
+
+请下载如下模型到指定的模型目录（通过环境变量 `HF_MODEL_PATH` 指定）：
+
+```bash
+export HF_MODEL_PATH=your_model_path
+huggingface-cli download Wan-AI/Wan2.1-I2V-14B-480P --local-dir ${HF_MODEL_PATH}/Wan2.1-I2V-14B-480P
+huggingface-cli download TencentGameMate/chinese-wav2vec2-base --local-dir ${HF_MODEL_PATH}/chinese-wav2vec2-base
+huggingface-cli download TencentGameMate/chinese-wav2vec2-base model.safetensors --revision refs/pr/1 --local-dir ${HF_MODEL_PATH}/chinese-wav2vec2-base
+huggingface-cli download MeiGen-AI/InfiniteTalk --local-dir ${HF_MODEL_PATH}/InfiniteTalk
+```
+
+### 3. Docker Compose 部署（推荐）
+
+#### 3.1 安装 Docker Compose v2
+
+```bash
+# Ubuntu 22.04 安装命令
+sudo apt update
+sudo apt install docker-compose-v2
+```
+如遇到docker 版本过低问题，请查询DeepSeek ubuntu 22.04 升级docker 和docker-compose-v2 进行操作。
+
+#### 3.2 配置环境变量
+
+参考env_example创建 `.env` 文件并配置以下变量：
+
+```bash
+# 模型路径（必需）
+HF_MODEL_PATH=/mnt/disk2/HF_models
+
+# 视频输出目录（可选）
+VIDEO_OUTPUT_DIR=./video_output
+
+# Web 服务端口（默认 9396）
+WEB_PORT=9396
+
+# HPU 卡数（默认 4）
+NUM_CARDS=4
+
+# 代理设置（可选）
+https_proxy=http://your-proxy:port
+no_proxy=localhost,127.0.0.1,::1
+```
+
+**环境变量说明：**
+
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `HF_MODEL_PATH` | HuggingFace 模型存储路径 | - |
+| `VIDEO_OUTPUT_DIR` | 生成视频的输出目录 | `./video_output` |
+| `WEB_PORT` | Web API 服务端口 | `9396` |
+| `NUM_CARDS` | 使用的 HPU 卡数，4 或者8 | `4` |
+| `https_proxy` | HTTPS 代理地址 | - |
+| `no_proxy` | 不使用代理的地址列表 | `localhost,127.0.0.1,::1` |
+
+
+#### 3.3 启动服务
+
+```bash
+# 启动服务（后台运行）
+docker compose -f docker-compose.yml up -d
+
+# 查看服务状态
+docker compose ps
+
+# 查看日志
+docker compose logs -f text2video-web
+tail -f  ${HF_MODEL_PATH}/logs/job.log
+tail -f  ${HF_MODEL_PATH}/logs/web.log
+```
+
+服务启动后需等待 **3-5 分钟**模型加载完成，可通过健康检查命令验证：
+
+```bash
+
+# 查看实时日志出现如下信息表示可以提供服务
+tail -f  ${HF_MODEL_PATH}/logs/job.log
+[2025-12-25 16:15:27,191] INFO: Creating infinitetalk pipeline.
+[2025-12-25 16:15:27,191] INFO: loading /hf/Wan2.1-I2V-14B-480P/models_t5_umt5-xxl-enc-bf16.pth
+[2025-12-25 16:16:32,304] INFO: loading /hf/Wan2.1-I2V-14B-480P/Wan2.1_VAE.pth
+[2025-12-25 16:16:40,023] INFO: loading /hf/Wan2.1-I2V-14B-480P/models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth
+[2025-12-25 16:16:43,654] INFO: Creating WanModel from /hf/Wan2.1-I2V-14B-480P
+tail -f  ${HF_MODEL_PATH}/logs/web.log
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:9396 (Press CTRL+C to quit)
+[2025-12-25 17:02:10,081] [    INFO] - Base service - HTTP server setup successful
+[2025-12-25 17:02:10,084] [    INFO] - text2video - Text-to-video server started.
+
+```
+
+#### 3.4 停止服务
+
+```bash
+# 停止服务
+docker compose down
+
+```
+
+### 4. 手工创建 Docker 容器实例
 
 此命令将创建一个配置好 Gaudi 环境的容器实例。
 
@@ -150,7 +257,7 @@ PT_HPU_SYNC_LAUNCH=1 PT_HPU_GPU_MIGRATION=1 PT_HPU_LAZY_MODE=1 torchrun --nproc_
 {
   "id": "video_1766454718_2556",
   "object": "video",
-  "model": "InfinteTalk",
+  "model": "InfiniteTalk",
   "status": "queued",
   "progress": 0,
   "created_at": 1766454718,
@@ -183,7 +290,7 @@ PT_HPU_SYNC_LAUNCH=1 PT_HPU_GPU_MIGRATION=1 PT_HPU_LAZY_MODE=1 torchrun --nproc_
 {
   "id": "video_1766454718_2556",
   "object": "video",
-  "model": "InfinteTalk",
+  "model": "InfiniteTalk",
   "status": "completed",
   "progress": 100,
   "created_at": 1766454718,
@@ -227,7 +334,7 @@ PT_HPU_SYNC_LAUNCH=1 PT_HPU_GPU_MIGRATION=1 PT_HPU_LAZY_MODE=1 torchrun --nproc_
 ```json
 {
   "id": "video_1721105333_1234",
-  "model": "InfinteTalk",
+  "model": "InfiniteTalk",
   "status": "deleted",
   "progress": 0,
   "created_at": 1721105333,

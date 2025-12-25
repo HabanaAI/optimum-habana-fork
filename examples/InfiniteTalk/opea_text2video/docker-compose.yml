@@ -1,0 +1,70 @@
+version: '3.8'
+
+services:
+  # Text2Video Web Service - REST API服务
+  text2video-web:
+    image: text2video-gaudi:latest
+    container_name: video-gaudi-web-service
+    restart: unless-stopped
+
+    network_mode: host
+    ports:
+      - ${WEB_PORT:-9396}:9396  # Web服务端口
+
+    volumes:
+      - ${HF_MODEL_PATH:-/mnt/disk2/HF_models}:/hf
+      - ${VIDEO_OUTPUT_DIR:-./video_output}:/home/user/video
+      - /dev:/dev
+      - /sys/kernel/debug:/sys/kernel/debug
+
+    environment:
+      - MODEL=InfinteTalk
+      - VIDEO_DIR=/home/user/video
+      - TEXT2VIDEO_COMPONENT_NAME=OPEA_TEXT2VIDEO
+
+      - HABANA_VISIBLE_DEVICES=all
+      - OMPI_MCA_btl_vader_single_copy_mechanism=none
+      - HABANA_USED_DEVICE=${NUM_CARDS:-4}
+
+      - https_proxy=${https_proxy:-}
+      - no_proxy=${no_proxy:-localhost,127.0.0.1,::1}
+
+      - PT_HPU_SYNC_LAUNCH=1
+      - PT_HPU_GPU_MIGRATION=1
+      - PT_HPU_LAZY_MODE=1
+      - TZ=Asia/Shanghai
+
+    user: root
+    working_dir: /home/user/text2video
+
+    # Gaudi相关运行参数
+    cap_add:
+      - SYS_PTRACE
+      - SYS_NICE   
+      - IPC_LOCK  
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    ipc: host
+    devices:
+      - /dev:/dev 
+
+    command: /bin/sh /home/user/text2video/start.sh
+     
+
+    healthcheck:
+      test: >
+        bash -c '
+          # 检查web_service.py进程
+          pgrep -f "web_service.py" > /dev/null || exit 1;
+
+          # 检查job_service.py进程
+          pgrep -f "job_service.py" > /dev/null || exit 1;
+
+          exit 0
+        '
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 300s
