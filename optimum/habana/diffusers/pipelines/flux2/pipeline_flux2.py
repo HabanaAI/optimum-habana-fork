@@ -57,52 +57,55 @@ EXAMPLE_DOC_STRING = """
     Examples:
         ```py
         >>> import torch
-        >>> from optimum.habana.diffusers import GaudiFluxPipeline
+        >>> from optimum.habana.diffusers import GaudiFlux2Pipeline
+        >>> from transformers import PixtralProcessor, Mistral3ForConditionalGeneration
 
-        >>> pipe = GaudiFluxPipeline.from_pretrained(
-        ...    "black-forest-labs/FLUX.1-schnell",
+        >>> model_id = "black-forest-labs/FLUX.2-dev"
+        >>> pipe = GaudiFlux2Pipeline.from_pretrained(
+        ...     model_id,
         ...     torch_dtype=torch.bfloat16,
         ...     use_habana=True,
         ...     use_hpu_graphs=True,
         ...     gaudi_config="Habana/stable-diffusion",
+        ...     text_encoder=None,
         ... )
         >>> prompt = "A cat holding a sign that says hello world"
         >>> # Depending on the variant being used, the pipeline call will slightly vary.
         >>> # Refer to the pipeline documentation for more details.
-        >>> image = pipe(prompt, num_inference_steps=4, guidance_scale=0.0).images[0]
-        >>> image.save("flux.png")
+
+        >>> tokenizer = PixtralProcessor.from_pretrained(model_id, subfolder="tokenizer")
+        >>> text_encoder = Mistral3ForConditionalGeneration.from_pretrained(
+        ...     model_id, subfolder="text_encoder", torch_dtype=torch.float32, attn_implementation="eager").to("cpu")
+        >>> prompt_embeds_cpu = GaudiFlux2Pipeline._get_mistral_3_small_prompt_embeds(
+        ...     text_encoder=text_encoder, tokenizer=tokenizer, prompt=prompt, device=torch.device("cpu"), dtype=torch.float32)
+        >>> prompt_embeds_hpu = prompt_embeds_cpu.to("hpu", dtype=torch.bfloat16)
+
+        >>> image = pipe(prompt_embeds=prompt_embeds_hpu, num_inference_steps=50, guidance_scale=2.5).images[0]
+        >>> image.save("flux2.png")
         ```
 """
 
 
 class GaudiFlux2Pipeline(GaudiDiffusionPipeline, Flux2Pipeline):
     r"""
-    Adapted from https://github.com/huggingface/diffusers/blob/v0.32.0/src/diffusers/pipelines/flux/pipeline_flux.py#L140
-        Added batch size control for inference, and support for HPU graphs and Gaudi quantization via Intel Neural Compressor
+    Adapted from https://github.com/huggingface/diffusers/blob/v0.36.0/src/diffusers/pipelines/flux2/pipeline_flux2.py#L251
 
-    The Flux pipeline for text-to-image generation.
+    The Flux2 pipeline for text-to-image generation.
 
-    Reference: https://blackforestlabs.ai/announcing-black-forest-labs/
+    Reference: [https://bfl.ai/blog/flux-2](https://bfl.ai/blog/flux-2)
 
     Args:
-        transformer ([`FluxTransformer2DModel`]):
+        transformer ([`Flux2Transformer2DModel`]):
             Conditional Transformer (MMDiT) architecture to denoise the encoded image latents.
         scheduler ([`FlowMatchEulerDiscreteScheduler`]):
             A scheduler to be used in combination with `transformer` to denoise the encoded image latents.
-        vae ([`AutoencoderKL`]):
+        vae ([`AutoencoderKLFlux2`]):
             Variational Auto-Encoder (VAE) Model to encode and decode images to and from latent representations.
-        text_encoder ([`CLIPTextModel`]):
-            [CLIP](https://huggingface.co/docs/transformers/model_doc/clip#transformers.CLIPTextModel), specifically
-            the [clip-vit-large-patch14](https://huggingface.co/openai/clip-vit-large-patch14) variant.
-        text_encoder_2 ([`T5EncoderModel`]):
-            [T5](https://huggingface.co/docs/transformers/en/model_doc/t5#transformers.T5EncoderModel), specifically
-            the [google/t5-v1_1-xxl](https://huggingface.co/google/t5-v1_1-xxl) variant.
-        tokenizer (`CLIPTokenizer`):
+        text_encoder ([`Mistral3ForConditionalGeneration`]):
+            [Mistral3ForConditionalGeneration](https://huggingface.co/docs/transformers/en/model_doc/mistral3#transformers.Mistral3ForConditionalGeneration)
+        tokenizer (`AutoProcessor`):
             Tokenizer of class
-            [CLIPTokenizer](https://huggingface.co/docs/transformers/en/model_doc/clip#transformers.CLIPTokenizer).
-        tokenizer_2 (`T5TokenizerFast`):
-            Second Tokenizer of class
-            [T5TokenizerFast](https://huggingface.co/docs/transformers/en/model_doc/t5#transformers.T5TokenizerFast).
+            [PixtralProcessor](https://huggingface.co/docs/transformers/en/model_doc/pixtral#transformers.PixtralProcessor).
         use_habana (bool, defaults to `False`):
             Whether to use Gaudi (`True`) or CPU (`False`).
         use_hpu_graphs (bool, defaults to `False`):
@@ -247,16 +250,25 @@ class GaudiFlux2Pipeline(GaudiDiffusionPipeline, Flux2Pipeline):
         **kwargs,
     ):
         r"""
-        Adapted from https://github.com/huggingface/diffusers/blob/main/src/diffusers/pipelines/flux/pipeline_flux.py#L531
+        Adapted from https://github.com/huggingface/diffusers/blob/v0.36.0/src/diffusers/pipelines/flux2/pipeline_flux2.py#L745
         Function invoked when calling the pipeline for generation.
 
         Args:
+            image (`torch.Tensor`, `PIL.Image.Image`, `np.ndarray`, `List[torch.Tensor]`, `List[PIL.Image.Image]`, or `List[np.ndarray]`):
+                `Image`, numpy array or tensor representing an image batch to be used as the starting point. For both
+                numpy array and pytorch tensor, the expected value range is between `[0, 1]` If it's a tensor or a list
+                or tensors, the expected shape should be `(B, C, H, W)` or `(C, H, W)`. If it is a numpy array or a
+                list of arrays, the expected shape should be `(B, H, W, C)` or `(H, W, C)` It can also accept image
+                latents as `image`, but if passing latents directly it is not encoded again.
             prompt (`str` or `List[str]`, *optional*):
                 The prompt or prompts to guide the image generation. If not defined, one has to pass `prompt_embeds`.
                 instead.
-            prompt_2 (`str` or `List[str]`, *optional*):
-                The prompt or prompts to be sent to `tokenizer_2` and `text_encoder_2`. If not defined, `prompt` is
-                will be used instead
+            guidance_scale (`float`, *optional*, defaults to 1.0):
+                Embedded guiddance scale is enabled by setting `guidance_scale` > 1. Higher `guidance_scale` encourages
+                a model to generate images more aligned with `prompt` at the expense of lower image quality.
+
+                Guidance-distilled models approximates true classifer-free guidance for `guidance_scale` > 1. Refer to
+                the [paper](https://huggingface.co/papers/2210.03142) to learn more.
             height (`int`, *optional*, defaults to self.unet.config.sample_size * self.vae_scale_factor):
                 The height in pixels of the generated image. This is set to 1024 by default for the best results.
             width (`int`, *optional*, defaults to self.unet.config.sample_size * self.vae_scale_factor):
@@ -264,37 +276,28 @@ class GaudiFlux2Pipeline(GaudiDiffusionPipeline, Flux2Pipeline):
             num_inference_steps (`int`, *optional*, defaults to 50):
                 The number of denoising steps. More denoising steps usually lead to a higher quality image at the
                 expense of slower inference.
-            timesteps (`List[int]`, *optional*):
-                Custom timesteps to use for the denoising process with schedulers which support a `timesteps` argument
-                in their `set_timesteps` method. If not defined, the default behavior when `num_inference_steps` is
-                passed will be used. Must be in descending order.
-            guidance_scale (`float`, *optional*, defaults to 7.0):
-                Guidance scale as defined in [Classifier-Free Diffusion Guidance](https://arxiv.org/abs/2207.12598).
-                `guidance_scale` is defined as `w` of equation 2. of [Imagen
-                Paper](https://arxiv.org/pdf/2205.11487.pdf). Guidance scale is enabled by setting `guidance_scale >
-                1`. Higher guidance scale encourages to generate images that are closely linked to the text `prompt`,
-                usually at the expense of lower image quality.
+            sigmas (`List[float]`, *optional*):
+                Custom sigmas to use for the denoising process with schedulers which support a `sigmas` argument in
+                their `set_timesteps` method. If not defined, the default behavior when `num_inference_steps` is passed
+                will be used.
             num_images_per_prompt (`int`, *optional*, defaults to 1):
                 The number of images to generate per prompt.
             generator (`torch.Generator` or `List[torch.Generator]`, *optional*):
                 One or a list of [torch generator(s)](https://pytorch.org/docs/stable/generated/torch.Generator.html)
                 to make generation deterministic.
-            latents (`torch.FloatTensor`, *optional*):
+            latents (`torch.Tensor`, *optional*):
                 Pre-generated noisy latents, sampled from a Gaussian distribution, to be used as inputs for image
                 generation. Can be used to tweak the same generation with different prompts. If not provided, a latents
-                tensor will ge generated by sampling using the supplied random `generator`.
-            prompt_embeds (`torch.FloatTensor`, *optional*):
+                tensor will be generated by sampling using the supplied random `generator`.
+            prompt_embeds (`torch.Tensor`, *optional*):
                 Pre-generated text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt weighting. If not
                 provided, text embeddings will be generated from `prompt` input argument.
-            pooled_prompt_embeds (`torch.FloatTensor`, *optional*):
-                Pre-generated pooled text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt weighting.
-                If not provided, pooled text embeddings will be generated from `prompt` input argument.
             output_type (`str`, *optional*, defaults to `"pil"`):
                 The output format of the generate image. Choose between
                 [PIL](https://pillow.readthedocs.io/en/stable/): `PIL.Image.Image` or `np.array`.
             return_dict (`bool`, *optional*, defaults to `True`):
-                Whether or not to return a [`~pipelines.flux.FluxPipelineOutput`] instead of a plain tuple.
-            joint_attention_kwargs (`dict`, *optional*):
+                Whether or not to return a [`~pipelines.qwenimage.QwenImagePipelineOutput`] instead of a plain tuple.
+            attention_kwargs (`dict`, *optional*):
                 A kwargs dictionary that if specified is passed along to the `AttentionProcessor` as defined under
                 `self.processor` in
                 [diffusers.models.attention_processor](https://github.com/huggingface/diffusers/blob/main/src/diffusers/models/attention_processor.py).
@@ -308,6 +311,15 @@ class GaudiFlux2Pipeline(GaudiDiffusionPipeline, Flux2Pipeline):
                 will be passed as `callback_kwargs` argument. You will only be able to include variables listed in the
                 `._callback_tensor_inputs` attribute of your pipeline class.
             max_sequence_length (`int` defaults to 512): Maximum sequence length to use with the `prompt`.
+            text_encoder_out_layers (`Tuple[int]`):
+                Layer indices to use in the `text_encoder` to derive the final prompt embeddings.
+            caption_upsample_temperature (`float`):
+                When specified, we will try to perform caption upsampling for potentially improved outputs. We
+                recommend setting it to 0.15 if caption upsampling is to be performed.
+            timesteps (`List[int]`, *optional*):
+                Custom timesteps to use for the denoising process with schedulers which support a `timesteps` argument
+                in their `set_timesteps` method. If not defined, the default behavior when `num_inference_steps` is
+                passed will be used. Must be in descending order.
             profiling_warmup_steps (`int`, *optional*):
                 Number of steps to ignore for profling.
             profiling_steps (`int`, *optional*):
@@ -316,9 +328,9 @@ class GaudiFlux2Pipeline(GaudiDiffusionPipeline, Flux2Pipeline):
         Examples:
 
         Returns:
-            [`~pipelines.flux.FluxPipelineOutput`] or `tuple`: [`~pipelines.flux.FluxPipelineOutput`] if `return_dict`
-            is True, otherwise a `tuple`. When returning a tuple, the first element is a list with the generated
-            images.
+            [`~pipelines.flux2.Flux2PipelineOutput`] or `tuple`: [`~pipelines.flux2.Flux2PipelineOutput`] if
+            `return_dict` is True, otherwise a `tuple`. When returning a tuple, the first element is a list with the
+            generated images.
         """
         import habana_frameworks.torch as ht
         import habana_frameworks.torch.core as htcore
@@ -586,6 +598,7 @@ class GaudiFlux2Pipeline(GaudiDiffusionPipeline, Flux2Pipeline):
                 image = latents_batch
             else:
                 latents_batch = self._unpack_latents_with_ids(latents_batch, latent_ids)
+                
                 latents_bn_mean = self.vae.bn.running_mean.view(1, -1, 1, 1).to(latents_batch.device, latents_batch.dtype)
                 latents_bn_std = torch.sqrt(self.vae.bn.running_var.view(1, -1, 1, 1) + self.vae.config.batch_norm_eps).to(
                     latents_batch.device, latents_batch.dtype
@@ -624,7 +637,7 @@ class GaudiFlux2Pipeline(GaudiDiffusionPipeline, Flux2Pipeline):
         )
         logger.info(f"Speed metrics: {speed_measures}")
 
-        # 8 Output Images
+        # 8. Output Images
         if num_dummy_samples > 0:
             # Remove dummy generations if needed
             outputs["images"][-1] = outputs["images"][-1][:-num_dummy_samples]
