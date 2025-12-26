@@ -489,8 +489,9 @@ def usp_attn_forward_multitalk(self, x, seq_lens, grid_sizes, freqs, dtype=torch
     x = x.flatten(2)
     x = self.o(x)
 
-    x_ref_attn_map = None
-
+    with torch.no_grad():
+        x_ref_attn_map = get_attn_map_with_target(q.type_as(x), k.type_as(x), grid_sizes[0],
+                                                  ref_target_masks=ref_target_masks) # k is full
     return x, x_ref_attn_map
 
 
@@ -502,7 +503,6 @@ def sp_crossattn_multi_forward(
     x_ref_attn_map=None,
     human_num=None,
 ) -> torch.Tensor:
-    assert human_num == 1, "sp_crossattn_multi_forward only supports human_num == 1"
     sp_size = get_sequence_parallel_world_size()
     sp_rank = get_sequence_parallel_rank()
     encoder_hidden_states = encoder_hidden_states.squeeze(0) # [N_t, N_a, C]
@@ -512,12 +512,34 @@ def sp_crossattn_multi_forward(
 
     B, N, C = x.shape
     q_shape = (B, N, self.num_heads, self.head_dim)  # [B, N_t*N_h*N_w/sp_size, H, D]
-    q = q.reshape(q_shape)
-    q = get_sp_group().all_to_all(q, scatter_dim=2, gather_dim=1)  # [B, N_t*N_h*N_w, H/sp_size, D]
-    q = rearrange(q, "B (N_t S) H D -> (B N_t) S H D", N_t=N_t)
+    q = q.reshape(q_shape).permute((0, 2, 1, 3))  # [B, H, N_t*N_h*N_w/sp_size, D]
 
     if self.qk_norm:
         q = self.q_norm(q)
+
+    if human_num > 1:
+        max_values = x_ref_attn_map.max(1).values[:, None, None]
+        min_values = x_ref_attn_map.min(1).values[:, None, None]
+        max_min_values = torch.cat([max_values, min_values], dim=2)
+        max_min_values = get_sp_group().all_gather(max_min_values, dim=1)
+
+        human1_max_value, human1_min_value = max_min_values[0, :, 0].max(), max_min_values[0, :, 1].min()
+        human2_max_value, human2_min_value = max_min_values[1, :, 0].max(), max_min_values[1, :, 1].min()
+
+        human1 = normalize_and_scale(
+            x_ref_attn_map[0], (human1_min_value, human1_max_value), (self.rope_h1[0], self.rope_h1[1])
+        )
+        human2 = normalize_and_scale(
+            x_ref_attn_map[1], (human2_min_value, human2_max_value), (self.rope_h2[0], self.rope_h2[1])
+        )
+        back = torch.full((x_ref_attn_map.size(1),), self.rope_bak, dtype=human1.dtype).to(human1.device)
+        max_indices = x_ref_attn_map.argmax(dim=0)
+        normalized_map = torch.stack([human1, human2, back], dim=1)
+        normalized_pos = normalized_map[range(x_ref_attn_map.size(1)), max_indices]  # N
+        q = self.rope_1d(q, normalized_pos)
+
+    q = get_sp_group().all_to_all(q, scatter_dim=1, gather_dim=2)  # [B, H/sp_size, N_t*N_h*N_w, D]
+    q = rearrange(q, "B H (N_t S) D -> (B N_t) H S D", N_t=N_t)
 
     # get kv from encoder_hidden_states
     _, N_a, _ = encoder_hidden_states.shape # N_a = audio_tokens_per_frame(32) * human_num
@@ -533,14 +555,24 @@ def sp_crossattn_multi_forward(
     )
 
     encoder_kv_shape = (N_t, N_a, self.num_heads // sp_size, self.head_dim)
-    encoder_k = encoder_k.reshape(encoder_kv_shape)
-    encoder_v = encoder_v.reshape(encoder_kv_shape)
+    encoder_k = encoder_k.reshape(encoder_kv_shape).permute(0, 2, 1, 3)  # [N_t, H/sp_size, N_a, D]
+    encoder_v = encoder_v.reshape(encoder_kv_shape).permute(0, 2, 1, 3)  # [N_t, H/sp_size, N_a, D]
 
     if self.qk_norm:
         encoder_k = self.add_k_norm(encoder_k)
 
+    if human_num > 1:
+        # position embedding for condition audio embeddings
+        audio_tokens_per_frame = 32
+        per_frame = torch.zeros(audio_tokens_per_frame * human_num, dtype=encoder_k.dtype).to(encoder_k.device)
+        per_frame[:audio_tokens_per_frame] = (self.rope_h1[0] + self.rope_h1[1]) / 2
+        per_frame[audio_tokens_per_frame:] = (self.rope_h2[0] + self.rope_h2[1]) / 2
+        encoder_pos = per_frame # [N_a]
+        encoder_k = self.rope_1d(encoder_k, encoder_pos)
+
     # compute attention
-    x = self.fav3.forward(q, encoder_k, encoder_v, layout_head_first=False) # [B, N, H/sp_size, D]
+    x = self.fav3.forward(q, encoder_k, encoder_v, fsdpa_mode="None", layout_head_first=True)
+    x = x.permute(0, 2, 1, 3)  # [N_t, N_h*N_w, H/sp_size, D]
     htcore.mark_step()
     # reshape x for all_to_all
     x = x.reshape((B, -1, self.num_heads // sp_size, self.head_dim)) # [B, N_t*N_h*N_w, H/sp_size, D]

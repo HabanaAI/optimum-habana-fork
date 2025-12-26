@@ -100,7 +100,6 @@ def normalize_and_scale(column, source_range, target_range, epsilon=1e-8):
     return scaled
 
 
-@torch.compile
 def calculate_x_ref_attn_map(visual_q, ref_k, ref_target_masks, mode="mean", attn_bias=None):
     ref_k = ref_k.to(visual_q.dtype).to(visual_q.device)
     scale = 1.0 / visual_q.shape[-1] ** 0.5
@@ -141,6 +140,7 @@ def calculate_x_ref_attn_map(visual_q, ref_k, ref_target_masks, mode="mean", att
     return torch.concat(x_ref_attn_maps, dim=0)
 
 
+@torch.compiler.disable
 def get_attn_map_with_target(visual_q, ref_k, shape, ref_target_masks=None, split_num=2, enable_sp=False):
     """Args:
     query (torch.tensor): B M H K

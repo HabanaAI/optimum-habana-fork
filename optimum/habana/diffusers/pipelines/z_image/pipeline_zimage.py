@@ -367,6 +367,7 @@ class GaudiStableDiffusionZImagePipeline(GaudiDiffusionPipeline, ZImagePipeline)
         num_inference_steps: int = 50,
         sigmas: Optional[List[float]] = None,
         guidance_scale: float = 5.0,
+        true_cfg_scale: float = 0.0,
         cfg_normalization: bool = False,
         cfg_truncation: float = 1.0,
         negative_prompt: Optional[Union[str, List[str]]] = None,

@@ -272,8 +272,9 @@ class WanSelfAttention(nn.Module):
         x = x.flatten(2)
         x = self.o(x)
 
-        x_ref_attn_map = None
-
+        with torch.no_grad():
+            x_ref_attn_map = get_attn_map_with_target(q.type_as(x), k.type_as(x), grid_sizes[0],
+                                                      ref_target_masks=ref_target_masks)
         return x, x_ref_attn_map
 
 
@@ -349,7 +350,7 @@ class WanAttentionBlock(nn.Module):
         self.ffn = nn.Sequential(nn.Linear(dim, ffn_dim), nn.GELU(approximate="tanh"), nn.Linear(ffn_dim, dim))
 
         # modulation
-        self.modulation = nn.Parameter(torch.randn(1, 6, dim) / dim**0.5)
+        self.modulation = nn.Parameter(torch.randn(1, 6, dim, device="cpu") / dim**0.5) # fallback for acc
 
         # init audio module
         self.audio_cross_attn = SingleStreamMutiAttention(
@@ -405,7 +406,7 @@ class WanAttentionBlock(nn.Module):
             self.norm_x(x),
             encoder_hidden_states=audio_embedding,
             shape=grid_sizes[0],
-            x_ref_attn_map=None,
+            x_ref_attn_map=x_ref_attn_map,
             human_num=human_num,
         )
         x = x + x_a
@@ -433,7 +434,7 @@ class Head(nn.Module):
         self.head = nn.Linear(dim, out_dim)
 
         # modulation
-        self.modulation = nn.Parameter(torch.randn(1, 2, dim) / dim**0.5)
+        self.modulation = nn.Parameter(torch.randn(1, 2, dim, device="cpu") / dim**0.5) # fallback for acc
 
     def forward(self, x, e):
         r"""
@@ -932,21 +933,22 @@ class WanModel(ModelMixin, ConfigMixin):
         Initialize model parameters using Xavier initialization.
         """
 
+        seed_g = torch.Generator(device="cpu") # fallback for acc
         # basic init
         for m in self.modules():
             if isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight)
+                nn.init.xavier_uniform_(m.weight, generator=seed_g)
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
 
         # init embeddings
-        nn.init.xavier_uniform_(self.patch_embedding.weight.flatten(1))
+        nn.init.xavier_uniform_(self.patch_embedding.weight.flatten(1), generator=seed_g)
         for m in self.text_embedding.modules():
             if isinstance(m, nn.Linear):
-                nn.init.normal_(m.weight, std=0.02)
+                nn.init.normal_(m.weight, std=0.02, generator=seed_g)
         for m in self.time_embedding.modules():
             if isinstance(m, nn.Linear):
-                nn.init.normal_(m.weight, std=0.02)
+                nn.init.normal_(m.weight, std=0.02, generator=seed_g)
 
         # init output layer
         nn.init.zeros_(self.head.head.weight)

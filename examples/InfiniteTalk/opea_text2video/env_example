@@ -1,0 +1,19 @@
+# Docker Compose 环境变量配置示例
+# 复制此文件为 .env 并根据实际情况修改
+
+# 模型文件路径（必需）
+HF_MODEL_PATH=/mnt/disk2/HF_models
+
+# 视频输出目录（可选，默认 ./video_output）
+VIDEO_OUTPUT_DIR=./video_output
+
+# 代理配置（可选）
+# http_proxy=http://your-proxy-address:port
+https_proxy=http://child-prc.intel.com:912
+# no_proxy=localhost,127.0.0.1,::1
+
+# Gaudi 卡数（可选，默认 4）
+NUM_CARDS=8
+
+# 服务端口 （可选，默认9396）
+WEB_PORT=9396

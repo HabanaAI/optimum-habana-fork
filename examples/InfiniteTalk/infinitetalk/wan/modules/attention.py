@@ -90,7 +90,7 @@ class FlashAttnV3Gaudi:
                     1 / math.sqrt(query.shape[-1]),
                     False,
                     True,
-                    "fast",
+                    fsdpa_mode,
                     None,  # vsl,
                     "left",
                 )
@@ -350,7 +350,7 @@ class SingleStreamAttention(nn.Module):
             encoder_k = self.add_k_norm(encoder_k)
 
         # attn computation
-        x = self.fav3.forward(q, encoder_k, encoder_v, layout_head_first=True)
+        x = self.fav3.forward(q, encoder_k, encoder_v, fsdpa_mode="None", layout_head_first=True)
         htcore.mark_step()
 
         # linear transform
@@ -460,7 +460,7 @@ class SingleStreamMutiAttention(SingleStreamAttention):
         encoder_k = self.rope_1d(encoder_k, encoder_pos)
         encoder_k = rearrange(encoder_k, "B H (N_t S) C -> (B N_t) H S C", N_t=N_t)
 
-        x = self.fav3.forward(q, encoder_k, encoder_v, layout_head_first=True)
+        x = self.fav3.forward(q, encoder_k, encoder_v, fsdpa_mode="None", layout_head_first=True)
         htcore.mark_step()
 
         # linear transform

@@ -168,7 +168,7 @@ class AttentionPool(nn.Module):
 
         # layers
         gain = 1.0 / math.sqrt(dim)
-        self.cls_embedding = nn.Parameter(gain * torch.randn(1, 1, dim))
+        self.cls_embedding = nn.Parameter(gain * torch.randn(1, 1, dim, device="cpu")) # fallback for acc
         self.to_q = nn.Linear(dim, dim)
         self.to_kv = nn.Linear(dim, dim * 2)
         self.proj = nn.Linear(dim, dim)
@@ -246,9 +246,9 @@ class VisionTransformer(nn.Module):
         gain = 1.0 / math.sqrt(dim)
         self.patch_embedding = nn.Conv2d(3, dim, kernel_size=patch_size, stride=patch_size, bias=not pre_norm)
         if pool_type in ("token", "token_fc"):
-            self.cls_embedding = nn.Parameter(gain * torch.randn(1, 1, dim))
+            self.cls_embedding = nn.Parameter(gain * torch.randn(1, 1, dim, device="cpu")) # fallback for acc
         self.pos_embedding = nn.Parameter(
-            gain * torch.randn(1, self.num_patches + (1 if pool_type in ("token", "token_fc") else 0), dim)
+            gain * torch.randn(1, self.num_patches + (1 if pool_type in ("token", "token_fc") else 0), dim, device="cpu") # fallback for acc
         )
         self.dropout = nn.Dropout(embedding_dropout)
 
@@ -266,7 +266,7 @@ class VisionTransformer(nn.Module):
 
         # head
         if pool_type == "token":
-            self.head = nn.Parameter(gain * torch.randn(dim, out_dim))
+            self.head = nn.Parameter(gain * torch.randn(dim, out_dim, device="cpu")) # fallback for acc
         elif pool_type == "token_fc":
             self.head = nn.Linear(dim, out_dim)
         elif pool_type == "attn_pool":

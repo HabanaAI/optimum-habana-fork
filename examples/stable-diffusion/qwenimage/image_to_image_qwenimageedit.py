@@ -8,7 +8,7 @@ import time
 import torch
 from PIL import Image
 
-from optimum.habana.diffusers import GaudiQwenImageEditPlusPipeline
+from optimum.habana.diffusers import GaudiQwenImageEditPipeline
 from optimum.habana.transformers.gaudi_configuration import GaudiConfig
 from optimum.habana.transformers.modeling_utils import adapt_transformers_to_gaudi
 
@@ -17,7 +17,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--model_name_or_path",
-        default="Qwen/Qwen-Image-Edit-2509",
+        default="Qwen/Qwen-Image-Edit",
         type=str,
         help="Path to pre-trained model",
     )
@@ -34,11 +34,10 @@ def main():
         help="The negative_prompt to guide the image generation.",
     )
     parser.add_argument(
-        "--images_path",
+        "--image_path",
         type=str,
-        nargs="*",
-        default="",
-        help="The image inputs to edit",
+        default=None,
+        help="The image input path to edit",
     )
     parser.add_argument(
         "--num_inference_steps",
@@ -58,20 +57,17 @@ def main():
     gaudi_config_kwargs["use_torch_autocast"] = True
     gaudi_config = GaudiConfig(**gaudi_config_kwargs)
 
-    pipeline = GaudiQwenImageEditPlusPipeline.from_pretrained(
+    pipeline = GaudiQwenImageEditPipeline.from_pretrained(
         args.model_name_or_path,
         torch_dtype=torch.bfloat16,
         use_habana=True,
         use_hpu_graphs=False,
         gaudi_config=gaudi_config,
     )
-
-    image_list = []
-    for path in args.images_path:
-        image_list.append(Image.open(path))
+    image = Image.open(args.image_path)
 
     inputs = {
-        "image": image_list,
+        "image": image,
         "prompt": args.prompt,
         "negative_prompt": args.negative_prompt,
         "generator": torch.manual_seed(0),
@@ -87,7 +83,7 @@ def main():
         output = pipeline(**inputs).images[0]
         t1 = time.time()
         print("Pipe time=", t1 - t0)
-        out_path = "result_qwenimage_edit_2509.png"
+        out_path = "result_qwenimage_edit.png"
         output.save(out_path)
         print("image saved at", out_path)
 

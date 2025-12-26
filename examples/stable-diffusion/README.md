@@ -578,8 +578,6 @@ PT_HPU_LAZY_MODE=1 python image_to_video_generation.py \
 ```
 ### Text-to-Image with Z-Image
 download Z-Image model from https://huggingface.co/Tongyi-MAI/Z-Image-Turbo
-install diffusers module:
-pip install git+https://github.com/huggingface/diffusers
 
 run Z-Image demo:
 ```
