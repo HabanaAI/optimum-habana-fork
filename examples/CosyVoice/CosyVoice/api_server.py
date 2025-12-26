@@ -201,7 +201,7 @@ def generate_thread():
     cosyvoice.model.flow = cosyvoice.model.flow.bfloat16().eval()#.to(device)
 
     #warmup
-    prompt_wav = "./asset/9_ZH.wav"
+    prompt_wav = "./asset/zero_shot_prompt.wav"
     tts_text = "If one knows how to be grateful and content with small things, then he is a happy person."
     prompt_text = "如果能对小事感到感激和满足，那他就是幸福的人。"
     prompt_speech_16k = postprocess(load_wav(prompt_wav, 16000), cosyvoice.sample_rate)
@@ -210,7 +210,7 @@ def generate_thread():
         continue
 
     # loop
-    print("start pthread")
+    print("=============Application Server Ready to Process Requests.===============")
     while True:
         target_task=None
         with lock:

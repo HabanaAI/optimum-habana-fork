@@ -32,6 +32,11 @@ OPEA Text-to-Video (文本到视频) 微服务，用于根据文本提示和音�
 export http_proxy="http://your-proxy-address:port"
 export https_proxy="http://your-proxy-address:port"
 
+# 克隆 optimum habana fork aice v1.22.0 分支
+git clone https://github.com/HabanaAI/optimum-habana-fork.git -b aice/v1.22.0
+# 进入 InfiniteTalk目录
+cd optimum-habana-fork/examples/InfiniteTalk/opea_text2video/
+
 # 执行构建命令
 docker build -t text2video-gaudi:latest \
   --build-arg https_proxy=$https_proxy \

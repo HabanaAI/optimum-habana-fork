@@ -1,0 +1,12 @@
+
+# Habana 设备配置,hl-smi 获取空闲卡id
+HABANA_VISIBLE_DEVICES=0
+
+# 主机路径配置
+MODELS_HOST_PATH=/mnt/disk4/hf_models
+DATA_HOST_PATH=/mnt/disk8
+
+# 端口配置
+HOST_PORT=8080
+
+

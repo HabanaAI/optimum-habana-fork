@@ -6,6 +6,7 @@ services:
     image: text2video-gaudi:latest
     container_name: video-gaudi-web-service
     restart: unless-stopped
+    privileged: true
 
     network_mode: host
     ports:
