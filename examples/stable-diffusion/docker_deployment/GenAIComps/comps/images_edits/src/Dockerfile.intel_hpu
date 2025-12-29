@@ -1,0 +1,40 @@
+# Copyright (C) 2024 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+
+# HABANA environment
+FROM vault.habana.ai/gaudi-docker/1.21.3/ubuntu22.04/habanalabs/pytorch-installer-2.6.0 AS hpu
+RUN useradd -m -s /bin/bash user && \
+    mkdir -p /home/user && \
+    chown -R user /home/user/
+
+COPY comps /home/user/comps
+
+RUN chown -R user /home/user/comps/images_edits
+
+RUN rm -rf /etc/ssh/ssh_host*
+
+# Set environment variables
+ENV LANG=en_US.UTF-8
+ENV PYTHONPATH=/home/user:/usr/lib/habanalabs/:/home/user/optimum-habana
+
+# Install requirements and optimum habana, numpy==1.23.5 required by vault.habana.ai/gaudi-docker/1.20.1/ubuntu22.04/habanalabs/pytorch-installer-2.6.0
+ARG uvpip='uv pip install --system --no-cache-dir'
+RUN pip install --no-cache-dir --upgrade pip setuptools uv && \
+    $uvpip -r /home/user/comps/images_edits/src/requirements-cpu.txt && \
+    $uvpip numpy==1.26.4 && \
+    $uvpip python-multipart && \
+    $uvpip 'git+https://github.com/HabanaAI/optimum-habana-fork.git@aice/v1.22.0'
+
+USER user
+WORKDIR /home/user/comps/images_edits/src
+
+RUN cat >> run.sh << 'EOF'
+mkdir -p /workspace/data/logs && \
+PT_HPU_LAZY_MODE=1 python3 opea_images_edits_microservice.py \
+  --device hpu \
+  --use_hpu_graphs \
+  --bf16 \
+  2>&1 | tee /workspace/data/logs/image_edits.log
+EOF
+
+CMD ["bash", "run.sh"]
