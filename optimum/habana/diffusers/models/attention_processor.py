@@ -117,7 +117,7 @@ class FlashAttnV3Gaudi:
         key_len = key.size(-2)
 
         # In the case of cross-attn, use FusedSDPA.
-        if (query_len * cp_size) != key_len or query_len <= 8192:
+        if (query_len * cp_size) != key_len or (query_len <= 8192 and key_len <= 8192):
             output = FusedSDPA.apply(query, key, value, attention_mask, 0.0, False, None, fsdpa_mode, None)
             return output.permute(0, 2, 1, 3).contiguous()
 

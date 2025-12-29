@@ -1,0 +1,11 @@
+{
+    "method": "HOOKS",
+    "mode": "QUANTIZE",
+    "scale_method": "MAXABS_HW",
+    "scale_format": "const",
+    "blocklist": {
+        "types": [],
+        "names":  ["proj_out", "embedder"]
+    },
+    "dump_stats_path": "quantization/wan_i2v_480p/measure/fp8"
+}

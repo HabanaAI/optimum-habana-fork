@@ -542,6 +542,19 @@ python ../gaudi_spawn.py --world_size 2 text_to_video_generation.py \
     --context_parallel_size 2
 ```
 
+### FP8 Image-to-Video with Wan 2.1/Wan2.2
+There are example scripts under quant_scripts folder to run static quantization of Wan2.1 I2V tasks for 480p and 720p;
+Note that it is recommended to set PT_HPU_SYNC_LAUNCH=1, which helps to reduce the memory consumption in some cases.
+
+First, run the calibration:
+```bash
+bash ./quant_script/i2v_480p_run.sh
+```
+Then, start the inference with the quantized model:
+```bash
+bash ./quant_script/i2v_480p_quant.sh
+```
+
 ### Text-to-Video with CogvideoX
 
 CogVideoX is an open-source version of the video generation model originating from QingYing, unveiled in https://huggingface.co/THUDM/CogVideoX-5b.
