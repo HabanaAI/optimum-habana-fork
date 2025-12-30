@@ -472,7 +472,7 @@ class GaudiFlux2Pipeline(GaudiDiffusionPipeline, Flux2Pipeline):
         self._num_timesteps = len(timesteps)
 
         # handle guidance
-        guidance = torch.full([1], guidance_scale, device=device, dtype=torch.float32)
+        guidance = torch.full([1], guidance_scale, device=device, dtype=torch.bfloat16)
         guidance = guidance.expand(latents.shape[0])
 
         logger.info(
@@ -520,7 +520,7 @@ class GaudiFlux2Pipeline(GaudiDiffusionPipeline, Flux2Pipeline):
                 ht.hpu.synchronize()
                 t1 = time.time()
 
-            latents_batch = latents_batches[0]
+            latents_batch = latents_batches[0].clone()  # avoid shallow copy
             latents_batches = torch.roll(latents_batches, shifts=-1, dims=0)
             image_latents_batch = None if image_latents_batches is None else image_latents_batches[0]
             image_latents_batches = None if image_latents_batches is None else torch.roll(image_latents_batches, shifts=-1, dims=0)
