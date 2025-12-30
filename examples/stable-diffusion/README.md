@@ -470,7 +470,6 @@ python image_to_video_generation.py \
     --video_save_dir ./wan2.2-output \
     --prompts "The cat removes the glasses from its eyes." \
     --use_habana \
-    --use_hpu_graphs \
     --height 1088 \
     --width 800 \
     --fps 24 \
@@ -511,7 +510,6 @@ python text_to_video_generation.py \
     --pipeline_type wan \
     --num_videos_per_prompt 1 \
     --use_habana \
-    --use_hpu_graphs \
     --height 704 \
     --width 1280 \
     --num_frames 121 \
@@ -553,6 +551,19 @@ bash ./quant_script/i2v_480p_run.sh
 Then, start the inference with the quantized model:
 ```bash
 bash ./quant_script/i2v_480p_quant.sh
+```
+
+### FP8 Text-to-Video with Wan 2.1/Wan2.2
+There are example scripts under quant_scripts folder to run static quantization of Wan2.2 T2V tasks for 720p;
+Note that it is recommended to set PT_HPU_SYNC_LAUNCH=1, which helps to reduce the memory consumption in some cases.
+
+First, run the calibration:
+```bash
+bash ./quant_script/t2v_run.sh
+```
+Then, start the inference with the quantized model:
+```bash
+bash ./quant_script/t2v_quant.sh
 ```
 
 ### Text-to-Video with CogvideoX
