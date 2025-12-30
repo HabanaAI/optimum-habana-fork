@@ -8,7 +8,7 @@ from optimum.habana.diffusers import GaudiQwenImageLayeredPipeline
 
 import habana_frameworks.torch as ht
 import habana_frameworks.torch.core as htcore
-#from optimum.habana.transformers.modeling_utils import adapt_transformers_to_gaudi
+from optimum.habana.transformers.modeling_utils import adapt_transformers_to_gaudi
 import habana_frameworks.torch.gpu_migration
 
 from optimum.habana.transformers.gaudi_configuration import GaudiConfig
@@ -56,7 +56,7 @@ def main():
     device = 'hpu'
     model_path = '/mnt/ceph1/libo/hf_models/Qwen-Image-Layered/'
     
-    pipeline = QwenImageLayeredPipelineGaudi.from_pretrained(model_path, **kwargs)
+    pipeline = GaudiQwenImageLayeredPipeline.from_pretrained(model_path, **kwargs)
     pipeline = pipeline.to(device, torch.bfloat16)
     pipeline.set_progress_bar_config(disable=None)
     
