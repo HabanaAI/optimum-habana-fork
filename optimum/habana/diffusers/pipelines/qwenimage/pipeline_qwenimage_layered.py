@@ -1,247 +1,54 @@
-import functools
+# Copyright 2025 Qwen-Image Team and The HuggingFace Team. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 import os
-import inspect
-import math
 import types
 from typing import Any, Callable, Dict, List, Optional, Union
 
+import habana_frameworks.torch.core as htcore
 import numpy as np
 import torch
-from transformers import Qwen2_5_VLForConditionalGeneration, Qwen2Tokenizer, Qwen2VLProcessor
-from transformers.integrations import sdpa_attention
+import torch.nn.functional as F
 
-from diffusers.image_processor import PipelineImageInput, VaeImageProcessor
-from diffusers.loaders import QwenImageLoraLoaderMixin
+from diffusers.image_processor import PipelineImageInput
 from diffusers.models import AutoencoderKLQwenImage, QwenImageTransformer2DModel
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
-from diffusers.utils import is_torch_xla_available, logging, replace_example_docstring
+from diffusers.utils import logging, replace_example_docstring
 from diffusers.utils.torch_utils import randn_tensor
-from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.pipelines.qwenimage import QwenImagePipelineOutput
+from diffusers.models.autoencoders.autoencoder_kl_qwenimage import QwenImageAttentionBlock
+from diffusers.pipelines.qwenimage.pipeline_qwenimage_layered import QwenImageLayeredPipeline,calculate_dimensions,retrieve_timesteps
 
-from diffusers.pipelines.qwenimage.pipeline_qwenimage_layered import QwenImageLayeredPipeline
-from diffusers.pipelines.qwenimage.pipeline_qwenimage_layered import calculate_dimensions,retrieve_timesteps
+from transformers import Qwen2_5_VLForConditionalGeneration, Qwen2Tokenizer, Qwen2VLProcessor
 
-
+from optimum.habana.transformers.models import GaudiQwen2_5_VLForConditionalGeneration
 from optimum.habana.diffusers.models.qwenimage_transformer import QwenImageTransformer2DModelGaudi,QwenImageTransformerBlockForwardGaudi
 from optimum.habana.diffusers.models.attention_processor import GaudiQwenDoubleStreamAttnProcessor2_0
-
 from optimum.habana.transformers.gaudi_configuration import GaudiConfig
 from optimum.habana.diffusers.pipelines.pipeline_utils import GaudiDiffusionPipeline
 
 from optimum.habana.diffusers.models.attention_processor import FlashAttnV3Gaudi
-import habana_frameworks.torch as ht
-import habana_frameworks.torch.core as htcore
-import habana_frameworks.torch.gpu_migration
-from habana_frameworks.torch.hpex.kernels import FusedSDPA
-from habana_frameworks.torch.hpex.kernels import RotaryPosEmbeddingMode, apply_rotary_pos_emb
-
-def sdpa_attention_forward_gaudi(
-    module: torch.nn.Module,
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    attention_mask: Optional[torch.Tensor],
-    dropout: float = 0.0,
-    scaling: Optional[float] = None,
-    is_causal: Optional[bool] = None,
-    **kwargs,
-) -> tuple[torch.Tensor, None]:
-    if kwargs.get("output_attentions", False) or kwargs.get("head_mask") is not None:
-        logger.warning_once(
-            "`sdpa` attention does not support `output_attentions=True` or `head_mask`."
-            " Please set your attention to `eager` if you want any of these features."
-        )
-    sdpa_kwargs = {}
-    if hasattr(module, "num_key_value_groups"):
-        if not use_gqa_in_sdpa(attention_mask, key):
-            key = repeat_kv(key, module.num_key_value_groups)
-            value = repeat_kv(value, module.num_key_value_groups)
-        else:
-            sdpa_kwargs = {"enable_gqa": True}
-
-    if attention_mask is not None and attention_mask.ndim == 4:
-        attention_mask = attention_mask[:, :, :, : key.shape[-2]]
-
-    # SDPA with memory-efficient backend is bugged with non-contiguous inputs and custom attn_mask for some torch versions
-    # Reference: https://github.com/pytorch/pytorch/issues/112577.
-    query = query.contiguous()
-    key = key.contiguous()
-    value = value.contiguous()
-
-    # We dispatch to SDPA's Flash Attention or Efficient kernels via this `is_causal` if statement instead of an inline conditional assignment
-    # in SDPA to support both torch.compile's dynamic shapes and full graph options. An inline conditional prevents dynamic shapes from compiling.
-    # Note that it is important to check first for the shape, otherwise compile will fail with `argument 'is_causal' must be bool, not SymBool`
-    if is_causal is None:
-        # The last condition is for encoder (decoder) models which specify this by passing their own `is_causal` flag
-        # This is mainly due to those models having mixed implementations for encoder, decoder, and encoder-decoder attns
-        is_causal = query.shape[2] > 1 and attention_mask is None and getattr(module, "is_causal", True)
-
-    # Shapes (e.g. query.shape[2]) are tensors during jit tracing, resulting in `is_causal` being a tensor.
-    # We convert it to a bool for the SDPA kernel that only accepts bools.
-    if torch.jit.is_tracing() and isinstance(is_causal, torch.Tensor):
-        is_causal = is_causal.item()
-
-    fsdpa_mode = 'fast'
-    attn_output = FusedSDPA.apply(
-        query,
-        key,
-        value,
-        attention_mask,
-        is_causal,
-        None,
-        fsdpa_mode,
-        None,
-    )
-
-    #attn_output = torch.nn.functional.scaled_dot_product_attention(
-    #    query,
-    #    key,
-    #    value,
-    #    attn_mask=attention_mask,
-    #    dropout_p=dropout,
-    #    scale=scaling,
-    #    is_causal=is_causal,
-    #    **sdpa_kwargs,
-    #)
-
-    attn_output = attn_output.transpose(1, 2).contiguous()
-
-    return attn_output, None
-
-setattr(sdpa_attention, "sdpa_attention_forward", sdpa_attention_forward_gaudi)
-
-class GaudiQwenEmbedRope(torch.nn.Module):
-    def __init__(self, theta: int, axes_dim: List[int], scale_rope=False):
-        super().__init__()
-        self.theta = theta
-        self.axes_dim = axes_dim
-        pos_index = torch.arange(4096)
-        neg_index = torch.arange(4096).flip(0) * -1 - 1
-
-        # Get cos/sin components for positive indices
-        pos_cos_0, pos_sin_0 = self.rope_params(pos_index, self.axes_dim[0], self.theta)
-        pos_cos_1, pos_sin_1 = self.rope_params(pos_index, self.axes_dim[1], self.theta)
-        pos_cos_2, pos_sin_2 = self.rope_params(pos_index, self.axes_dim[2], self.theta)
-
-        # Get cos/sin components for negative indices
-        neg_cos_0, neg_sin_0 = self.rope_params(neg_index, self.axes_dim[0], self.theta)
-        neg_cos_1, neg_sin_1 = self.rope_params(neg_index, self.axes_dim[1], self.theta)
-        neg_cos_2, neg_sin_2 = self.rope_params(neg_index, self.axes_dim[2], self.theta)
-
-        # Concatenate cos components
-        self.pos_freqs_cos = torch.cat([pos_cos_0, pos_cos_1, pos_cos_2], dim=1)
-        self.neg_freqs_cos = torch.cat([neg_cos_0, neg_cos_1, neg_cos_2], dim=1)
-
-        # Concatenate sin components
-        self.pos_freqs_sin = torch.cat([pos_sin_0, pos_sin_1, pos_sin_2], dim=1)
-        self.neg_freqs_sin = torch.cat([neg_sin_0, neg_sin_1, neg_sin_2], dim=1)
-
-        self.rope_cache = {}
-        self.scale_rope = scale_rope
-
-    def rope_params(self, index, dim, theta=10000):
-        """
-        Args:
-            index: [0, 1, 2, 3] 1D Tensor representing the position index of the token
-        """
-        assert dim % 2 == 0
-        freqs = torch.outer(index, 1.0 / torch.pow(theta, torch.arange(0, dim, 2).to(torch.float32).div(dim)))
-        cos_freqs = torch.cos(freqs)
-        sin_freqs = torch.sin(freqs)
-        return cos_freqs, sin_freqs
-
-    def forward(self, video_fhw, txt_seq_lens, device):
-        """
-        Args: video_fhw: [frame, height, width] a list of 3 integers representing the shape of the video Args:
-        txt_length: [bs] a list of 1 integers representing the length of the text
-        """
-        if self.pos_freqs_cos.device != device:
-            self.pos_freqs_cos = self.pos_freqs_cos.to(device)
-            self.neg_freqs_cos = self.neg_freqs_cos.to(device)
-            self.pos_freqs_sin = self.pos_freqs_sin.to(device)
-            self.neg_freqs_sin = self.neg_freqs_sin.to(device)
-
-        if isinstance(video_fhw, list):
-            video_fhw = video_fhw[0]
-        if not isinstance(video_fhw, list):
-            video_fhw = [video_fhw]
-
-        vid_freqs = []
-        max_vid_index = 0
-        for idx, fhw in enumerate(video_fhw):
-            frame, height, width = fhw
-            rope_key = f"{idx}_{height}_{width}"
-
-            if not torch.compiler.is_compiling():
-                if rope_key not in self.rope_cache:
-                    self.rope_cache[rope_key] = self._compute_video_freqs(frame, height, width, idx)
-                video_freq = self.rope_cache[rope_key]
-            else:
-                video_freq = self._compute_video_freqs(frame, height, width, idx)
-            video_freq_cos, video_freq_sin = video_freq
-            video_freq_cos = video_freq_cos.to(device)
-            video_freq_sin = video_freq_sin.to(device)
-            vid_freqs.append((video_freq_cos, video_freq_sin))
-
-            if self.scale_rope:
-                max_vid_index = max(height // 2, width // 2, max_vid_index)
-            else:
-                max_vid_index = max(height, width, max_vid_index)
-
-        max_len = max(txt_seq_lens)
-        txt_freqs_cos = self.pos_freqs_cos[max_vid_index : max_vid_index + max_len, ...]
-        txt_freqs_sin = self.pos_freqs_sin[max_vid_index : max_vid_index + max_len, ...]
-
-        # Concatenate video frequencies
-        vid_freqs_cos = torch.cat([vf[0] for vf in vid_freqs], dim=0)
-        vid_freqs_sin = torch.cat([vf[1] for vf in vid_freqs], dim=0)
-
-        return (vid_freqs_cos, vid_freqs_sin), (txt_freqs_cos, txt_freqs_sin)
-
-    @functools.lru_cache(maxsize=None)
-    def _compute_video_freqs(self, frame, height, width, idx=0):
-        seq_lens = frame * height * width
-        freqs_pos_cos = self.pos_freqs_cos.split([x // 2 for x in self.axes_dim], dim=1)
-        freqs_neg_cos = self.neg_freqs_cos.split([x // 2 for x in self.axes_dim], dim=1)
-        freqs_pos_sin = self.pos_freqs_sin.split([x // 2 for x in self.axes_dim], dim=1)
-        freqs_neg_sin = self.neg_freqs_sin.split([x // 2 for x in self.axes_dim], dim=1)
-
-        freqs_frame_cos = freqs_pos_cos[0][idx : idx + frame].view(frame, 1, 1, -1).expand(frame, height, width, -1)
-        freqs_frame_sin = freqs_pos_sin[0][idx : idx + frame].view(frame, 1, 1, -1).expand(frame, height, width, -1)
-
-        if self.scale_rope:
-            freqs_height_cos = torch.cat(
-                [freqs_neg_cos[1][-(height - height // 2) :], freqs_pos_cos[1][: height // 2]], dim=0
-            )
-            freqs_height_cos = freqs_height_cos.view(1, height, 1, -1).expand(frame, height, width, -1)
-            freqs_width_cos = torch.cat(
-                [freqs_neg_cos[2][-(width - width // 2) :], freqs_pos_cos[2][: width // 2]], dim=0
-            )
-            freqs_width_cos = freqs_width_cos.view(1, 1, width, -1).expand(frame, height, width, -1)
-
-            freqs_height_sin = torch.cat(
-                [freqs_neg_sin[1][-(height - height // 2) :], freqs_pos_sin[1][: height // 2]], dim=0
-            )
-            freqs_height_sin = freqs_height_sin.view(1, height, 1, -1).expand(frame, height, width, -1)
-            freqs_width_sin = torch.cat(
-                [freqs_neg_sin[2][-(width - width // 2) :], freqs_pos_sin[2][: width // 2]], dim=0
-            )
-            freqs_width_sin = freqs_width_sin.view(1, 1, width, -1).expand(frame, height, width, -1)
-        else:
-            freqs_height_cos = freqs_pos_cos[1][:height].view(1, height, 1, -1).expand(frame, height, width, -1)
-            freqs_width_cos = freqs_pos_cos[2][:width].view(1, 1, width, -1).expand(frame, height, width, -1)
-            freqs_height_sin = freqs_pos_sin[1][:height].view(1, height, 1, -1).expand(frame, height, width, -1)
-            freqs_width_sin = freqs_pos_sin[2][:width].view(1, 1, width, -1).expand(frame, height, width, -1)
-
-        freqs_cos = torch.cat([freqs_frame_cos, freqs_height_cos, freqs_width_cos], dim=-1).reshape(seq_lens, -1)
-        freqs_sin = torch.cat([freqs_frame_sin, freqs_height_sin, freqs_width_sin], dim=-1).reshape(seq_lens, -1)
-
-        return freqs_cos.clone().contiguous(), freqs_sin.clone().contiguous()
+from optimum.habana.diffusers.models.autoencoders.autoencoder_kl_qwenimage import (
+    QwenImageAttentionBlockForwardGaudi,
+    QwenImageDecoder3dForwardGaudi,
+    QwenImageEncoder3dForwardGaudi,
+)
+from optimum.habana.diffusers.pipelines.qwenimage.pipeline_qwenimage import GaudiQwenEmbedRope
 
 
+logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
-class GaudiQwenImageLayeredPipeline(QwenImageLayeredPipeline, GaudiDiffusionPipeline):
+class GaudiQwenImageLayeredPipeline(GaudiDiffusionPipeline, QwenImageLayeredPipeline):
     def __init__(
         self,
         scheduler: FlowMatchEulerDiscreteScheduler,
@@ -257,14 +64,21 @@ class GaudiQwenImageLayeredPipeline(QwenImageLayeredPipeline, GaudiDiffusionPipe
         sdp_on_bf16: bool = False,
         is_training: bool = False,
     ):
-        #GaudiDiffusionPipeline.__init__(
-        #    self,
-        #    use_habana,
-        #    use_hpu_graphs,
-        #    gaudi_config,
-        #    bf16_full_eval,
-        #    sdp_on_bf16,
-        #)
+        if use_hpu_graphs:
+            logger.warning(
+                "WARNING:!!!GaudiQwenImageLayeredPipeline HPU graph mode may have OOM problem when image size changes. Please set use_hpu_graphs=False!!!"
+            )
+
+        os.environ["QWEN25VL_FP32_SOFTMAX"] = "True"
+
+        GaudiDiffusionPipeline.__init__(
+            self,
+            use_habana,
+            use_hpu_graphs,
+            gaudi_config,
+            bf16_full_eval,
+            sdp_on_bf16,
+        )
         QwenImageLayeredPipeline.__init__(
             self,
             scheduler,
@@ -274,17 +88,44 @@ class GaudiQwenImageLayeredPipeline(QwenImageLayeredPipeline, GaudiDiffusionPipe
             processor,
             transformer,
         )
-        #self.transformer.forward = QwenImageTransformer2DModelGaudi
+
         self.transformer.forward = types.MethodType(QwenImageTransformer2DModelGaudi, self.transformer)
         for block in self.transformer.transformer_blocks:
             block.forward = types.MethodType(QwenImageTransformerBlockForwardGaudi, block)
             block.attn.processor = GaudiQwenDoubleStreamAttnProcessor2_0(is_training)
+        self.vae.decoder.forward = types.MethodType(QwenImageDecoder3dForwardGaudi, self.vae.decoder)
+        self.vae.encoder.forward = types.MethodType(QwenImageEncoder3dForwardGaudi, self.vae.encoder)
+
+        for attn in self.vae.decoder.mid_block.attentions:
+            attn.forwward = types.MethodType(QwenImageAttentionBlockForwardGaudi, attn)
+
+        for attn in self.vae.encoder.mid_block.attentions:
+            attn.forwward = types.MethodType(QwenImageAttentionBlockForwardGaudi, attn)
+
+        for layer in self.vae.encoder.down_blocks:
+            if isinstance(layer, QwenImageAttentionBlock):
+                layer.forwward = types.MethodType(QwenImageAttentionBlockForwardGaudi, layer)
 
         config = self.transformer.config
         self.transformer.pos_embed = GaudiQwenEmbedRope(
             theta=10000, axes_dim=list(config["axes_dims_rope"]), scale_rope=True
         )
 
+        self.vae_decode_latents_buckets = [128,160,188]
+        envvar = os.environ.get("QWENIMAGELAYERED_VAE_DECODE_BUCKETS", "")
+        if envvar != "":
+            self.vae_decode_latents_buckets = [int(i) for i in envvar.split(',')]
+        logger.info(
+                f"vae_decode_latents_buckets is {self.vae_decode_latents_buckets}."
+            )
+
+        self.vae_encode_buckets = [1024,1280,1504]
+        envvar = os.environ.get("QWENIMAGELAYERED_VAE_ENCODE_BUCKETS", "")
+        if envvar != "":
+            self.vae_encode_buckets = [int(i) for i in envvar.split(',')]
+        logger.info(
+                f"vae_encode_buckets is {self.vae_encode_buckets}."
+            )
 
         hidden_states_buckets_step = int(os.environ.get("QWENIMAGE_TRANSFORMER_BUCKETS_STEP", 256))
         encoder_hidden_states_buckets_step = int(os.environ.get("QWENIMAGE_TRANSFORMER_ENCODER_BUCKETS_STEP", 128))
@@ -301,7 +142,6 @@ class GaudiQwenImageLayeredPipeline(QwenImageLayeredPipeline, GaudiDiffusionPipe
         # use bucket in transformer to reduce recompile
         self.transformer.hidden_states_buckets_step = hidden_states_buckets_step
         self.transformer.encoder_hidden_states_buckets_step = encoder_hidden_states_buckets_step
-
 
         #self.to(self._device)
 

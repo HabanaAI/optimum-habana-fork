@@ -3,12 +3,12 @@ import random
 import numpy as np
 import time as tm_perf
 
-#from pipeline_qwen_image_layered import QwenImageLayeredPipelineGaudi
+from optimum.habana.transformers.modeling_utils import adapt_transformers_to_gaudi
+adapt_transformers_to_gaudi()
 from optimum.habana.diffusers import GaudiQwenImageLayeredPipeline
 
 import habana_frameworks.torch as ht
 import habana_frameworks.torch.core as htcore
-from optimum.habana.transformers.modeling_utils import adapt_transformers_to_gaudi
 import habana_frameworks.torch.gpu_migration
 
 from optimum.habana.transformers.gaudi_configuration import GaudiConfig
