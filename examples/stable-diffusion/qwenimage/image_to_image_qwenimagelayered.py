@@ -51,6 +51,7 @@ def main():
         "use_hpu_graphs": False,
         "gaudi_config": gaudi_config,
     }
+    timeBox = time_box_t()
 
 
     device = 'hpu'
@@ -75,14 +76,26 @@ def main():
     }
     
     with torch.inference_mode():
-        output = pipeline(**inputs)
+        timeBox.start()
+        warmup = 3
+        for i in range(warmup):
+            output = pipeline(**inputs)
+        timeBox.show_time(f'warmup')
+
+        test_cnt = 5
+        t0 = tm_perf.perf_counter()
+        for i in range(test_cnt):
+            output = pipeline(**inputs)
+        torch.hpu.synchronize()
+
+        dur = tm_perf.perf_counter() - t0
+        dur = dur / test_cnt
+        print(f'pipeline duration:{dur:.3f}s')
         output_image = output.images[0]
     
     for i, image in enumerate(output_image):
         image.save(f"{i}.png")
 
 
-
 if "__main__" == __name__:
     main()
-
