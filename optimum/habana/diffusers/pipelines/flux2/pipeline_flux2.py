@@ -162,7 +162,7 @@ class GaudiFlux2Pipeline(GaudiDiffusionPipeline, Flux2Pipeline):
         if use_hpu_graphs:
             from habana_frameworks.torch.hpu import wrap_in_hpu_graph
 
-            transformer = wrap_in_hpu_graph(transformer)
+            self.transformer = wrap_in_hpu_graph(self.transformer)
 
     @classmethod
     def _split_inputs_into_batches(cls, batch_size, latents, image_latents, prompt_embeds, guidance):
