@@ -27,12 +27,10 @@ from diffusers.utils import logging, replace_example_docstring
 from diffusers.utils.torch_utils import randn_tensor
 from diffusers.pipelines.qwenimage import QwenImagePipelineOutput
 from diffusers.models.autoencoders.autoencoder_kl_qwenimage import QwenImageAttentionBlock
-from diffusers.pipelines.qwenimage.pipeline_qwenimage_layered import QwenImageLayeredPipeline,calculate_dimensions,retrieve_timesteps
-
+from diffusers.pipelines.qwenimage.pipeline_qwenimage_layered import QwenImageLayeredPipeline, calculate_dimensions, retrieve_timesteps
 from transformers import Qwen2_5_VLForConditionalGeneration, Qwen2Tokenizer, Qwen2VLProcessor
 
-from optimum.habana.transformers.models import GaudiQwen2_5_VLForConditionalGeneration
-from optimum.habana.diffusers.models.qwenimage_transformer import QwenImageTransformer2DModelGaudi,QwenImageTransformerBlockForwardGaudi
+from optimum.habana.diffusers.models.qwenimage_transformer import QwenImageTransformer2DModelGaudi, QwenImageTransformerBlockForwardGaudi
 from optimum.habana.diffusers.models.attention_processor import GaudiQwenDoubleStreamAttnProcessor2_0
 from optimum.habana.transformers.gaudi_configuration import GaudiConfig
 from optimum.habana.diffusers.pipelines.pipeline_utils import GaudiDiffusionPipeline
@@ -65,10 +63,7 @@ class GaudiQwenImageLayeredPipeline(GaudiDiffusionPipeline, QwenImageLayeredPipe
         is_training: bool = False,
     ):
         if use_hpu_graphs:
-            logger.warning(
-                "WARNING:!!!GaudiQwenImageLayeredPipeline HPU graph mode may have OOM problem when image size changes. Please set use_hpu_graphs=False!!!"
-            )
-
+            use_hpu_graphs = False
         os.environ["QWEN25VL_FP32_SOFTMAX"] = "True"
 
         GaudiDiffusionPipeline.__init__(
@@ -142,8 +137,6 @@ class GaudiQwenImageLayeredPipeline(GaudiDiffusionPipeline, QwenImageLayeredPipe
         # use bucket in transformer to reduce recompile
         self.transformer.hidden_states_buckets_step = hidden_states_buckets_step
         self.transformer.encoder_hidden_states_buckets_step = encoder_hidden_states_buckets_step
-
-        #self.to(self._device)
 
     def _get_qwen_prompt_embeds(
         self,

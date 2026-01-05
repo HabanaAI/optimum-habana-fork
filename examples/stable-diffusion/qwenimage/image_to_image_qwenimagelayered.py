@@ -77,12 +77,12 @@ def main():
     
     with torch.inference_mode():
         timeBox.start()
-        warmup = 3
+        warmup = 0
         for i in range(warmup):
             output = pipeline(**inputs)
         timeBox.show_time(f'warmup')
 
-        test_cnt = 5
+        test_cnt = 1
         t0 = tm_perf.perf_counter()
         for i in range(test_cnt):
             output = pipeline(**inputs)
