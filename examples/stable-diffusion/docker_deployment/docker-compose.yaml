@@ -1,0 +1,99 @@
+services:
+  images-edits-qwen-image-edit-api-server:
+    build:
+      context: GenAIComps
+      dockerfile: comps/images_edits/src/Dockerfile.intel_hpu
+      args:
+        # Proxy settings from the build script with defaults
+        https_proxy: ${https_proxy:-http://child-intel.intel.com:912}
+    image: opea/images-edits-qwen-image-edit-api-server:hpu
+    container_name: demo-images-edits-qwen-image-edit-api-server
+    runtime: habana
+    tty: true
+    stdin_open: true
+    environment:
+      - HABANA_VISIBLE_DEVICES=${HABANA_QWEN_IMAGE_DEVICE:-0}
+      - OMPI_MCA_btl_vader_single_copy_mechanism=none
+      - PYTHONPATH=/home/user:/usr/lib/habanalabs/:/home/user/optimum-habana
+      - PT_HPU_LAZY_MODE=1
+      - HF_ENDPOINT=https://hf-mirror.com
+      - QWEN25VL_FP32_SOFTMAX=True
+      # Proxy settings with defaults
+      - https_proxy=${https_proxy:-}
+      - no_proxy=${no_proxy:-}
+    cap_add:
+      - SYS_NICE
+    ports:
+      - ${PORT_QWEN_EDIT:-9390}:9390
+    volumes:
+      - ${HOST_MODEL_DIR:-/mnt/disk7/demo}:/workspace/data  # Mount model directory
+    working_dir: /home/user/comps/images_edits/src
+    command: ["python3", "opea_images_edits_microservice.py", "--device", "hpu", "--bf16", "--model_name_or_path", "/workspace/data/Qwen-Image-Edit-2509"]
+    restart: unless-stopped
+
+  images-generations-qwen-image-api-server:
+    build:
+      context: GenAIComps
+      dockerfile: comps/images_generations/src/Dockerfile.intel_hpu
+      args:
+        # Proxy settings from the build script with defaults
+        https_proxy: ${https_proxy:-}
+        no_proxy: ${no_proxy:-}
+    image: opea/images-generations-qwen-image-api-server:hpu
+    container_name: demo-images-generations-qwen-image-api-server
+    runtime: habana
+    tty: true
+    stdin_open: true
+    environment:
+      - HABANA_VISIBLE_DEVICES=${HABANA_QWEN_IMAGE_EDIT_DEVICE:-1}
+      - OMPI_MCA_btl_vader_single_copy_mechanism=none
+      - PYTHONPATH=/home/user:/usr/lib/habanalabs/:/home/user/optimum-habana
+      - PT_HPU_LAZY_MODE=1
+      - HF_ENDPOINT=https://hf-mirror.com
+      - QWEN25VL_FP32_SOFTMAX=True
+      # Proxy settings with defaults
+      - https_proxy=${https_proxy:-}
+      - no_proxy=${no_proxy:-}
+    cap_add:
+      - SYS_NICE
+    ports:
+      - ${PORT_QWEN_IMG:-9391}:9391
+    volumes:
+      - ${HOST_MODEL_DIR:-/mnt/disk7/demo}:/workspace/data  # Mount model directory
+    working_dir: /home/user/comps/images_generations/src
+    command: ["python3", "opea_images_generations_microservice.py", "--device", "hpu", "--bf16", "--model_name_or_path", "/workspace/data/Qwen-Image"]
+    restart: unless-stopped
+
+  images-generations-z-image-turbo-api-server:
+    build:
+      context: GenAIComps
+      dockerfile: comps/images_generations/src/Dockerfile.intel_hpu
+      args:
+        # Proxy settings from the build script with defaults
+        https_proxy: ${https_proxy:-}
+        no_proxy: ${no_proxy:-}
+    image: opea/images-generations-z-image-turbo-api-server:hpu
+    container_name: demo-images-generations-z-image-turbo-api-server
+    runtime: habana
+    tty: true
+    stdin_open: true
+    environment:
+      - HABANA_VISIBLE_DEVICES=${HABANA_ZIMAGE_EDIT_DEVICE:-3}
+      - OMPI_MCA_btl_vader_single_copy_mechanism=none
+      - PYTHONPATH=/home/user:/usr/lib/habanalabs/:/home/user/optimum-habana
+      - PT_HPU_LAZY_MODE=1
+      - PT_HPU_GPU_MIGRATION=1
+      - USE_ZIMAGE_BUCKET=1
+      - HF_ENDPOINT=https://hf-mirror.com
+      # Proxy settings with defaults
+      - https_proxy=${https_proxy:-}
+      - no_proxy=${no_proxy:-}
+    cap_add:
+      - SYS_NICE
+    ports:
+      - ${PORT_ZIMG:-9392}:9391
+    volumes:
+      - ${HOST_MODEL_DIR:-/mnt/disk7/demo}:/workspace/data  # Mount model directory
+    working_dir: /home/user/comps/images_generations/src
+    command: ["python3", "opea_images_generations_microservice.py", "--device", "hpu", "--bf16", "--guidance_scale", "0.0", "--num_inference_steps", "9", "--model_name_or_path", "/workspace/data/Z-Image-Turbo"]
+    restart: unless-stopped

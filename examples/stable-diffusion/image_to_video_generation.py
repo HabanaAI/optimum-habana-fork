@@ -28,6 +28,7 @@ from optimum.habana.diffusers import (
     GaudiStableVideoDiffusionPipeline,
     GaudiWanImageToVideoPipeline,
 )
+from optimum.habana.distributed import parallel_state
 from optimum.habana.transformers.gaudi_configuration import GaudiConfig
 from optimum.habana.utils import set_seed
 
@@ -224,6 +225,14 @@ def main():
         default=None,
         help="Number of steps to ignore for throughput calculation.",
     )
+
+    parser.add_argument(
+        "--context_parallel_size",
+        type=int,
+        default=1,
+        help="Determines how many ranks are divided into context parallel group.",
+    )
+
     args = parser.parse_args()
 
     # Setup logging
@@ -294,6 +303,14 @@ def main():
     set_seed(args.seed)
     if args.bf16:
         kwargs["torch_dtype"] = torch.bfloat16
+
+    if args.context_parallel_size > 1 and parallel_state.is_unitialized():
+        if not torch.distributed.is_initialized():
+            import deepspeed
+
+            torch.distributed.init_process_group(backend="hccl")
+            deepspeed.init_distributed(dist_backend="hccl")
+        parallel_state.initialize_model_parallel(sequence_parallel_size=args.context_parallel_size, use_fp8=False)
 
     if args.control_image_path is not None:
         from optimum.habana.diffusers import GaudiStableVideoDiffusionControlNetPipeline

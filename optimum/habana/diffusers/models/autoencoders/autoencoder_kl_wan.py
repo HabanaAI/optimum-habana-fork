@@ -193,3 +193,37 @@ def WanEncoder3dForwardGaudi(self, x, feat_cache=None, feat_idx=[0]):
         x = self.conv_out(x)
     htcore.mark_step()
     return x
+
+
+def WanAttentionBlockForwardGaudi(self, x):
+    r"""
+    Adapted from: https://github.com/huggingface/diffusers/blob/v0.35.1/src/diffusers/models/autoencoders/autoencoder_kl_wan.py#L402
+    Replace scaled_dot_product_attention with Gaudi's FusedSDPA and add mark_step()
+    """
+    identity = x
+    batch_size, channels, time, height, width = x.size()
+
+    x = x.permute(0, 2, 1, 3, 4).reshape(batch_size * time, channels, height, width)
+    x = self.norm(x)
+
+    # compute query, key, value
+    qkv = self.to_qkv(x)
+    qkv = qkv.reshape(batch_size * time, 1, channels * 3, -1)
+    qkv = qkv.permute(0, 1, 3, 2).contiguous()
+    q, k, v = qkv.chunk(3, dim=-1)
+
+    # apply attention
+    from habana_frameworks.torch.hpex.kernels import FusedSDPA
+    x = FusedSDPA.apply(q, k, v, None, 0.0, False, None, "None", None)
+    htcore.mark_step()
+
+    x = x.squeeze(1).permute(0, 2, 1).reshape(batch_size * time, channels, height, width)
+
+    # output projection
+    x = self.proj(x)
+
+    # Reshape back: [(b*t), c, h, w] -> [b, c, t, h, w]
+    x = x.view(batch_size, time, channels, height, width)
+    x = x.permute(0, 2, 1, 3, 4)
+
+    return x + identity

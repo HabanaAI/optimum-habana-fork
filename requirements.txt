@@ -1,1 +1,0 @@
-diffusers @ git+https://github.com/huggingface/diffusers.git@310fdaf5561d1b20240a2b66e978edb66175ad5c

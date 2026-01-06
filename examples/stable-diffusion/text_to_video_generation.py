@@ -24,6 +24,7 @@ import torch
 from diffusers.utils.export_utils import export_to_video
 
 from optimum.habana.diffusers import GaudiCogVideoXPipeline, GaudiTextToVideoSDPipeline, GaudiWanPipeline
+from optimum.habana.distributed import parallel_state
 from optimum.habana.transformers.gaudi_configuration import GaudiConfig
 from optimum.habana.utils import set_seed
 
@@ -135,6 +136,12 @@ def main():
         default="./generated-videos",
         help="The directory where videos will be saved.",
     )
+    parser.add_argument(
+        "--context_parallel_size",
+        type=int,
+        default=1,
+        help="Determines how many ranks are divided into context parallel group.",
+    )
 
     parser.add_argument("--seed", type=int, default=42, help="Random seed for initialization.")
 
@@ -182,6 +189,14 @@ def main():
         kwargs["torch_dtype"] = torch.bfloat16
     elif args.dtype == "fp32":
         kwargs["torch_dtype"] = torch.float32
+
+    if args.context_parallel_size > 1 and parallel_state.is_unitialized():
+        if not torch.distributed.is_initialized():
+            import deepspeed
+
+            torch.distributed.init_process_group(backend="hccl")
+            deepspeed.init_distributed(dist_backend="hccl")
+        parallel_state.initialize_model_parallel(sequence_parallel_size=args.context_parallel_size, use_fp8=False)
 
     # Generate images
     if args.pipeline_type == "stable_diffusion":
