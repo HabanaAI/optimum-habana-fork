@@ -16,6 +16,7 @@
 import argparse
 import logging
 import sys
+import time
 from pathlib import Path
 
 import torch
@@ -225,12 +226,17 @@ def main():
         default=None,
         help="Number of steps to ignore for throughput calculation.",
     )
-
     parser.add_argument(
         "--context_parallel_size",
         type=int,
         default=1,
         help="Determines how many ranks are divided into context parallel group.",
+    )
+    parser.add_argument(
+        "--loop",
+        type=int,
+        default=1,
+        help="Number of benchmark loops for generation.",
     )
 
     args = parser.parse_args()
@@ -257,7 +263,7 @@ def main():
 
         gaudi_config = GaudiConfig(**gaudi_config_kwargs)
         args.gaudi_config_name = gaudi_config
-    logger.info(f"Gaudi Config: {gaudi_config}")
+        logger.info(f"Gaudi Config: {gaudi_config}")
 
     # Load input image(s)
     input = []
@@ -325,25 +331,6 @@ def main():
         pipeline = GaudiStableVideoDiffusionControlNetPipeline.from_pretrained(
             args.model_name_or_path, controlnet=controlnet, unet=unet, **kwargs
         )
-
-        # Generate images
-        outputs = pipeline(
-            image=input,
-            controlnet_condition=control_input,
-            num_videos_per_prompt=args.num_videos_per_prompt,
-            batch_size=args.batch_size,
-            height=args.height,
-            width=args.width,
-            num_inference_steps=args.num_inference_steps,
-            min_guidance_scale=args.min_guidance_scale,
-            max_guidance_scale=args.max_guidance_scale,
-            fps=args.fps,
-            motion_bucket_id=args.motion_bucket_id,
-            noise_aug_strength=args.noise_aug_strength,
-            decode_chunk_size=args.decode_chunk_size,
-            output_type=args.output_type,
-            num_frames=args.num_frames,
-        )
     elif is_i2v_model:
         del kwargs["scheduler"]
         pipeline = GaudiI2VGenXLPipeline.from_pretrained(
@@ -351,53 +338,19 @@ def main():
             **kwargs,
         )
         generator = torch.manual_seed(args.seed)
-        outputs = pipeline(
-            prompt=args.prompts,
-            image=input,
-            num_videos_per_prompt=args.num_videos_per_prompt,
-            batch_size=args.batch_size,
-            num_frames=args.num_frames,
-            num_inference_steps=args.num_inference_steps,
-            negative_prompt=args.negative_prompts,
-            guidance_scale=9.0,
-            generator=generator,
-        )
     elif is_cogvideo_model:
         del kwargs["scheduler"]
         pipeline = GaudiCogVideoXImageToVideoPipeline.from_pretrained(args.model_name_or_path, **kwargs)
         pipeline.vae.enable_tiling()
         pipeline.vae.enable_slicing()
-        generator = generator = torch.Generator(device="cpu").manual_seed(args.seed)
-        outputs = pipeline(
-            image=input,
-            prompt=args.prompts,
-            num_videos_per_prompt=args.num_videos_per_prompt,
-            height=args.height,
-            width=args.width,
-            num_inference_steps=args.num_inference_steps,
-            num_frames=args.num_frames,
-            generator=generator,
-        )
+        generator = torch.Generator(device="cpu").manual_seed(args.seed)
     elif is_wan_i2v_model:
         del kwargs["scheduler"]  # WAN I2V uses its own scheduler
         pipeline = GaudiWanImageToVideoPipeline.from_pretrained(
             args.model_name_or_path,
             **kwargs,
         )
-        outputs = pipeline(
-            image=input,
-            prompt=args.prompts,
-            negative_prompt=args.negative_prompts,
-            num_videos_per_prompt=args.num_videos_per_prompt,
-            height=args.height,
-            width=args.width,
-            num_frames=args.num_frames,
-            num_inference_steps=args.num_inference_steps,
-            guidance_scale=5.0,  # WAN I2V recommended guidance scale
-            output_type=args.output_type,
-            profiling_warmup_steps=args.profiling_warmup_steps,
-            profiling_steps=args.profiling_steps,
-        )
+        generator = torch.Generator(device="cpu").manual_seed(args.seed)
     else:
         pipeline = GaudiStableVideoDiffusionPipeline.from_pretrained(
             args.model_name_or_path,
@@ -406,26 +359,92 @@ def main():
         kwargs_call = {}
         if args.throughput_warmup_steps is not None:
             kwargs_call["throughput_warmup_steps"] = args.throughput_warmup_steps
-
-        # Generate images
-        outputs = pipeline(
-            image=input,
-            num_videos_per_prompt=args.num_videos_per_prompt,
-            batch_size=args.batch_size,
-            height=args.height,
-            width=args.width,
-            num_inference_steps=args.num_inference_steps,
-            min_guidance_scale=args.min_guidance_scale,
-            max_guidance_scale=args.max_guidance_scale,
-            fps=args.fps,
-            motion_bucket_id=args.motion_bucket_id,
-            noise_aug_strength=args.noise_aug_strength,
-            decode_chunk_size=args.decode_chunk_size,
-            output_type=args.output_type,
-            profiling_warmup_steps=args.profiling_warmup_steps,
-            profiling_steps=args.profiling_steps,
-            **kwargs_call,
-        )
+    
+    for i in range(args.loop):
+        t0 = time.time()
+        if args.control_image_path is not None:
+            outputs = pipeline(
+                image=input,
+                controlnet_condition=control_input,
+                num_videos_per_prompt=args.num_videos_per_prompt,
+                batch_size=args.batch_size,
+                height=args.height,
+                width=args.width,
+                num_inference_steps=args.num_inference_steps,
+                min_guidance_scale=args.min_guidance_scale,
+                max_guidance_scale=args.max_guidance_scale,
+                fps=args.fps,
+                motion_bucket_id=args.motion_bucket_id,
+                noise_aug_strength=args.noise_aug_strength,
+                decode_chunk_size=args.decode_chunk_size,
+                output_type=args.output_type,
+                num_frames=args.num_frames,
+            )
+        elif is_i2v_model:
+            outputs = pipeline(
+                prompt=args.prompts,
+                image=input,
+                num_videos_per_prompt=args.num_videos_per_prompt,
+                batch_size=args.batch_size,
+                num_frames=args.num_frames,
+                num_inference_steps=args.num_inference_steps,
+                negative_prompt=args.negative_prompts,
+                guidance_scale=9.0,
+                generator=generator,
+            )
+        elif is_cogvideo_model:
+            outputs = pipeline(
+                image=input,
+                prompt=args.prompts,
+                num_videos_per_prompt=args.num_videos_per_prompt,
+                height=args.height,
+                width=args.width,
+                num_inference_steps=args.num_inference_steps,
+                num_frames=args.num_frames,
+                generator=generator,
+            )
+        elif is_wan_i2v_model:
+            outputs = pipeline(
+                image=input,
+                prompt=args.prompts,
+                negative_prompt=args.negative_prompts,
+                num_videos_per_prompt=args.num_videos_per_prompt,
+                height=args.height,
+                width=args.width,
+                num_frames=args.num_frames,
+                num_inference_steps=args.num_inference_steps,
+                guidance_scale=5.0,  # WAN I2V recommended guidance scale
+                generator=generator,
+                output_type=args.output_type,
+                profiling_warmup_steps=args.profiling_warmup_steps,
+                profiling_steps=args.profiling_steps,
+            )
+        else:
+            outputs = pipeline(
+                image=input,
+                num_videos_per_prompt=args.num_videos_per_prompt,
+                batch_size=args.batch_size,
+                height=args.height,
+                width=args.width,
+                num_inference_steps=args.num_inference_steps,
+                min_guidance_scale=args.min_guidance_scale,
+                max_guidance_scale=args.max_guidance_scale,
+                fps=args.fps,
+                motion_bucket_id=args.motion_bucket_id,
+                noise_aug_strength=args.noise_aug_strength,
+                decode_chunk_size=args.decode_chunk_size,
+                output_type=args.output_type,
+                profiling_warmup_steps=args.profiling_warmup_steps,
+                profiling_steps=args.profiling_steps,
+                **kwargs_call,
+            )
+        torch.hpu.synchronize()
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
+        t1 = time.time()
+        duration = t1 - t0
+        if (torch.distributed.is_initialized() and torch.distributed.get_rank() == 0) or not torch.distributed.is_initialized():
+            logger.info("Image2Video Generation Latency in Loop #{:d}: {:.1f} sec".format(i, duration))
 
     # Save the pipeline in the specified directory if not None
     if args.pipeline_save_dir is not None:
@@ -461,3 +480,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

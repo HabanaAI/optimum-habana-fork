@@ -458,22 +458,23 @@ python image_to_video_generation.py \
 ```
 
 ### Image-to-Video with Wan 2.2
-Wan2.2 is a comprehensive and open suite of video foundation models. Please refer to [Huggingface Wan2.2 doc](https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B)
+Wan2.2 is a comprehensive and open suite of video foundation models. Please refer to [Huggingface Wan2.2 doc](https://huggingface.co/Wan-AI/Wan2.2-I2V-A14B-Diffusers)
 
 Here is how to generate a video with one image and text prompt:
 
 ```bash
+PT_HPU_SYNC_LAUNCH=1 \
 PT_HPU_LAZY_MODE=1 \
 python image_to_video_generation.py \
-    --model_name_or_path "Wan-AI/Wan2.2-TI2V-5B-Diffusers" \
+    --model_name_or_path "Wan-AI/Wan2.2-I2V-A14B-Diffusers" \
     --image_path "https://raw.githubusercontent.com/Wan-Video/Wan2.2/main/examples/i2v_input.JPG" \
     --video_save_dir ./wan2.2-output \
     --prompts "The cat removes the glasses from its eyes." \
     --use_habana \
     --height 1088 \
     --width 800 \
-    --fps 24 \
-    --num_frames 121 \
+    --fps 16 \
+    --num_frames 81 \
     --sdp_on_bf16 \
     --bf16 
 ```
@@ -482,19 +483,7 @@ For multi-cards inference, we support both traditional sequence parallelism (SP)
 When using DeepSpeed Ulysses, please set PT_HPU_SYNC_LAUNCH=1 to reduce memory consumption. Besides, to slightly improve the accuracy in DeepSpeed Ulysses case, you can enable the mask by setting CP_USE_MASK=1.
 
 ```bash
-PT_HPU_LAZY_MODE=1 \
-python ../gaudi_spawn.py --world_size 2  image_to_video_generation.py \
-    --model_name_or_path "Wan-AI/Wan2.2-TI2V-5B-Diffusers" \
-    --image_path "https://raw.githubusercontent.com/Wan-Video/Wan2.2/main/examples/i2v_input.JPG" \
-    --video_save_dir ./wan2.2-output \
-    --prompts "The cat removes the glasses from its eyes." \
-    --use_habana \
-    --height 1088 \
-    --width 800 \
-    --fps 24 \
-    --num_frames 121 \
-    --bf16 \
-    --context_parallel_size 2
+bash run_wan_i2v_demo.sh
 ```
 
 ### Text-to-Video with Wan 2.2
@@ -503,6 +492,7 @@ Wan2.2 is a comprehensive and open suite of video foundation models. Please refe
 Here is how to generate a video with text prompt:
 
 ```bash
+PT_HPU_SYNC_LAUNCH=1 \
 PT_HPU_LAZY_MODE=1 \
 python text_to_video_generation.py \
     --model_name_or_path "Wan-AI/Wan2.2-TI2V-5B-Diffusers" \
@@ -523,21 +513,7 @@ For multi-cards inference, we support both traditional sequence parallelism (SP)
 When using DeepSpeed Ulysses, please set PT_HPU_SYNC_LAUNCH=1 to reduce memory consumption. Besides, to slightly improve the accuracy in DeepSpeed Ulysses case, you can enable the mask by setting CP_USE_MASK=1.
 
 ```bash
-PT_HPU_LAZY_MODE=1 \
-python ../gaudi_spawn.py --world_size 2 text_to_video_generation.py \
-    --model_name_or_path "Wan-AI/Wan2.2-TI2V-5B-Diffusers" \
-    --prompts "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage." \
-    --pipeline_type wan \
-    --num_videos_per_prompt 1 \
-    --use_habana \
-    --height 704 \
-    --width 1280 \
-    --num_frames 121 \
-    --num_inference_steps 50 \
-    --guidance_scale 5.0 \
-    --output_type mp4 \
-    --dtype bf16 \
-    --context_parallel_size 2
+bash run_wan_t2v_demo.sh
 ```
 
 ### FP8 Image-to-Video with Wan 2.1/Wan2.2
