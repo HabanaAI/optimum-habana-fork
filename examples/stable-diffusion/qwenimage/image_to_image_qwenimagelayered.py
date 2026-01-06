@@ -3,8 +3,8 @@ import random
 import numpy as np
 import time as tm_perf
 
-from optimum.habana.transformers.modeling_utils import adapt_transformers_to_gaudi
-adapt_transformers_to_gaudi()
+#from optimum.habana.transformers.modeling_utils import adapt_transformers_to_gaudi
+#adapt_transformers_to_gaudi()
 from optimum.habana.diffusers import GaudiQwenImageLayeredPipeline
 
 import habana_frameworks.torch as ht
@@ -94,7 +94,9 @@ def main():
         output_image = output.images[0]
     
     for i, image in enumerate(output_image):
-        image.save(f"{i}.png")
+        file_name = f"layered_{i}.png"
+        image.save(file_name)
+        print(f'save {file_name} done!')
 
 
 if "__main__" == __name__:
