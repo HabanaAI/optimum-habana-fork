@@ -18,6 +18,7 @@
 import argparse
 import logging
 import sys
+import time
 from pathlib import Path
 
 import torch
@@ -156,6 +157,12 @@ def main():
         choices=["bf16", "fp32", "autocast_bf16"],
         help="Which runtime dtype to perform generation in.",
     )
+    parser.add_argument(
+        "--loop",
+        type=int,
+        default=1,
+        help="Number of benchmark loops for generation.",
+    )
     args = parser.parse_args()
     # Setup logging
     logging.basicConfig(
@@ -213,61 +220,55 @@ def main():
         logger.error(f"unsupported pipeline type {args.pipeline_type}")
         return None
 
-    if args.pipeline_type == "stable_diffusion":
-        set_seed(args.seed)
-        outputs = pipeline(
-            prompt=args.prompts,
-            num_videos_per_prompt=args.num_videos_per_prompt,
-            batch_size=args.batch_size,
-            num_inference_steps=args.num_inference_steps,
-            guidance_scale=args.guidance_scale,
-            negative_prompt=args.negative_prompts,
-            eta=args.eta,
-            output_type="pil" if args.output_type == "mp4" else args.output_type,  # Naming inconsistency in base class
-            **kwargs_call,
-        )
-
-        # Save the pipeline in the specified directory if not None
-        if args.pipeline_save_dir is not None:
-            pipeline.save_pretrained(args.pipeline_save_dir)
-
-        # Save images in the specified directory if not None and if they are in PIL format
-        if args.video_save_dir is not None:
-            if args.output_type == "mp4":
-                video_save_dir = Path(args.video_save_dir)
-                video_save_dir.mkdir(parents=True, exist_ok=True)
-                logger.info(f"Saving images in {video_save_dir.resolve()}...")
-
-                for i, video in enumerate(outputs.videos):
-                    filename = video_save_dir / f"video_{i + 1}.mp4"
-                    export_to_video(video, str(filename.resolve()))
-            else:
-                logger.warning("--output_type should be equal to 'mp4' to save images in --video_save_dir.")
-    elif args.pipeline_type == "cogvideox":
-        video = pipeline(
-            prompt=args.prompts,
-            num_videos_per_prompt=args.num_videos_per_prompt,
-            num_inference_steps=args.num_inference_steps,
-            num_frames=args.num_frames,
-            guidance_scale=args.guidance_scale,
-            generator=torch.Generator(device="cpu").manual_seed(42),
-        ).frames[0]
+    for i in range(args.loop):
+        t0 = time.time()
+        if args.pipeline_type == "stable_diffusion":
+            set_seed(args.seed)
+            outputs = pipeline(
+                prompt=args.prompts,
+                num_videos_per_prompt=args.num_videos_per_prompt,
+                batch_size=args.batch_size,
+                num_inference_steps=args.num_inference_steps,
+                guidance_scale=args.guidance_scale,
+                negative_prompt=args.negative_prompts,
+                eta=args.eta,
+                output_type="pil" if args.output_type == "mp4" else args.output_type,  # Naming inconsistency in base class
+                **kwargs_call,
+            )
+        elif args.pipeline_type == "cogvideox":
+            video = pipeline(
+                prompt=args.prompts,
+                num_videos_per_prompt=args.num_videos_per_prompt,
+                num_inference_steps=args.num_inference_steps,
+                num_frames=args.num_frames,
+                guidance_scale=args.guidance_scale,
+                generator=torch.Generator(device="cpu").manual_seed(42),
+            ).frames[0]
+        elif args.pipeline_type == "wan":
+            set_seed(args.seed)
+            outputs = pipeline(
+                prompt=args.prompts,
+                num_videos_per_prompt=args.num_videos_per_prompt,
+                num_inference_steps=args.num_inference_steps,
+                guidance_scale=args.guidance_scale,
+                negative_prompt=args.negative_prompts,
+                output_type="np" if args.output_type == "mp4" else args.output_type,
+                **kwargs_call,
+            )
+        torch.hpu.synchronize()
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
+        t1 = time.time()
+        duration = t1 - t0
+        if (torch.distributed.is_initialized() and torch.distributed.get_rank() == 0) or not torch.distributed.is_initialized():
+            logger.info("Text2Video Generation Latency in Loop #{:d}: {:.1f} sec".format(i, duration))
+        
+    if args.pipeline_type == "cogvideox":
         video_save_dir = Path(args.video_save_dir)
         video_save_dir.mkdir(parents=True, exist_ok=True)
         filename = video_save_dir / "cogvideoX_out.mp4"
         export_to_video(video, str(filename.resolve()), fps=8)
-    elif args.pipeline_type == "wan":
-        set_seed(args.seed)
-        outputs = pipeline(
-            prompt=args.prompts,
-            num_videos_per_prompt=args.num_videos_per_prompt,
-            num_inference_steps=args.num_inference_steps,
-            guidance_scale=args.guidance_scale,
-            negative_prompt=args.negative_prompts,
-            output_type="np" if args.output_type == "mp4" else args.output_type,
-            **kwargs_call,
-        )
-
+    else:
         # Save the pipeline in the specified directory if not None
         if args.pipeline_save_dir is not None:
             pipeline.save_pretrained(args.pipeline_save_dir)
@@ -281,10 +282,11 @@ def main():
 
                 for i, video in enumerate(outputs.frames):
                     filename = video_save_dir / f"wan_video_{i + 1}.mp4"
-                    export_to_video(video, str(filename.resolve()), fps=16)
+                    export_to_video(video, str(filename.resolve()), fps=24)
             else:
                 logger.warning("--output_type should be equal to 'mp4' to save videos in --video_save_dir.")
 
 
 if __name__ == "__main__":
     main()
+
