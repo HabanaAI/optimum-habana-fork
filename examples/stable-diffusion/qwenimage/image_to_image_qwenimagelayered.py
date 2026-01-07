@@ -1,103 +1,103 @@
+import argparse
 import torch
-import random
-import numpy as np
-import time as tm_perf
+import time
 
 from optimum.habana.transformers.modeling_utils import adapt_transformers_to_gaudi
 adapt_transformers_to_gaudi()
 from optimum.habana.diffusers import GaudiQwenImageLayeredPipeline
-
-import habana_frameworks.torch as ht
-import habana_frameworks.torch.core as htcore
-import habana_frameworks.torch.gpu_migration
-
+from optimum.habana.distributed import parallel_state
 from optimum.habana.transformers.gaudi_configuration import GaudiConfig
-
 
 from PIL import Image
 
-
-def set_seed():
-    seed = 5451
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-
-
-class time_box_t():
-    def __init__(self):
-        self.t0=None
-
-    def start(self):
-        self.t0 = tm_perf.perf_counter()
-
-    def show_time(self, desc):
-        torch.cuda.synchronize()
-        t1 = tm_perf.perf_counter()
-        duration = t1-self.t0
-        self.t0 = t1
-        print(f'{desc} duration:{duration:.3f}s')
-
-
-
-
 def main():
-    set_seed()
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--model_name_or_path",
+        default="Qwen/Qwen-Image-Layered",
+        type=str,
+        help="Path to pre-trained model",
+    )
+    parser.add_argument(
+        "--image_path",
+        type=str,
+        default=None,
+        help="The image input path to edit",
+    )
+    parser.add_argument(
+        "--num_inference_steps",
+        type=int,
+        default=50,
+        help=(
+            "The number of denoising steps. More denoising steps usually lead to a higher quality image at the expense"
+            " of slower inference."
+        ),
+    )
+    parser.add_argument(
+        "--context_parallel_size",
+        type=int,
+        default=1,
+        help="Determines how many ranks are divided into context parallel group.",
+    )
+    parser.add_argument(
+        "--loop",
+        type=int,
+        default=1,
+        help="Number of benchmark loops for generation.",
+    )
+
+    args = parser.parse_args()
+
     gaudi_config_kwargs = {"use_fused_adam": True, "use_fused_clip_norm": True}
-    gaudi_config_kwargs["use_torch_autocast"] = False
+    gaudi_config_kwargs["use_torch_autocast"] = True
     gaudi_config = GaudiConfig(**gaudi_config_kwargs)
-    kwargs = {
-        "use_habana": True,
-        "use_hpu_graphs": False,
-        "gaudi_config": gaudi_config,
-    }
-    timeBox = time_box_t()
 
+    if args.context_parallel_size > 1 and parallel_state.is_unitialized():
+        if not torch.distributed.is_initialized():
+            import deepspeed
 
-    device = 'hpu'
-    model_path = '/mnt/ceph1/libo/hf_models/Qwen-Image-Layered/'
-    
-    pipeline = GaudiQwenImageLayeredPipeline.from_pretrained(model_path, **kwargs)
-    pipeline = pipeline.to(device, torch.bfloat16)
-    pipeline.set_progress_bar_config(disable=None)
-    
-    image = Image.open("demo.png").convert("RGBA")
+            torch.distributed.init_process_group(backend="hccl")
+            deepspeed.init_distributed(dist_backend="hccl")
+        parallel_state.initialize_model_parallel(sequence_parallel_size=args.context_parallel_size, use_fp8=False)
+
+    pipeline = GaudiQwenImageLayeredPipeline.from_pretrained(
+        args.model_name_or_path,
+        use_habana=True,
+        use_hpu_graphs=False,
+        gaudi_config=gaudi_config,
+    )
+    pipeline = pipeline.to("hpu", torch.bfloat16)
+    image = Image.open(args.image_path).convert("RGBA")
+
     inputs = {
         "image": image,
         "generator": torch.Generator(device='cpu').manual_seed(777),
         "true_cfg_scale": 4.0,
         "negative_prompt": " ",
-        "num_inference_steps": 50,
+        "num_inference_steps": args.num_inference_steps,
         "num_images_per_prompt": 1,
         "layers": 4,
         "resolution": 640,      # Using different bucket (640, 1024) to determine the resolution. For this version, 640 is recommended
         "cfg_normalize": True,  # Whether enable cfg normalization.
         "use_en_prompt": True,  # Automatic caption language if user does not provide caption
     }
-    
+
     with torch.inference_mode():
-        timeBox.start()
-        warmup = 0
-        for i in range(warmup):
-            output = pipeline(**inputs)
-        timeBox.show_time(f'warmup')
+        for idx in range(args.loop):
+            t0 = time.time()
+            output = pipeline(**inputs).images[0]
+            torch.hpu.synchronize()
+            t1 = time.time()
+            duration = t1 - t0
+            if (torch.distributed.is_initialized() and torch.distributed.get_rank() == 0) or not torch.distributed.is_initialized():
+                print("Qwen-Image-Layered Generation Latency in Loop #{:d}: {:.1f} sec".format(idx, duration))
 
-        test_cnt = 1
-        t0 = tm_perf.perf_counter()
-        for i in range(test_cnt):
-            output = pipeline(**inputs)
-        torch.hpu.synchronize()
-
-        dur = tm_perf.perf_counter() - t0
-        dur = dur / test_cnt
-        print(f'pipeline duration:{dur:.3f}s')
-        output_image = output.images[0]
-    
-    for i, image in enumerate(output_image):
-        file_name = f"layered_{i}.png"
-        image.save(file_name)
-        print(f'save {file_name} done!')
+        if (torch.distributed.is_initialized() and torch.distributed.get_rank() == 0) or not torch.distributed.is_initialized():
+            for i, image in enumerate(output):
+                file_name = f"layered_{i}.png"
+                image.save(file_name)
+            print(f'Completed saving the images!')
 
 
-if "__main__" == __name__:
+if __name__ == "__main__":
     main()

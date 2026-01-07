@@ -92,7 +92,7 @@ python examples/stable-diffusion/qwenimage/image_to_image_qwenimageedit.py \
     --num_inference_steps 10
 ```
 
-参数设置：
+## 参数设置
 
     --model_name_or_path 模型路径
 
@@ -166,7 +166,7 @@ python examples/stable-diffusion/qwenimage/image_to_image_qwenimageeditplus.py \
     --num_inference_steps 10
 ```
 
-参数设置：
+## 参数设置
     --model_name_or_path 模型路径
 
     --prompt 指导图像生成得prompt
@@ -226,3 +226,50 @@ python examples/stable-diffusion/qwenimage/image_to_image_qwenimageeditplus.py \
 1）需要使用环境变量`PT_HPU_LAZY_MODE=1`
 
 2）Qwen/Qwen-Image-Edit和Qwen/Qwen-Image-Edit-2509的manual_seed建议使用0，与官方例子保持一致。
+
+
+# Qwen/Qwen-Image-Layered 支持图层分解
+## 测试样例
+
+单卡：
+```bash
+PT_HPU_LAZY_MODE=1 \
+python image_to_image_qwenimagelayered.py \
+    --model_name_or_path Qwen/Qwen-Image-Layered/ \
+    --image_path /path/1.png \
+    --loop 2
+```
+
+多卡：
+```bash
+PT_HPU_LAZY_MODE=1 \
+deepspeed --num_nodes 1 \
+    --num_gpus 4 \
+    --no_local_rank image_to_image_qwenimagelayered.py \
+    --model_name_or_path Qwen/Qwen-Image-Layered/ \
+    --image_path /path/1.png \
+    --context_parallel_size 4 \
+    --loop 2
+```
+
+## 参数设置
+    
+    --num_gpus & --context_parallel_size 多卡加速（Context Parallel）
+
+    --model_name_or_path 模型路径
+
+    --images_path 输入图像的路径
+
+    --num_inference_steps diffusion的采样步数，步数越高图像越精细，耗时越长。默认为50
+
+    --loop 性能测试循环数
+
+注意：
+
+截止2026/01/07，Qwen-Image-Layered仅在Diffusers开发分支上，因此需要安装Diffusers开发版本:
+
+```bash
+    pip uninstall diffusers
+    pip install -r requirements-diffusers.txt
+```
+
