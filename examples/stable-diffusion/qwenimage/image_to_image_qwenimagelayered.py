@@ -3,8 +3,8 @@ import random
 import numpy as np
 import time as tm_perf
 
-#from optimum.habana.transformers.modeling_utils import adapt_transformers_to_gaudi
-#adapt_transformers_to_gaudi()
+from optimum.habana.transformers.modeling_utils import adapt_transformers_to_gaudi
+adapt_transformers_to_gaudi()
 from optimum.habana.diffusers import GaudiQwenImageLayeredPipeline
 
 import habana_frameworks.torch as ht
@@ -64,7 +64,7 @@ def main():
     image = Image.open("demo.png").convert("RGBA")
     inputs = {
         "image": image,
-        "generator": torch.Generator(device=device).manual_seed(777),
+        "generator": torch.Generator(device='cpu').manual_seed(777),
         "true_cfg_scale": 4.0,
         "negative_prompt": " ",
         "num_inference_steps": 50,

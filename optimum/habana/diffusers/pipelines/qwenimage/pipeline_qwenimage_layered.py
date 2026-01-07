@@ -374,6 +374,7 @@ class GaudiQwenImageLayeredPipeline(GaudiDiffusionPipeline, QwenImageLayeredPipe
         ).to(device)
         generation_config = self.text_encoder.generation_config
         generation_config.use_flash_attention = True
+        generation_config.cache_implementation= "static"
 
         generated_ids = self.text_encoder.generate(**model_inputs, generation_config=generation_config, max_new_tokens=512)
         generated_ids_trimmed = [
