@@ -268,14 +268,14 @@ class GaudiQwenImageLayeredPipeline(GaudiDiffusionPipeline, QwenImageLayeredPipe
         self.vae.encoder.forward = types.MethodType(QwenImageEncoder3dForwardGaudi, self.vae.encoder)
 
         for attn in self.vae.decoder.mid_block.attentions:
-            attn.forwward = types.MethodType(QwenImageAttentionBlockForwardGaudi, attn)
+            attn.forward = types.MethodType(QwenImageAttentionBlockForwardGaudi, attn)
 
         for attn in self.vae.encoder.mid_block.attentions:
-            attn.forwward = types.MethodType(QwenImageAttentionBlockForwardGaudi, attn)
+            attn.forward = types.MethodType(QwenImageAttentionBlockForwardGaudi, attn)
 
         for layer in self.vae.encoder.down_blocks:
             if isinstance(layer, QwenImageAttentionBlock):
-                layer.forwward = types.MethodType(QwenImageAttentionBlockForwardGaudi, layer)
+                layer.forward = types.MethodType(QwenImageAttentionBlockForwardGaudi, layer)
 
         config = self.transformer.config
         if not config.use_layer3d_rope:
@@ -336,6 +336,7 @@ class GaudiQwenImageLayeredPipeline(GaudiDiffusionPipeline, QwenImageLayeredPipe
         txt_tokens = self.tokenizer(
             txt,
             padding=True,
+            pad_to_multiple_of=256,
             return_tensors="pt",
         ).to(device)
         encoder_hidden_states = self.text_encoder(
@@ -650,11 +651,13 @@ class GaudiQwenImageLayeredPipeline(GaudiDiffusionPipeline, QwenImageLayeredPipe
         # 6. Denoising loop
         self.scheduler.set_begin_index(0)
         with self.progress_bar(total=num_inference_steps) as progress_bar:
-            for i, t in enumerate(timesteps):
+            for i in range(len(timesteps)):
                 if self.interrupt:
                     continue
 
+                t = timesteps[0]
                 self._current_timestep = t
+                timesteps = torch.roll(timesteps, shifts=-1, dims=0)
 
                 latent_model_input = latents
                 if image_latents is not None:
