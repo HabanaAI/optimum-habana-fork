@@ -1,20 +1,26 @@
-# 1.Qwen/Qwen-Image支持文生图
-测试样例
+# Qwen/Qwen-Image支持文生图
+## 测试样例
 
-PT_HPU_LAZY_MODE=1 python examples/stable-diffusion/qwenimage/text_to_image_qwenimage.py --model_name_or_path Qwen/Qwen-Image --prompt "A capybara wearing a suit holding a sign that reads Hello World." --num_inference_steps 20
+```bash
+PT_HPU_LAZY_MODE=1 \
+python examples/stable-diffusion/qwenimage/text_to_image_qwenimage.py \
+    --model_name_or_path Qwen/Qwen-Image \
+    --prompt "A capybara wearing a suit holding a sign that reads Hello World." \
+    --num_inference_steps 20
+```
 
-参数设置：
---model_name_or_path 模型路径
+## 参数设置
+    --model_name_or_path 模型路径
 
---prompt 指导图像生成得prompt
+    --prompt 指导图像生成得prompt
 
---negative_prompt 指导图像生成的negative prompt， 默认为""
+    --negative_prompt 指导图像生成的negative prompt， 默认为""
 
---height 生成图像的高,默认为1024
+    --height 生成图像的高,默认为1024
 
---width 生成图像的宽,默认为1024
+    --width 生成图像的宽,默认为1024
 
---num_inference_steps diffusion的采样步数，步数越高图像越精细，耗时越长。默认为50
+    --num_inference_steps diffusion的采样步数，步数越高图像越精细，耗时越长。默认为50
 
 样例中包含：
 
@@ -23,7 +29,7 @@ PT_HPU_LAZY_MODE=1 python examples/stable-diffusion/qwenimage/text_to_image_qwen
     from optimum.habana.transformers.modeling_utils import adapt_transformers_to_gaudi
     adapt_transformers_to_gaudi()
 
-2） 模型pipeline启动：
+2）模型pipeline启动：
     gaudi_config_kwargs = {"use_fused_adam": True, "use_fused_clip_norm": True}
     gaudi_config_kwargs["use_torch_autocast"] = True
     gaudi_config = GaudiConfig(**gaudi_config_kwargs)
@@ -67,29 +73,36 @@ PT_HPU_LAZY_MODE=1 python examples/stable-diffusion/qwenimage/text_to_image_qwen
 
 注意：
 
-1> 当生图尺寸会发生变化时建议pipeline初始化时的参数使用use_hpu_graphs=False，这样可以避免OOM。如果生成图像只有一个固定尺寸，可以设置use_hpu_graphs=True，并配合环境变量QWENIMAGE_VAE_DECODE_BUCKETS=1 QWENIMAGE_TRANSFORMER_BUCKETS_STEP=1 来达到更好的性能。
+1）当生图尺寸会发生变化时建议pipeline初始化时的参数使用`use_hpu_graphs=False`，这样可以避免OOM。如果生成图像只有一个固定尺寸，可以设置`use_hpu_graphs=True`，并配合环境变量`QWENIMAGE_VAE_DECODE_BUCKETS=1`,以及`QWENIMAGE_TRANSFORMER_BUCKETS_STEP=1`来达到更好的性能。
 
-2> 需要使用环境变量PT_HPU_LAZY_MODE=1
+2）需要使用环境变量`PT_HPU_LAZY_MODE=1`
 
-3> QwenImage的generator的manual_seed建议使用42，与官方例子保持一致。
+3）QwenImage的generator的manual_seed建议使用42，与官方例子保持一致。
 
 
-# 2.Qwen/Qwen-Image-Edit 支持单图编辑
-测试样例
+# Qwen/Qwen-Image-Edit 支持单图编辑
+## 测试样例
 
-PT_HPU_LAZY_MODE=1 python examples/stable-diffusion/qwenimage/image_to_image_qwenimageedit.py --model_name_or_path Qwen/Qwen-Image-Edit --prompt "Change to Cartoon style." --image_path /path/test.png --num_inference_steps 10
+```bash
+PT_HPU_LAZY_MODE=1 \
+python examples/stable-diffusion/qwenimage/image_to_image_qwenimageedit.py \
+    --model_name_or_path Qwen/Qwen-Image-Edit \
+    --prompt "Change to Cartoon style." \
+    --image_path /path/test.png \
+    --num_inference_steps 10
+```
 
-参数设置：
+## 参数设置
 
---model_name_or_path 模型路径
+    --model_name_or_path 模型路径
 
---prompt 指导图像生成得prompt
+    --prompt 指导图像生成得prompt
 
---negative_prompt 指导图像生成的negative prompt， 默认为""
+    --negative_prompt 指导图像生成的negative prompt， 默认为""
 
---image_path 输入图像的路径
+    --image_path 输入图像的路径
 
---num_inference_steps diffusion的采样步数，步数越高图像越精细，耗时越长。默认为50
+    --num_inference_steps diffusion的采样步数，步数越高图像越精细，耗时越长。默认为50
 
 样例中包含：
 1）使能optimum habana的优化
@@ -97,7 +110,7 @@ PT_HPU_LAZY_MODE=1 python examples/stable-diffusion/qwenimage/image_to_image_qwe
     from optimum.habana.transformers.modeling_utils import adapt_transformers_to_gaudi
     adapt_transformers_to_gaudi()
 
-2） 模型pipeline启动：
+2）模型pipeline启动：
 
     gaudi_config_kwargs = {"use_fused_adam": True, "use_fused_clip_norm": True}
     gaudi_config_kwargs["use_torch_autocast"] = True
@@ -136,26 +149,33 @@ PT_HPU_LAZY_MODE=1 python examples/stable-diffusion/qwenimage/image_to_image_qwe
 
 注意：
 
-1> 需要使用环境变量PT_HPU_LAZY_MODE=1
+1）需要使用环境变量`PT_HPU_LAZY_MODE=1`
 
-2> Qwen/Qwen-Image-Edit的manual_seed建议使用0，与官方例子保持一致。
+2）Qwen/Qwen-Image-Edit的manual_seed建议使用0，与官方例子保持一致。
 
 
-# 3.Qwen/Qwen-Image-Edit-2509 支持单图及多图编辑
-测试样例
+# Qwen/Qwen-Image-Edit-2509 支持单图及多图编辑
+## 测试样例
 
-PT_HPU_LAZY_MODE=1 python examples/stable-diffusion/qwenimage/image_to_image_qwenimageeditplus.py --model_name_or_path Qwen/Qwen-Image-Edit-2509 --prompt "Change the two images into one cartoon picture." --images_path /path/img1.png /path/img2.png --num_inference_steps 10
+```bash
+PT_HPU_LAZY_MODE=1 \
+python examples/stable-diffusion/qwenimage/image_to_image_qwenimageeditplus.py \
+    --model_name_or_path Qwen/Qwen-Image-Edit-2509 \
+    --prompt "Change the two images into one cartoon picture." \
+    --images_path /path/img1.png /path/img2.png \
+    --num_inference_steps 10
+```
 
-参数设置：
---model_name_or_path 模型路径
+## 参数设置
+    --model_name_or_path 模型路径
 
---prompt 指导图像生成得prompt
+    --prompt 指导图像生成得prompt
 
---negative_prompt 指导图像生成的negative prompt， 默认为""
+    --negative_prompt 指导图像生成的negative prompt， 默认为""
 
---images_path 输入图像的路径
+    --images_path 输入图像的路径
 
---num_inference_steps diffusion的采样步数，步数越高图像越精细，耗时越长。默认为50
+    --num_inference_steps diffusion的采样步数，步数越高图像越精细，耗时越长。默认为50
 
 样例中包含：
 
@@ -164,7 +184,7 @@ PT_HPU_LAZY_MODE=1 python examples/stable-diffusion/qwenimage/image_to_image_qwe
     from optimum.habana.transformers.modeling_utils import adapt_transformers_to_gaudi
     adapt_transformers_to_gaudi()
 
-2） 模型pipeline启动：
+2）模型pipeline启动：
 
     gaudi_config_kwargs = {"use_fused_adam": True, "use_fused_clip_norm": True}
     gaudi_config_kwargs["use_torch_autocast"] = True
@@ -203,6 +223,53 @@ PT_HPU_LAZY_MODE=1 python examples/stable-diffusion/qwenimage/image_to_image_qwe
 
 注意：
 
-1> 需要使用环境变量PT_HPU_LAZY_MODE=1
+1）需要使用环境变量`PT_HPU_LAZY_MODE=1`
 
-2> Qwen/Qwen-Image-Edit和Qwen/Qwen-Image-Edit-2509的manual_seed建议使用0，与官方例子保持一致。
+2）Qwen/Qwen-Image-Edit和Qwen/Qwen-Image-Edit-2509的manual_seed建议使用0，与官方例子保持一致。
+
+
+# Qwen/Qwen-Image-Layered 支持图层分解
+## 测试样例
+
+单卡：
+```bash
+PT_HPU_LAZY_MODE=1 \
+python image_to_image_qwenimagelayered.py \
+    --model_name_or_path Qwen/Qwen-Image-Layered/ \
+    --image_path /path/1.png \
+    --loop 2
+```
+
+多卡：
+```bash
+PT_HPU_LAZY_MODE=1 \
+deepspeed --num_nodes 1 \
+    --num_gpus 4 \
+    --no_local_rank image_to_image_qwenimagelayered.py \
+    --model_name_or_path Qwen/Qwen-Image-Layered/ \
+    --image_path /path/1.png \
+    --context_parallel_size 4 \
+    --loop 2
+```
+
+## 参数设置
+    
+    --num_gpus & --context_parallel_size 多卡加速（Context Parallel）
+
+    --model_name_or_path 模型路径
+
+    --images_path 输入图像的路径
+
+    --num_inference_steps diffusion的采样步数，步数越高图像越精细，耗时越长。默认为50
+
+    --loop 性能测试循环数
+
+注意：
+
+截止2026/01/07，Qwen-Image-Layered仅在Diffusers开发分支上，因此需要安装Diffusers开发版本:
+
+```bash
+    pip uninstall diffusers
+    pip install -r requirements-diffusers.txt
+```
+

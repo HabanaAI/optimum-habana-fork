@@ -102,6 +102,7 @@ def QwenImageTransformer2DModelGaudi(
     guidance: torch.Tensor = None,  # TODO: this should probably be removed
     attention_kwargs: Optional[Dict[str, Any]] = None,
     controlnet_block_samples=None,
+    additional_t_cond=None,
     return_dict: bool = True,
     hidden_states_pad_len: int = 0,
     encoder_hidden_states_pad_len: int = 0,
@@ -137,9 +138,9 @@ def QwenImageTransformer2DModelGaudi(
         guidance = guidance.to(hidden_states.dtype) * 1000
 
     temb = (
-        self.time_text_embed(timestep, hidden_states)
+        self.time_text_embed(timestep, hidden_states, additional_t_cond)
         if guidance is None
-        else self.time_text_embed(timestep, guidance, hidden_states)
+        else self.time_text_embed(timestep, guidance, hidden_states, additional_t_cond)
     )
 
     (vid_freqs_cos, vid_freqs_sin), (txt_freqs_cos, txt_freqs_sin) = self.pos_embed(
