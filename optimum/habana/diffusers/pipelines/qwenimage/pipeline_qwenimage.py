@@ -322,7 +322,6 @@ class GaudiQwenImagePipeline(GaudiDiffusionPipeline, QwenImagePipeline):
             attention_mask=txt_tokens.attention_mask,
             output_hidden_states=True,
             use_flash_attention=True,
-            cache_implementation="static",
         )
         hidden_states = encoder_hidden_states.hidden_states[-1]
         split_hidden_states = self._extract_masked_hidden(hidden_states, txt_tokens.attention_mask)
@@ -696,6 +695,7 @@ class GaudiQwenImagePipeline(GaudiDiffusionPipeline, QwenImagePipeline):
                 # call the callback, if provided
                 if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
                     progress_bar.update()
+                htcore.mark_step()
 
             if not self.use_hpu_graphs:
                 htcore.mark_step()

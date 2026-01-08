@@ -302,7 +302,6 @@ class GaudiQwenImageEditPipeline(GaudiDiffusionPipeline, QwenImageEditPipeline):
             image_grid_thw=model_inputs.image_grid_thw,
             output_hidden_states=True,
             use_flash_attention=True,
-            cache_implementation="static",
         )
 
         hidden_states = outputs.hidden_states[-1]
@@ -723,6 +722,7 @@ class GaudiQwenImageEditPipeline(GaudiDiffusionPipeline, QwenImageEditPipeline):
                 # call the callback, if provided
                 if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
                     progress_bar.update()
+                htcore.mark_step()
 
             # remove bucket padding
             if latents_pad_len > 0:
