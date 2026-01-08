@@ -19,6 +19,7 @@ from typing import Optional, Tuple, Union
 import torch
 import torch.nn.functional as F
 from diffusers.models.attention_processor import Attention
+from diffusers.models.transformers.transformer_flux2 import Flux2Attention
 from diffusers.models.transformers.transformer_wan import WanAttention, _get_added_kv_projections, _get_qkv_projections
 from diffusers.utils import deprecate, logging
 from diffusers.utils.import_utils import is_xformers_available
@@ -715,6 +716,111 @@ class GaudiFluxAttnProcessor2_0:
             # dropout
             hidden_states = attn.to_out[1](hidden_states)
             encoder_hidden_states = attn.to_add_out(encoder_hidden_states)
+            return hidden_states, encoder_hidden_states
+        else:
+            return hidden_states
+
+
+class GaudiFlux2AttnProcessor:
+    """
+    Adapted from:
+    https://github.com/huggingface/diffusers/blob/v0.36.0/src/diffusers/models/transformers/transformer_flux2.py#L115
+      * Modified SDPA to use Gaudi fused SDPA kernel
+      * Modified RoPE to use native PAIRWISE mode ordering HPU RoPE kernel
+      * Modified RMSNorm to use fast Gaudi fused RMSNorm kernel
+    """
+
+    _attention_backend = None
+    _parallel_config = None
+
+    def __init__(self, is_training=False):
+        if not hasattr(F, "scaled_dot_product_attention"):
+            raise ImportError(f"{self.__class__.__name__} requires PyTorch 2.0. Please upgrade your pytorch version.")
+        self.is_training = is_training
+        self.fav3 = FlashAttnV3Gaudi()
+
+    def __call__(
+        self,
+        attn: "Flux2Attention",
+        hidden_states: torch.Tensor,
+        encoder_hidden_states: torch.Tensor = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        image_rotary_emb: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        query, key, value, encoder_query, encoder_key, encoder_value = _get_qkv_projections(
+            attn, hidden_states, encoder_hidden_states
+        )
+
+        query = query.unflatten(-1, (attn.heads, -1))
+        key = key.unflatten(-1, (attn.heads, -1))
+        value = value.unflatten(-1, (attn.heads, -1))
+
+        # Apply RMSNorm to Q and K
+        from habana_frameworks.torch.hpex.normalization import FusedRMSNorm
+        
+        use_stages = False
+        bwd_mode = 0
+        fast_math = True
+
+        query = FusedRMSNorm.apply(query, attn.norm_q.weight, attn.norm_q.eps, use_stages, bwd_mode, fast_math)
+        key = FusedRMSNorm.apply(key, attn.norm_k.weight, attn.norm_k.eps, use_stages, bwd_mode, fast_math)
+
+        if attn.added_kv_proj_dim is not None:
+            encoder_query = encoder_query.unflatten(-1, (attn.heads, -1))
+            encoder_key = encoder_key.unflatten(-1, (attn.heads, -1))
+            encoder_value = encoder_value.unflatten(-1, (attn.heads, -1))
+
+            # Apply RMSNorm to Q and K context projections
+            encoder_query = FusedRMSNorm.apply(
+                encoder_query,
+                attn.norm_added_q.weight,
+                attn.norm_added_q.eps,
+                use_stages,
+                bwd_mode,
+                fast_math,
+            )
+            encoder_key = FusedRMSNorm.apply(
+                encoder_key,
+                attn.norm_added_k.weight,
+                attn.norm_added_k.eps,
+                use_stages,
+                bwd_mode,
+                fast_math,
+            )
+
+            query = torch.cat([encoder_query, query], dim=1)
+            key = torch.cat([encoder_key, key], dim=1)
+            value = torch.cat([encoder_value, value], dim=1)
+
+        if image_rotary_emb is not None:
+            query, key = apply_rotary_emb_hpu(query, key, image_rotary_emb)
+
+        from habana_frameworks.torch.hpex.kernels import FusedSDPA
+
+        # Fast FSDPA is not supported in training mode
+        fsdpa_mode = "None" if self.is_training else "fast"
+        # hidden_states = dispatch_attention_fn(
+        #     query,
+        #     key,
+        #     value,
+        #     attn_mask=attention_mask,
+        #     backend=self._attention_backend,
+        #     parallel_config=self._parallel_config,
+        # )
+        hidden_states = self.fav3.forward(query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2), attention_mask=attention_mask, fsdpa_mode=fsdpa_mode)
+        hidden_states = hidden_states.flatten(2, 3)
+        hidden_states = hidden_states.to(query.dtype)
+
+        if encoder_hidden_states is not None:
+            encoder_hidden_states, hidden_states = hidden_states.split_with_sizes(
+                [encoder_hidden_states.shape[1], hidden_states.shape[1] - encoder_hidden_states.shape[1]], dim=1
+            )
+            encoder_hidden_states = attn.to_add_out(encoder_hidden_states)
+
+        hidden_states = attn.to_out[0](hidden_states)
+        hidden_states = attn.to_out[1](hidden_states)
+
+        if encoder_hidden_states is not None:
             return hidden_states, encoder_hidden_states
         else:
             return hidden_states
