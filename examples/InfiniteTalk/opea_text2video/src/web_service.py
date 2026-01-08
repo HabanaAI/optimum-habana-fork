@@ -19,6 +19,7 @@ from comps import (
     register_statistics,
     statistics_dict,
 )
+from util import is_infintetalk_model, is_wan_model
 from component import Text2VideoInput, Text2VideoOutput, ServiceType, OpeaText2Video
 
 
@@ -37,6 +38,9 @@ def validate_form_parameters(form):
         elif "audio" in form:
             audio += form.getlist("audio")
 
+        fps = int(form.get("fps", 25)) if is_infintetalk_model else int(form.get("fps", 24))
+        steps = int(form.get("steps", 40)) if is_infintetalk_model else int(form.get("steps", 50))
+
         params = {
             "prompt": form.get("prompt"),
             "input_reference": form.get("input_reference"),
@@ -44,30 +48,28 @@ def validate_form_parameters(form):
             "audio_guide_scale": float(form.get("audio_guide_scale", 5.0)),
             "audio_type": form.get("audio_type", "add"),
             "model": form.get("model"),
-            "seconds": int(form.get("seconds", 4)),
-            "fps": int(form.get("fps", 25)),
+            "seconds": int(form.get("seconds", 5)),
+            "fps": fps,
             "shift": float(form.get("shift", 5.0)),
-            "steps": int(form.get("steps", 40)),
+            "steps": steps,
             "seed": int(form.get("seed", 42)),
             "guide_scale": float(form.get("guide_scale", 5.0)),
-            "size": form.get("size", "720x1280"),
-            "logo_video": form.get("logo_video", "False")
+            "portrait": form.get("portrait", "false"),
+            "logo_video": form.get("logo_video", "false")
         }
 
         if params["seconds"] <= 0:
             raise ValueError("The 'seconds' parameter must be greater than 0.")
 
-        # Validate size format
-        width, height = params["size"].split("x")
-        if not (width.isdigit() and height.isdigit()):
-            raise ValueError("Invalid size format. Expected 'widthxheight'.")
+        if is_infintetalk_model() and (not params["input_reference"] or len(params["audio"]) == 0):
+            raise ValueError("'input_reference' and 'audio' must be provided for InfinteTalk models.")
 
-        if not params["input_reference"] or len(params["audio"]) == 0:
-            raise ValueError("'input_reference' and 'audio' must be provided.")
+        if is_wan_model() and (not params["prompt"] and not params["input_reference"]):
+            raise ValueError("'prompt' and 'input_reference' must be provided one for Wan2.2-TI2V-5B.")
 
         return params, None
     except (ValueError, TypeError) as e:
-        error_content = {"error": {"message": f"Invalid parameter type: {e}", "code": "400"}}
+        error_content = {"error": {"message": f"{e}", "code": "400"}}
         return None, JSONResponse(status_code=status.HTTP_400_BAD_REQUEST, content=error_content)
 
 
@@ -80,8 +82,8 @@ async def resolve_request(request: Request):
 
 
 def calculate_progress(job_info):
-    estimated_time = estimate_queue_time(int(job_info[4]), int(job_info[9]))
-    start_time = int(job_info[15])
+    estimated_time = estimate_queue_time(int(job_info[3]), int(job_info[8]))
+    start_time = int(job_info[14])
     elapsed_time = int(time.time()) - start_time
     progress = int(min(int((elapsed_time / (estimated_time * 60)) * 100), 99))
     left_time = int(max(1, int(estimated_time - (elapsed_time / 60))))
@@ -89,8 +91,12 @@ def calculate_progress(job_info):
 
 
 def estimate_queue_time(seconds, steps):
-    steps = max(steps, 1)
-    return math.ceil(seconds * 1.16 * steps / 20) if seconds <= 10 else math.ceil(int(seconds * steps / 20)) if seconds <= 15 else math.ceil(int(seconds * 0.83 * steps / 20))
+    rank_size = int(os.getenv("RANK_SIZE", 1))
+    if is_infintetalk_model():
+        steps = max(steps, 1)
+        return math.ceil(seconds * 1.16 * steps * rank_size / (20*8)) if seconds <= 10 else math.ceil(int(seconds * steps * rank_size / (20*8))) if seconds <= 15 else math.ceil(int(seconds * 0.83 * steps * rank_size / (20*8)))
+    else:
+        return math.ceil(seconds * 1.9 * steps * rank_size / (50*5*8))
 
 
 def generate_response(video_id) -> Text2VideoOutput:
@@ -107,17 +113,17 @@ def generate_response(video_id) -> Text2VideoOutput:
                 for line in lines:
                     job = line.strip().split(sep)
 
-                    if len(job) < 17:
+                    if len(job) < 16:
                         continue
 
                     if job[0] == video_id:
                         job_info = job
-                        queue_estimated_time_in_minutes += estimate_queue_time(int(job[4]), int(job[9]))
+                        queue_estimated_time_in_minutes += estimate_queue_time(int(job[3]), int(job[8]))
                         break
 
                     if job[1] == "queued":
                         queue_length += 1
-                        queue_estimated_time_in_minutes += estimate_queue_time(int(job[4]), int(job[9]))
+                        queue_estimated_time_in_minutes += estimate_queue_time(int(job[3]), int(job[8]))
 
                     if job[1] == "processing":
                         progress, left_time = calculate_progress(job)
@@ -135,7 +141,7 @@ def generate_response(video_id) -> Text2VideoOutput:
                     status=job_info[1],
                     progress=progress,
                     created_at=int(job_info[2]),
-                    seconds=job_info[4],
+                    seconds=job_info[3],
                     duration=0,
                     estimated_time=left_time,
                     queue_length=0,
@@ -148,8 +154,8 @@ def generate_response(video_id) -> Text2VideoOutput:
                     status=job_info[1],
                     progress=100 if job_info[1] == "completed" else 0,
                     created_at=int(job_info[2]),
-                    seconds=job_info[4],
-                    duration=job_info[14],
+                    seconds=job_info[3],
+                    duration=job_info[13],
                     estimated_time=0 if job_info[1] == "completed" else int(queue_estimated_time_in_minutes),
                     queue_length=0 if job_info[1] == "completed" else queue_length,
                     error=job_info[-1] if job_info[1] == "error" else ""
@@ -284,8 +290,8 @@ async def delete_video(video_id: str):
                 status="deleted",
                 progress=0,
                 created_at=int(deleted_job_info[2]),
-                seconds=deleted_job_info[4],
-                duration=int(deleted_job_info[14]),
+                seconds=deleted_job_info[3],
+                duration=int(deleted_job_info[13]),
                 estimated_time=0,
                 queue_length=0,
                 error=""
@@ -332,12 +338,15 @@ def main():
 
     parser = argparse.ArgumentParser(description="Text-to-Video Microservice")
     parser.add_argument("--model_name_or_path", type=str, default="InfinteTalk", help="Model name or path.")
+    parser.add_argument("--rank_size", type=int, default=4, help="Determines how many ranks are divided into context parallel group.")
     parser.add_argument("--video_dir", type=str, default="/home/user/video", help="Video output directory.")
+    parser.add_argument("--sep", type=str, default=",", help="separator for job attrs")
 
     args = parser.parse_args()
     os.environ["MODEL"] = args.model_name_or_path
+    os.environ["RANK_SIZE"] = str(args.rank_size)
     os.environ["VIDEO_DIR"] = args.video_dir
-    os.environ["SEP"] = "$###$"
+    os.environ["SEP"] = args.sep
     text2video_component_name = os.getenv("TEXT2VIDEO_COMPONENT_NAME", "OPEA_TEXT2VIDEO")
 
     try:

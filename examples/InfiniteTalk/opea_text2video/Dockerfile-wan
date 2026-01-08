@@ -1,0 +1,27 @@
+# Copyright (C) 2024 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+
+# HABANA environment
+FROM artifactory-kfs.habana-labs.com/docker-local/1.23.0/ubuntu22.04/habanalabs/pytorch-installer-2.9.0:1.23.0-660 AS hpu
+RUN useradd -m -s /bin/bash user && \
+    mkdir -p /home/user && \
+    mkdir -p /home/user/video && \
+    chown -R user /home/user/
+
+COPY src /home/user/text2video
+
+RUN apt update && apt install -y ffmpeg
+RUN cd /home/user && git clone https://github.com/Wei-Lin-Intel/Wan2.2.git -b hpu
+RUN cd /home/user && git clone https://github.com/opea-project/GenAIComps.git
+RUN chown -R user /home/user/text2video
+
+# Set environment variables
+ENV LANG=en_US.UTF-8
+ENV PYTHONPATH=/home/user/text2video:/usr/lib/habanalabs/:/home/user/Wan2.2/:/home/user/GenAIComps/
+
+ARG uvpip='uv pip install --system --no-cache-dir'
+RUN pip install --no-cache-dir --upgrade pip setuptools uv && \
+    $uvpip -r /home/user/text2video/requirements.txt
+
+USER user
+WORKDIR /home/user/text2video

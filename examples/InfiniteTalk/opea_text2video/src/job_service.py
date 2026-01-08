@@ -29,7 +29,7 @@ from wan.utils.multitalk_utils import save_video_ffmpeg, cache_video
 from wan.utils.utils import str2bool, is_video, split_wav_librosa
 from wan.configs import SIZE_CONFIGS, SUPPORTED_SIZES, WAN_CONFIGS
 
-
+from util import update_job, find_max_matching_frame
 warnings.filterwarnings("ignore")
 
 
@@ -133,31 +133,6 @@ def save_video_with_logo(gen_video_samples, save_path, vocal_audio_list, fps=25,
         os.remove(save_path_crop_audio)
 
 
-def find_max_matching_frame(max_value: int, default_value: int) -> int:
-    """
-    Finds the largest integer less than or equal to max_value
-    that can be expressed in the form 4*n + 1.
-
-    Args:
-        max_value: The upper bound for the search.
-
-    Returns:
-        The largest number matching the pattern, or None if no such
-        number exists within the given limit (e.g., if max_value < 1).
-    """
-    # The smallest number of the form 4*n + 1 (for n>=0) is 1.
-    if max_value < 1:
-        return default_value
-
-    # Start from max_value and check downwards.
-    for number in range(max_value, 0, -1):
-        # A number is of the form 4*n + 1 if its remainder when divided by 4 is 1.
-        if number % 4 == 1:
-            return number
-
-    return default_value  # Should not be reached if max_value >= 1
-
-
 def _validate_args(args):
     # Basic check
     assert args.ckpt_dir is not None, "Please specify the checkpoint directory."
@@ -199,7 +174,7 @@ def _parse_args():
     parser.add_argument("--scene_seg", action="store_true", default=False, help="Enable scene segmentation for input video.")
     parser.add_argument("--quant", type=str, default=None, help="Quantization type, must be 'int8' or 'fp8'.")
     parser.add_argument("--video_dir", type=str, default="/home/user/video", help="Video output directory.")
-    parser.add_argument("--sep", type=str, default="$###$", help="Video output directory.")
+    parser.add_argument("--sep", type=str, default=",", help="separator for job attrs")
 
     args = parser.parse_args()
     _validate_args(args)
@@ -397,40 +372,6 @@ def process_tts_multi(text, save_dir, voice1, voice2):
     return s1, s2, save_path_sum
 
 
-def update_job(job_processed, args):
-    # If a job was processed, rewrite the entire job file
-    job_file = os.path.join(args.video_dir, "job.txt")
-    sep = args.sep
-    if job_processed:
-        with open(job_file, "r+", encoding="utf-8") as f:
-            fcntl.flock(f, fcntl.LOCK_EX)
-            try:
-                # Re-read the file to get the latest content before writing
-                f.seek(0)
-                lines_before_write = [line.strip() for line in f if line.strip()]
-
-                # Find the job by ID and update it
-                job_id_to_update = job_processed[0]
-                found = False
-                for i, line in enumerate(lines_before_write):
-                    if line.startswith(job_id_to_update + sep):
-                        lines_before_write[i] = sep.join(map(str, job_processed))
-                        found = True
-                        break
-
-                # If the job was somehow removed from the file, add the new status at the end
-                if not found:
-                    lines_before_write.append(sep.join(map(str, job_processed)))
-
-                # Write the updated content back to the file
-                f.seek(0)
-                f.truncate()
-                for line in lines_before_write:
-                    f.write(line + "\n")
-            finally:
-                fcntl.flock(f, fcntl.LOCK_UN)
-
-
 def generate(args):
     rank = int(os.getenv("RANK", 0))
     world_size = int(os.getenv("WORLD_SIZE", 1))
@@ -523,10 +464,10 @@ def generate(args):
                         job_found = False
                         for line in lines:
                             parts = line.strip().split(args.sep)
-                            if not job_found and len(parts) >= 17 and parts[1] == "queued":
+                            if not job_found and len(parts) >= 16 and parts[1] == "queued":
                                 job_found = True
                                 parts[1] = "processing"  # Mark as processing
-                                parts[15] = str(int(time.time()))  # Set start time
+                                parts[14] = str(int(time.time()))  # Set start time
                                 job_to_process = parts
                                 updated_lines.append(args.sep.join(map(str, parts)) + "\n")
                             else:
@@ -546,7 +487,7 @@ def generate(args):
 
             if job_to_process:
                 try:
-                    id, status, created_str, prompt, seconds, size, quality, fps, shift, steps, guide_scale, audio_guide_scale, seed, logo_video, generate_duration, start_time, end_time, *error_msg_parts = job_to_process
+                    id, status, created_str, seconds, size, quality, fps, shift, steps, guide_scale, audio_guide_scale, seed, logo_video, generate_duration, start_time, end_time, *error_msg_parts = job_to_process
                     generate_start_time = float(start_time)
 
                     fps = 25
@@ -654,13 +595,13 @@ def generate(args):
                                 save_video_ffmpeg(sum_video, save_file, [input_data["video_audio"]], high_quality_save=False, fps=fps)
 
                     generate_end_time = time.time()
-                    job_processed = [id, "completed", created_str, prompt, seconds, size, quality, fps, shift, steps, guide_scale, audio_guide_scale, seed, logo_video, max(0, int(generate_end_time - generate_start_time)), int(generate_start_time), int(generate_end_time), ""]
+                    job_processed = [id, "completed", created_str, seconds, size, quality, fps, shift, steps, guide_scale, audio_guide_scale, seed, logo_video, max(0, int(generate_end_time - generate_start_time)), int(generate_start_time), int(generate_end_time), ""]
                     if rank == 0:
                         update_job(job_processed, args)
                 except Exception as e:
                     logging.error(f"error: {e}")
                     generate_end_time = time.time()
-                    job_processed = [id, "error", created_str, prompt, seconds, size, quality, fps, shift, steps, guide_scale, audio_guide_scale, seed, logo_video, max(0, int(generate_end_time - generate_start_time)), int(generate_start_time), int(generate_end_time), str(e)]
+                    job_processed = [id, "error", created_str, seconds, size, quality, fps, shift, steps, guide_scale, audio_guide_scale, seed, logo_video, max(0, int(generate_end_time - generate_start_time)), int(generate_start_time), int(generate_end_time), str(e)]
                     if rank == 0:
                         update_job(job_processed, args)
 

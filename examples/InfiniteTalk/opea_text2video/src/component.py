@@ -12,6 +12,7 @@ from enum import Enum
 from pydantic import BaseModel
 from typing import Optional, List, Union
 from fastapi import Form, File, UploadFile
+from util import is_infintetalk_model, is_wan_model
 from comps import CustomLogger, OpeaComponent, OpeaComponentRegistry
 
 logger = CustomLogger("opea_Text2Video")
@@ -29,16 +30,16 @@ class Text2VideoInput:
         input_reference: Optional[UploadFile] = File(None),
         audio: Union[UploadFile, List[UploadFile]] = File(None),
         audio_guide_scale: Optional[float] = Form(5.0),
-        audio_type: Optional[str] = Form("add"),
+        audio_type: Optional[str] = Form(None),
         model: Optional[str] = Form(None),
-        seconds: Optional[int] = Form(4),
-        fps: Optional[int] = Form(25),
+        seconds: Optional[int] = Form(None),
+        fps: Optional[int] = Form(None),
         shift: Optional[float] = Form(5.0),
-        steps: Optional[int] = Form(40),
+        steps: Optional[int] = Form(None),
         seed: Optional[int] = Form(42),
         guide_scale: Optional[float] = Form(5.0),
-        size: Optional[str] = Form("720x1280"),
-        logo_video: Optional[bool] = Form("False")
+        portrait: Optional[str] = Form("false"),
+        logo_video: Optional[str] = Form("false")
     ):
         self.prompt = prompt
         self.input_reference = input_reference
@@ -52,7 +53,7 @@ class Text2VideoInput:
         self.steps = steps
         self.seed = seed
         self.guide_scale = guide_scale
-        self.size = size
+        self.portrait = portrait
         self.logo_video = logo_video
 
 
@@ -126,26 +127,33 @@ class OpeaText2Video(OpeaComponent):
             with open(image_file, "wb") as img_f:
                 img_f.write(contents)
 
-        audio_durations = []
-        if input.audio and isinstance(input.audio, list):
-            audio = {}
-            for idx, audio_file in enumerate(input.audio):
-                audio_path = os.path.join(job_dir, audio_file.filename)
-                audio[f"person{idx+1}"] = audio_path
-                contents = await audio_file.read()
-                with open(audio_path, "wb") as audio_f:
-                    audio_f.write(contents)
-                audio_durations.append(get_audio_duration(audio_path))
+        seconds = int(input.seconds) if input.seconds else 10
 
-            input_json_content["cond_audio"] = audio
+        if is_infintetalk_model():
+            audio_durations = []
+            if input.audio and isinstance(input.audio, list):
+                audio = {}
+                for idx, audio_file in enumerate(input.audio):
+                    audio_path = os.path.join(job_dir, audio_file.filename)
+                    audio[f"person{idx+1}"] = audio_path
+                    contents = await audio_file.read()
+                    with open(audio_path, "wb") as audio_f:
+                        audio_f.write(contents)
+                    audio_durations.append(get_audio_duration(audio_path))
+
+                input_json_content["cond_audio"] = audio
+            seconds = int(min(audio_durations)) if audio_durations else 10
+            logger.info(f"set audio seconds to {seconds} and audio durations for job {job_id}")
 
         with open(input_json, "w") as f:
             json.dump(input_json_content, f, indent=4)
 
-        seconds = int(min(audio_durations)) if audio_durations else 20
-        logger.info(f"set audio seconds to {seconds} and audio durations for job {job_id}: {audio_durations}")
         if seconds <= 0:
             raise ValueError("The provided audio files have non-positive durations.")
+
+        size = ""
+        if is_wan_model:
+            size = "704*1280" if input.portrait.lower() == "true" else "1280*704"
 
         status = "queued"
         quality = "standard"
@@ -156,9 +164,8 @@ class OpeaText2Video(OpeaComponent):
             job_id,
             status,
             int(created),
-            input.prompt,
             seconds,
-            input.size,
+            size,
             quality,
             input.fps,
             input.shift,
@@ -173,7 +180,7 @@ class OpeaText2Video(OpeaComponent):
             ""
         ]
 
-        sep = os.getenv("SEP", "##$##")
+        sep = os.getenv("SEP", ",")
         line = sep.join(map(str, job)) + "\n"
         job_file = os.path.join(self.video_dir, "job.txt")
         with open(job_file, "a") as f:

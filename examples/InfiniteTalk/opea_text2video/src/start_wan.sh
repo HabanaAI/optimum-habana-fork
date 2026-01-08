@@ -12,7 +12,7 @@ echo ""
 # 启动 web 服务
 echo "启动 Web 服务..."
 python3 web_service.py \
-  --model_name_or_path InfinteTalk \
+  --model_name_or_path Wan2.2-TI2V-5B  \
   --rank_size ${NUM_CARDS}  \
   --video_dir /home/user/video > /hf/logs/web.log 2>&1 &
 WEB_PID=$!
@@ -25,15 +25,11 @@ sleep 20
 
 # 启动 job 服务
 echo "启动 Job 服务..."
-PT_HPU_SYNC_LAUNCH=1 PT_HPU_GPU_MIGRATION=1 PT_HPU_LAZY_MODE=1 torchrun \
+PT_HPU_RECIPE_CACHE_CONFIG=/home/user/cache_wan,false,40960 PT_HPU_SYNC_LAUNCH=1 PT_HPU_GPU_MIGRATION=1 PT_HPU_LAZY_MODE=1 torchrun \
   --nproc_per_node=${NUM_CARDS} \
   --master-port 29502 \
   --standalone \
-  job_service.py \
-  --size infinitetalk-480 \
-  --mode streaming \
-  --motion_frame 9 \
-  --offload_model False \
+  job_service_wan.py \
   --ulysses_size=${NUM_CARDS} > /hf/logs/job.log 2>&1 &
 JOB_PID=$!
 echo "Job 服务已启动 (PID: $JOB_PID)"
