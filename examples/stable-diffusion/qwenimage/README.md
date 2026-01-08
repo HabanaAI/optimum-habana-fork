@@ -1,6 +1,7 @@
 # Qwen/Qwen-Image支持文生图
 ## 测试样例
 
+单卡：
 ```bash
 PT_HPU_LAZY_MODE=1 \
 python examples/stable-diffusion/qwenimage/text_to_image_qwenimage.py \
@@ -9,7 +10,22 @@ python examples/stable-diffusion/qwenimage/text_to_image_qwenimage.py \
     --num_inference_steps 20
 ```
 
+多卡：
+```bash
+PT_HPU_LAZY_MODE=1 \
+deepspeed --num_nodes 1 \
+    --num_gpus 4 \
+    --no_local_rank examples/stable-diffusion/qwenimage/text_to_image_qwenimage.py \
+    --model_name_or_path Qwen/Qwen-Image \
+    --prompt "A capybara wearing a suit holding a sign that reads Hello World." \
+    --num_inference_steps 20 \
+    --context_parallel_size 4
+```
+
 ## 参数设置
+
+    --num_gpus & --context_parallel_size 多卡加速（Context Parallel）
+
     --model_name_or_path 模型路径
 
     --prompt 指导图像生成得prompt
@@ -83,6 +99,7 @@ python examples/stable-diffusion/qwenimage/text_to_image_qwenimage.py \
 # Qwen/Qwen-Image-Edit 支持单图编辑
 ## 测试样例
 
+单卡：
 ```bash
 PT_HPU_LAZY_MODE=1 \
 python examples/stable-diffusion/qwenimage/image_to_image_qwenimageedit.py \
@@ -92,7 +109,22 @@ python examples/stable-diffusion/qwenimage/image_to_image_qwenimageedit.py \
     --num_inference_steps 10
 ```
 
+多卡：
+```bash
+PT_HPU_LAZY_MODE=1 \
+deepspeed --num_nodes 1 \
+    --num_gpus 4 \
+    --no_local_rank examples/stable-diffusion/qwenimage/image_to_image_qwenimageedit.py \
+    --model_name_or_path Qwen/Qwen-Image-Edit \
+    --prompt "Change to Cartoon style." \
+    --image_path /path/test.png \
+    --num_inference_steps 10 \
+    --context_parallel_size 4
+```
+
 ## 参数设置
+
+    --num_gpus & --context_parallel_size 多卡加速（Context Parallel）
 
     --model_name_or_path 模型路径
 
@@ -157,6 +189,7 @@ python examples/stable-diffusion/qwenimage/image_to_image_qwenimageedit.py \
 # Qwen/Qwen-Image-Edit-2509 支持单图及多图编辑
 ## 测试样例
 
+单卡：
 ```bash
 PT_HPU_LAZY_MODE=1 \
 python examples/stable-diffusion/qwenimage/image_to_image_qwenimageeditplus.py \
@@ -166,7 +199,23 @@ python examples/stable-diffusion/qwenimage/image_to_image_qwenimageeditplus.py \
     --num_inference_steps 10
 ```
 
+多卡：
+```bash
+PT_HPU_LAZY_MODE=1 \
+deepspeed --num_nodes 1 \
+    --num_gpus 4 \
+    --no_local_rank examples/stable-diffusion/qwenimage/image_to_image_qwenimageeditplus.py \
+    --model_name_or_path Qwen/Qwen-Image-Edit-2509 \
+    --prompt "Change the two images into one cartoon picture." \
+    --images_path /path/img1.png /path/img2.png \
+    --num_inference_steps 10 \
+    --context_parallel_size 4
+```
+
 ## 参数设置
+
+    --num_gpus & --context_parallel_size 多卡加速（Context Parallel）
+
     --model_name_or_path 模型路径
 
     --prompt 指导图像生成得prompt
@@ -253,7 +302,7 @@ deepspeed --num_nodes 1 \
 ```
 
 ## 参数设置
-    
+
     --num_gpus & --context_parallel_size 多卡加速（Context Parallel）
 
     --model_name_or_path 模型路径
