@@ -99,7 +99,7 @@ no_proxy=localhost,127.0.0.1,::1
 
 ```bash
 # 启动服务（后台运行）
-docker compose -f docker-compose.yml up -d
+docker compose -f docker-compose-wan.yml up -d
 
 # 查看服务状态
 docker compose ps
@@ -132,7 +132,9 @@ docker compose down
 
 ```
 
-### 4. 手工创建 Docker 容器实例
+### 4. 手工方式
+
+#### 4.1 创建 Docker 容器实例
 
 此命令将创建一个配置好 Gaudi 环境的容器实例。
 
@@ -161,9 +163,7 @@ docker run -it --name ${NAME} \
   ${IMG_NAME} /bin/bash
 ```
 
-## 服务使用
-
-### 1. 启动 Web 服务
+#### 4.2 启动 Web 服务
 
 在容器内部执行以下命令，启动 API 服务。
 
@@ -177,7 +177,7 @@ cd /home/user/text2video
 python3 web_service.py --model_name_or_path Wan2.2-TI2V-5B --rank_size ${HPU} 2>&1 &
 ```
 
-### 2. 启动 Gaudi 作业服务
+#### 4.3 启动 Gaudi 作业服务
 
 此服务负责处理视频生成任务。
 
