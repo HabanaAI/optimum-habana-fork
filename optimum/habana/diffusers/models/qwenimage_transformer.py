@@ -183,7 +183,8 @@ def QwenImageTransformer2DModelGaudi(
 
             vid_freqs_cos = F.pad(vid_freqs_cos, (0, 0, 0, pad_len_img))
             vid_freqs_sin = F.pad(vid_freqs_sin, (0, 0, 0, pad_len_img))
-
+            if modulate_index is not None:
+                modulate_index = F.pad(modulate_index, (0, pad_len_img))
             seq_len_img = padded_seq_len_img
 
         sp_seq_len_img = seq_len_img // parallel_state.get_sequence_parallel_world_size()
@@ -193,6 +194,8 @@ def QwenImageTransformer2DModelGaudi(
 
         vid_freqs_cos = vid_freqs_cos[start_img:end_img, :]
         vid_freqs_sin = vid_freqs_sin[start_img:end_img, :]
+        if modulate_index is not None:
+            modulate_index = modulate_index[:,start_img:end_img]
 
     image_rotary_emb = (vid_freqs_cos, vid_freqs_sin), (txt_freqs_cos, txt_freqs_sin)
 
