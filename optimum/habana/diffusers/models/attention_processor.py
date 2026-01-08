@@ -808,7 +808,7 @@ class GaudiFlux2AttnProcessor:
         #     parallel_config=self._parallel_config,
         # )
         hidden_states = self.fav3.forward(query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2), attention_mask=attention_mask, fsdpa_mode=fsdpa_mode)
-        hidden_states = hidden_states.flatten(2, 3)
+        hidden_states = hidden_states.transpose(1, 2).flatten(2, 3)
         hidden_states = hidden_states.to(query.dtype)
 
         if encoder_hidden_states is not None:
