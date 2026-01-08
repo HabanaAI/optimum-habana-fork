@@ -143,14 +143,14 @@ class GaudiQwenImageEditPlusPipeline(GaudiDiffusionPipeline, QwenImageEditPlusPi
         self.vae.encoder.forward = types.MethodType(QwenImageEncoder3dForwardGaudi, self.vae.encoder)
 
         for attn in self.vae.decoder.mid_block.attentions:
-            attn.forwward = types.MethodType(QwenImageAttentionBlockForwardGaudi, attn)
+            attn.forward = types.MethodType(QwenImageAttentionBlockForwardGaudi, attn)
 
         for attn in self.vae.encoder.mid_block.attentions:
-            attn.forwward = types.MethodType(QwenImageAttentionBlockForwardGaudi, attn)
+            attn.forward = types.MethodType(QwenImageAttentionBlockForwardGaudi, attn)
 
         for layer in self.vae.encoder.down_blocks:
             if isinstance(layer, QwenImageAttentionBlock):
-                layer.forwward = types.MethodType(QwenImageAttentionBlockForwardGaudi, layer)
+                layer.forward = types.MethodType(QwenImageAttentionBlockForwardGaudi, layer)
 
         config = self.transformer.config
         self.transformer.pos_embed = GaudiQwenEmbedRope(
@@ -317,6 +317,7 @@ class GaudiQwenImageEditPlusPipeline(GaudiDiffusionPipeline, QwenImageEditPlusPi
             text=txt,
             images=image,
             padding=True,
+            pad_to_multiple_of=256,
             return_tensors="pt",
         ).to(device)
 
@@ -327,6 +328,7 @@ class GaudiQwenImageEditPlusPipeline(GaudiDiffusionPipeline, QwenImageEditPlusPi
             image_grid_thw=model_inputs.image_grid_thw,
             output_hidden_states=True,
             use_flash_attention=True,
+            cache_implementation="static",
         )
 
         hidden_states = outputs.hidden_states[-1]
@@ -687,11 +689,13 @@ class GaudiQwenImageEditPlusPipeline(GaudiDiffusionPipeline, QwenImageEditPlusPi
         # 6. Denoising loop
         self.scheduler.set_begin_index(0)
         with self.progress_bar(total=num_inference_steps) as progress_bar:
-            for i, t in enumerate(timesteps):
+            for i in range(len(timesteps)):
                 if self.interrupt:
                     continue
 
+                t = timesteps[0]
                 self._current_timestep = t
+                timesteps = torch.roll(timesteps, shifts=-1, dims=0)
 
                 latent_model_input = latents
                 if image_latents is not None:
