@@ -188,14 +188,11 @@ class GaudiQwenEmbedLayer3DRope(torch.nn.Module):
         freqs_pos_cos = self.pos_freqs_cos.split([x // 2 for x in self.axes_dim], dim=1)
         freqs_neg_cos = self.neg_freqs_cos.split([x // 2 for x in self.axes_dim], dim=1)
 
-        #freqs_neg = self.neg_freqs.split([x // 2 for x in self.axes_dim], dim=1)
         freqs_pos_sin = self.pos_freqs_sin.split([x // 2 for x in self.axes_dim], dim=1)
         freqs_neg_sin = self.neg_freqs_sin.split([x // 2 for x in self.axes_dim], dim=1)
 
-        #freqs_frame = freqs_neg[0][-1:].view(frame, 1, 1, -1).expand(frame, height, width, -1)
         freqs_frame_cos = freqs_neg_cos[0][-1:].view(frame, 1, 1, -1).expand(frame, height, width, -1)
         freqs_frame_sin = freqs_neg_sin[0][-1:].view(frame, 1, 1, -1).expand(frame, height, width, -1)
-
 
         if self.scale_rope:
             freqs_height_cos = torch.cat([freqs_neg_cos[1][-(height - height // 2) :], freqs_pos_cos[1][: height // 2]], dim=0)
@@ -208,7 +205,6 @@ class GaudiQwenEmbedLayer3DRope(torch.nn.Module):
 
             freqs_width_sin = torch.cat([freqs_neg_sin[2][-(width - width // 2) :], freqs_pos_sin[2][: width // 2]], dim=0)
             freqs_width_sin = freqs_width_sin.view(1, 1, width, -1).expand(frame, height, width, -1)
-
 
         else:
             freqs_height_cos = freqs_pos_cos[1][:height].view(1, height, 1, -1).expand(frame, height, width, -1)
@@ -265,17 +261,9 @@ class GaudiQwenImageLayeredPipeline(GaudiDiffusionPipeline, QwenImageLayeredPipe
             block.forward = types.MethodType(QwenImageTransformerBlockForwardGaudi, block)
             block.attn.processor = GaudiQwenDoubleStreamAttnProcessor2_0(is_training)
         self.vae.decoder.forward = types.MethodType(QwenImageDecoder3dForwardGaudi, self.vae.decoder)
-        self.vae.encoder.forward = types.MethodType(QwenImageEncoder3dForwardGaudi, self.vae.encoder)
 
         for attn in self.vae.decoder.mid_block.attentions:
             attn.forward = types.MethodType(QwenImageAttentionBlockForwardGaudi, attn)
-
-        for attn in self.vae.encoder.mid_block.attentions:
-            attn.forward = types.MethodType(QwenImageAttentionBlockForwardGaudi, attn)
-
-        for layer in self.vae.encoder.down_blocks:
-            if isinstance(layer, QwenImageAttentionBlock):
-                layer.forward = types.MethodType(QwenImageAttentionBlockForwardGaudi, layer)
 
         config = self.transformer.config
         if not config.use_layer3d_rope:
@@ -293,14 +281,6 @@ class GaudiQwenImageLayeredPipeline(GaudiDiffusionPipeline, QwenImageLayeredPipe
             self.vae_decode_latents_buckets = [int(i) for i in envvar.split(',')]
         logger.info(
                 f"vae_decode_latents_buckets is {self.vae_decode_latents_buckets}."
-            )
-
-        self.vae_encode_buckets = [1024,1280,1504]
-        envvar = os.environ.get("QWENIMAGELAYERED_VAE_ENCODE_BUCKETS", "")
-        if envvar != "":
-            self.vae_encode_buckets = [int(i) for i in envvar.split(',')]
-        logger.info(
-                f"vae_encode_buckets is {self.vae_encode_buckets}."
             )
 
         hidden_states_buckets_step = int(os.environ.get("QWENIMAGE_TRANSFORMER_BUCKETS_STEP", 256))

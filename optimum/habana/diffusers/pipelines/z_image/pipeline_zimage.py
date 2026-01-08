@@ -241,7 +241,7 @@ def transformer_forward_gaudi(
     cap_feats = self.cap_embedder(cap_feats)
     cap_feats[torch.cat(cap_inner_pad_mask)] = self.cap_pad_token
     cap_feats = list(cap_feats.split(cap_item_seqlens, dim=0))
-    cap_freqs_cis = list(self.rope_embedder(torch.cat(cap_pos_ids, dim=0)).split(cap_item_seqlens, dim=0))
+    cap_freqs_cis = list(self.rope_embedder(torch.cat(cap_pos_ids, dim=0)).split(torch.tensor(cap_item_seqlens), dim=0))
 
     cap_feats = pad_sequence(cap_feats, batch_first=True, padding_value=0.0)
     cap_freqs_cis = pad_sequence(cap_freqs_cis, batch_first=True, padding_value=0.0)
@@ -559,9 +559,12 @@ class GaudiStableDiffusionZImagePipeline(GaudiDiffusionPipeline, ZImagePipeline)
         htcore.mark_step()
         # 6. Denoising loop
         with self.progress_bar(total=num_inference_steps) as progress_bar:
-            for i, t in enumerate(timesteps):
+            for i in range(len(timesteps)):
                 if self.interrupt:
                     continue
+
+                t = timesteps[0]
+                timesteps = torch.roll(timesteps, shifts=-1, dims=0)
 
                 # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
                 timestep = t.expand(latents.shape[0])
