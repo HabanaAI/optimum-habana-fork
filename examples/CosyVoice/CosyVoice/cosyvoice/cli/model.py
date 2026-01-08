@@ -66,13 +66,13 @@ class CosyVoiceModel:
 
     def load(self, llm_model, flow_model, hift_model):
         self.llm.load_state_dict(torch.load(llm_model, map_location=self.device), strict=True)
-        self.llm.to(self.device).eval()
+        self.llm.to('cpu').eval()
         self.flow.load_state_dict(torch.load(flow_model, map_location=self.device), strict=True)
         self.flow.to(self.device).eval()
         # in case hift_model is a hifigan model
         hift_state_dict = {k.replace('generator.', ''): v for k, v in torch.load(hift_model, map_location=self.device).items()}
         self.hift.load_state_dict(hift_state_dict, strict=True)
-        self.hift.to(self.device).eval()
+        self.hift.to('cpu').eval()
 
     def load_jit(self, llm_text_encoder_model, llm_llm_model, flow_encoder_model):
         llm_text_encoder = torch.jit.load(llm_text_encoder_model, map_location=self.device)
@@ -110,7 +110,7 @@ class CosyVoiceModel:
                                                      prompt_speech_token=llm_prompt_speech_token.to(self.device),
                                                      prompt_speech_token_len=torch.tensor([llm_prompt_speech_token.shape[1]], dtype=torch.int32).to(self.device),
                                                      embedding=llm_embedding.to(self.device)):
-                    self.tts_speech_token_dict[uuid].append(i)
+                    yield i
             else:
                 for i in self.llm.inference(text=text.to('hpu'), #.to(self.device),
                                             text_len=torch.tensor([text.shape[1]], dtype=torch.int32).to('hpu'), #.to(self.device),
@@ -120,12 +120,11 @@ class CosyVoiceModel:
                                             prompt_speech_token_len=torch.tensor([llm_prompt_speech_token.shape[1]], dtype=torch.int32).to(self.device),
                                             embedding=llm_embedding.to('hpu'),
                                             uuid=uuid):
-                    self.tts_speech_token_dict[uuid].append(i)
-        self.llm_end_dict[uuid] = True
+                    yield i
 
     def vc_job(self, source_speech_token, uuid):
-        self.tts_speech_token_dict[uuid] = source_speech_token.flatten().tolist()
-        self.llm_end_dict[uuid] = True
+        for i in source_speech_token.flatten().tolist():
+            yield i
 
     def token2wav(self, token, prompt_token, prompt_feat, embedding, uuid, finalize=False, speed=1.0):
         # with torch.cuda.amp.autocast(self.fp16):
@@ -244,7 +243,7 @@ class CosyVoice2Model(CosyVoiceModel):
                  flow: torch.nn.Module,
                  hift: torch.nn.Module,
                  fp16: bool = False):
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = torch.device('hpu')
         self.llm = llm
         self.flow = flow
         self.hift = hift
@@ -284,13 +283,13 @@ class CosyVoice2Model(CosyVoiceModel):
     def token2wav(self, token, prompt_token, prompt_feat, embedding, token_offset, uuid, stream=False, finalize=False, speed=1.0):
         t1 = time.time()
         # with torch.cuda.amp.autocast(self.fp16):
-        tts_mel, _ = self.flow(token=token.to('cpu'), #.to(self.device),
-                                          token_len=torch.tensor([token.shape[1]], dtype=torch.int32).to('cpu'), #.to(self.device),
-                                          prompt_token=prompt_token.to('cpu'), #.to(self.device),
-                                          prompt_token_len=torch.tensor([prompt_token.shape[1]], dtype=torch.int32).to('cpu'), #.to(self.device),
-                                          prompt_feat=prompt_feat.to('cpu'), #.to(self.device),
-                                          prompt_feat_len=torch.tensor([prompt_feat.shape[1]], dtype=torch.int32).to('cpu'), #.to(self.device),
-                                          embedding=embedding.to('cpu'), #.to(self.device),
+        tts_mel, _ = self.flow(token=token.to(self.device),
+                                          token_len=torch.tensor([token.shape[1]], dtype=torch.int32).to(self.device),
+                                          prompt_token=prompt_token.to(self.device),
+                                          prompt_token_len=torch.tensor([prompt_token.shape[1]], dtype=torch.int32).to(self.device),
+                                          prompt_feat=prompt_feat.to(self.device),
+                                          prompt_feat_len=torch.tensor([prompt_feat.shape[1]], dtype=torch.int32).to(self.device),
+                                          embedding=embedding.to(self.device),
                                           streaming=stream,
                                           finalize=finalize)
         t2 = time.time()
@@ -338,19 +337,15 @@ class CosyVoice2Model(CosyVoiceModel):
         with self.lock:
             self.tts_speech_token_dict[this_uuid], self.llm_end_dict[this_uuid] = [], False
             self.hift_cache_dict[this_uuid] = None
-        t0 = time.time()
         if source_speech_token.shape[1] == 0:
-            self.llm_job(text, prompt_text, llm_prompt_speech_token, llm_embedding, this_uuid)
-            # p = threading.Thread(target=self.llm_job, args=(text, prompt_text, llm_prompt_speech_token, llm_embedding, this_uuid))
+            token_iter = self.llm_job(text, prompt_text, llm_prompt_speech_token, llm_embedding, this_uuid)
         else:
-            self.vc_job(source_speech_token, this_uuid)
-            # p = threading.Thread(target=self.vc_job, args=(source_speech_token, this_uuid))
-        # p.start()
+            token_iter = self.vc_job(source_speech_token, this_uuid)
         if stream is True:
             token_offset = 0
             prompt_token_pad = int(np.ceil(flow_prompt_speech_token.shape[1] / self.token_hop_len) * self.token_hop_len - flow_prompt_speech_token.shape[1])
-            while True:
-                time.sleep(0.1)
+            for generated_token in token_iter:
+                self.tts_speech_token_dict[this_uuid].append(generated_token)
                 this_token_hop_len = self.token_hop_len + prompt_token_pad if token_offset == 0 else self.token_hop_len
                 if len(self.tts_speech_token_dict[this_uuid]) - token_offset >= this_token_hop_len + self.flow.pre_lookahead_len:
                     this_tts_speech_token = torch.tensor(self.tts_speech_token_dict[this_uuid][:token_offset + this_token_hop_len + self.flow.pre_lookahead_len]).unsqueeze(dim=0)
@@ -364,9 +359,6 @@ class CosyVoice2Model(CosyVoiceModel):
                                                      finalize=False)
                     token_offset += this_token_hop_len
                     yield {'tts_speech': this_tts_speech.cpu()}
-                if self.llm_end_dict[this_uuid] is True and len(self.tts_speech_token_dict[this_uuid]) - token_offset < this_token_hop_len + self.flow.pre_lookahead_len:
-                    break
-            # p.join()
             # deal with remain tokens, make sure inference remain token len equals token_hop_len when cache_speech is not None
             this_tts_speech_token = torch.tensor(self.tts_speech_token_dict[this_uuid]).unsqueeze(dim=0)
             this_tts_speech = self.token2wav(token=this_tts_speech_token,
@@ -379,9 +371,8 @@ class CosyVoice2Model(CosyVoiceModel):
             yield {'tts_speech': this_tts_speech.cpu()}
         else:
             # deal with all tokens
-#            p.join()
-            t1 = time.time()
-            # print("************* self.llm latency: " + str(t1-t0) + " sec")
+            for generated_token in token_iter:
+                self.tts_speech_token_dict[this_uuid].append(generated_token)
             this_tts_speech_token = torch.tensor(self.tts_speech_token_dict[this_uuid]).unsqueeze(dim=0)
             this_tts_speech = self.token2wav(token=this_tts_speech_token,
                                              prompt_token=flow_prompt_speech_token,

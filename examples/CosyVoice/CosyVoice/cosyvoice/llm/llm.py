@@ -458,7 +458,7 @@ class Qwen2LM(TransformerLM):
             token_idx = None
             position_ids = None
             prompt_len = lm_input.shape[1]
-            total_len = math.ceil((prompt_len + max_len) / 256) * 256
+            total_len = math.ceil((prompt_len + max_len) / 512) * 512
             pad_len = total_len - lm_input.shape[1]
             mask = torch.ones((1, 1, prompt_len), device=lm_input.device).to(torch.bool)
             lm_input = F.pad(lm_input, (0, 0, 0, pad_len, 0, 0), value=0)
