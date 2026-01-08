@@ -799,15 +799,8 @@ class GaudiFlux2AttnProcessor:
 
         # Fast FSDPA is not supported in training mode
         fsdpa_mode = "None" if self.is_training else "fast"
-        # hidden_states = dispatch_attention_fn(
-        #     query,
-        #     key,
-        #     value,
-        #     attn_mask=attention_mask,
-        #     backend=self._attention_backend,
-        #     parallel_config=self._parallel_config,
-        # )
         hidden_states = self.fav3.forward(query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2), attention_mask=attention_mask, fsdpa_mode=fsdpa_mode)
+        
         hidden_states = hidden_states.transpose(1, 2).flatten(2, 3)
         hidden_states = hidden_states.to(query.dtype)
 
