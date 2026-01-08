@@ -261,17 +261,9 @@ class GaudiQwenImageLayeredPipeline(GaudiDiffusionPipeline, QwenImageLayeredPipe
             block.forward = types.MethodType(QwenImageTransformerBlockForwardGaudi, block)
             block.attn.processor = GaudiQwenDoubleStreamAttnProcessor2_0(is_training)
         self.vae.decoder.forward = types.MethodType(QwenImageDecoder3dForwardGaudi, self.vae.decoder)
-        #self.vae.encoder.forward = types.MethodType(QwenImageEncoder3dForwardGaudi, self.vae.encoder)
 
         for attn in self.vae.decoder.mid_block.attentions:
             attn.forward = types.MethodType(QwenImageAttentionBlockForwardGaudi, attn)
-
-        #for attn in self.vae.encoder.mid_block.attentions:
-        #    attn.forward = types.MethodType(QwenImageAttentionBlockForwardGaudi, attn)
-
-        #for layer in self.vae.encoder.down_blocks:
-        #    if isinstance(layer, QwenImageAttentionBlock):
-        #        layer.forward = types.MethodType(QwenImageAttentionBlockForwardGaudi, layer)
 
         config = self.transformer.config
         if not config.use_layer3d_rope:
@@ -290,14 +282,6 @@ class GaudiQwenImageLayeredPipeline(GaudiDiffusionPipeline, QwenImageLayeredPipe
         logger.info(
                 f"vae_decode_latents_buckets is {self.vae_decode_latents_buckets}."
             )
-
-        #self.vae_encode_buckets = [1024,1280,1504]
-        #envvar = os.environ.get("QWENIMAGELAYERED_VAE_ENCODE_BUCKETS", "")
-        #if envvar != "":
-        #    self.vae_encode_buckets = [int(i) for i in envvar.split(',')]
-        #logger.info(
-        #        f"vae_encode_buckets is {self.vae_encode_buckets}."
-        #    )
 
         hidden_states_buckets_step = int(os.environ.get("QWENIMAGE_TRANSFORMER_BUCKETS_STEP", 256))
         encoder_hidden_states_buckets_step = int(os.environ.get("QWENIMAGE_TRANSFORMER_ENCODER_BUCKETS_STEP", 128))
