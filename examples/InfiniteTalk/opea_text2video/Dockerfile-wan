@@ -19,7 +19,7 @@ RUN chown -R user /home/user/text2video
 ENV LANG=en_US.UTF-8
 ENV PYTHONPATH=/home/user/text2video:/usr/lib/habanalabs/:/home/user/Wan2.2/:/home/user/GenAIComps/
 
-ARG uvpip='uv pip install --system --no-cache-dir'
+ARG uvpip='uv pip install --no-cache-dir'
 RUN pip install --no-cache-dir --upgrade pip setuptools uv && \
     $uvpip -r /home/user/text2video/requirements.txt && \
     $uvpip -r /home/user/Wan2.2/requirements.txt && \
