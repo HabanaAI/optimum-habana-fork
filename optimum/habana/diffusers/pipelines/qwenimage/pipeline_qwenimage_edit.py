@@ -292,7 +292,6 @@ class GaudiQwenImageEditPipeline(GaudiDiffusionPipeline, QwenImageEditPipeline):
             text=txt,
             images=image,
             padding=True,
-            pad_to_multiple_of=256,
             return_tensors="pt",
         ).to(device)
 
