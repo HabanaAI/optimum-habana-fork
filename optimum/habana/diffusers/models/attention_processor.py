@@ -19,7 +19,7 @@ from typing import Optional, Tuple, Union
 import torch
 import torch.nn.functional as F
 from diffusers.models.attention_processor import Attention
-from diffusers.models.transformers.transformer_flux2 import Flux2Attention
+from diffusers.models.transformers.transformer_flux2 import Flux2Attention, _get_qkv_projections as _get_qkv_projections_flux2
 from diffusers.models.transformers.transformer_wan import WanAttention, _get_added_kv_projections, _get_qkv_projections
 from diffusers.utils import deprecate, logging
 from diffusers.utils.import_utils import is_xformers_available
@@ -747,7 +747,7 @@ class GaudiFlux2AttnProcessor:
         attention_mask: Optional[torch.Tensor] = None,
         image_rotary_emb: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        query, key, value, encoder_query, encoder_key, encoder_value = _get_qkv_projections(
+        query, key, value, encoder_query, encoder_key, encoder_value = _get_qkv_projections_flux2(
             attn, hidden_states, encoder_hidden_states
         )
 
