@@ -19,7 +19,7 @@ from typing import Optional, Tuple, Union
 import torch
 import torch.nn.functional as F
 from diffusers.models.attention_processor import Attention
-from diffusers.models.transformers.transformer_flux2 import Flux2Attention, _get_qkv_projections as _get_qkv_projections_flux2
+from diffusers.models.transformers.transformer_flux2 import Flux2Attention, Flux2ParallelSelfAttention, _get_qkv_projections as _get_qkv_projections_flux2
 from diffusers.models.transformers.transformer_wan import WanAttention, _get_added_kv_projections, _get_qkv_projections
 from diffusers.utils import deprecate, logging
 from diffusers.utils.import_utils import is_xformers_available
@@ -817,6 +817,76 @@ class GaudiFlux2AttnProcessor:
             return hidden_states, encoder_hidden_states
         else:
             return hidden_states
+
+
+class GaudiFlux2ParallelSelfAttnProcessor:
+    """
+    Adapted from:
+    https://github.com/huggingface/diffusers/blob/v0.36.0/src/diffusers/models/transformers/transformer_flux2.py#L259
+      * Modified SDPA to use Gaudi fused SDPA kernel
+      * Modified RoPE to use native PAIRWISE mode ordering HPU RoPE kernel
+      * Modified RMSNorm to use fast Gaudi fused RMSNorm kernel
+    """
+    
+    _attention_backend = None
+    _parallel_config = None
+
+    def __init__(self, is_training=False):
+        if not hasattr(F, "scaled_dot_product_attention"):
+            raise ImportError(f"{self.__class__.__name__} requires PyTorch 2.0. Please upgrade your pytorch version.")
+        self.is_training = is_training
+        self.fav3 = FlashAttnV3Gaudi()
+
+    def __call__(
+        self,
+        attn: "Flux2ParallelSelfAttention",
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        image_rotary_emb: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        # Parallel in (QKV + MLP in) projection
+        hidden_states = attn.to_qkv_mlp_proj(hidden_states)
+        qkv, mlp_hidden_states = torch.split(
+            hidden_states, [3 * attn.inner_dim, attn.mlp_hidden_dim * attn.mlp_mult_factor], dim=-1
+        )
+
+        # Handle the attention logic
+        query, key, value = qkv.chunk(3, dim=-1)
+
+        query = query.unflatten(-1, (attn.heads, -1))
+        key = key.unflatten(-1, (attn.heads, -1))
+        value = value.unflatten(-1, (attn.heads, -1))
+
+        # Apply RMSNorm to Q and K
+        from habana_frameworks.torch.hpex.normalization import FusedRMSNorm
+        
+        use_stages = False
+        bwd_mode = 0
+        fast_math = True
+
+        query = FusedRMSNorm.apply(query, attn.norm_q.weight, attn.norm_q.eps, use_stages, bwd_mode, fast_math)
+        key = FusedRMSNorm.apply(key, attn.norm_k.weight, attn.norm_k.eps, use_stages, bwd_mode, fast_math)
+
+        if image_rotary_emb is not None:
+            query, key = apply_rotary_emb_hpu(query, key, image_rotary_emb)
+
+        from habana_frameworks.torch.hpex.kernels import FusedSDPA
+
+        # Fast FSDPA is not supported in training mode
+        fsdpa_mode = "None" if self.is_training else "fast"
+        hidden_states = self.fav3.forward(query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2), attention_mask=attention_mask, fsdpa_mode=fsdpa_mode)
+        
+        hidden_states = hidden_states.transpose(1, 2).flatten(2, 3)
+        hidden_states = hidden_states.to(query.dtype)
+
+        # Handle the feedforward (FF) logic
+        mlp_hidden_states = attn.mlp_act_fn(mlp_hidden_states)
+
+        # Concatenate and parallel output projection
+        hidden_states = torch.cat([hidden_states, mlp_hidden_states], dim=-1)
+        hidden_states = attn.to_out(hidden_states)
+
+        return hidden_states
 
 
 class GaudiWanAttnProcessor:
