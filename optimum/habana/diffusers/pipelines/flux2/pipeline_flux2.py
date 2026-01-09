@@ -26,11 +26,9 @@ from diffusers.utils import BaseOutput, replace_example_docstring
 from optimum.utils import logging
 from transformers import AutoProcessor, Mistral3ForConditionalGeneration
 
-from diffusers.models.transformers.transformer_flux2 import Flux2AttnProcessor, Flux2ParallelSelfAttnProcessor
-
 from ....transformers.gaudi_configuration import GaudiConfig
 from ....utils import HabanaProfile, speed_metrics, warmup_inference_steps_time_adjustment
-from ...models.attention_processor import GaudiFluxAttnProcessor2_0, GaudiFlux2AttnProcessor, GaudiFlux2ParallelSelfAttnProcessor
+from ...models.attention_processor import GaudiFlux2AttnProcessor, GaudiFlux2ParallelSelfAttnProcessor
 from ...schedulers import GaudiFlowMatchEulerDiscreteScheduler
 from ..pipeline_utils import GaudiDiffusionPipeline
 
@@ -154,9 +152,9 @@ class GaudiFlux2Pipeline(GaudiDiffusionPipeline, Flux2Pipeline):
         )
 
         for block in self.transformer.single_transformer_blocks:
-            block.attn.processor = Flux2ParallelSelfAttnProcessor()
+            block.attn.processor = GaudiFlux2ParallelSelfAttnProcessor()
         for block in self.transformer.transformer_blocks:
-            block.attn.processor = GaudiFluxAttnProcessor2_0()
+            block.attn.processor = GaudiFlux2AttnProcessor()
 
         self.to(self._device)
         if use_hpu_graphs:
