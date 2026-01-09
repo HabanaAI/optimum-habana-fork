@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from math import prod
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import habana_frameworks.torch.core as htcore
@@ -108,7 +109,7 @@ def QwenImageTransformer2DModelGaudi(
     encoder_hidden_states_pad_len: int = 0,
 ) -> Union[torch.Tensor, Transformer2DModelOutput]:
     r"""
-    Adapted from: https://github.com/huggingface/diffusers/blob/v0.36.0/src/diffusers/models/transformers/transformer_qwenimage.py#L479
+    Adapted from: https://github.com/huggingface/diffusers/blob/f9c1e612fb85dd971beeba77c3ddc0826e2146a4/src/diffusers/models/transformers/transformer_qwenimage.py#L743
     Add mark_step.
     replace rope complex computation to real.
     Add cp support.
@@ -131,6 +132,17 @@ def QwenImageTransformer2DModelGaudi(
     hidden_states = self.img_in(hidden_states)
 
     timestep = timestep.to(hidden_states.dtype)
+
+    if self.zero_cond_t:
+        timestep = torch.cat([timestep, timestep * 0], dim=0)
+        modulate_index = torch.tensor(
+            [[0] * prod(sample[0]) + [1] * sum([prod(s) for s in sample[1:]]) for sample in img_shapes],
+            device=timestep.device,
+            dtype=torch.int,
+        )
+    else:
+        modulate_index = None
+
     encoder_hidden_states = self.txt_norm(encoder_hidden_states)
     encoder_hidden_states = self.txt_in(encoder_hidden_states)
 
@@ -150,6 +162,9 @@ def QwenImageTransformer2DModelGaudi(
     if hidden_states_pad_len > 0:
         vid_freqs_cos = F.pad(vid_freqs_cos, (0, 0, 0, hidden_states_pad_len))
         vid_freqs_sin = F.pad(vid_freqs_sin, (0, 0, 0, hidden_states_pad_len))
+        if modulate_index is not None:
+            modulate_index = F.pad(modulate_index, (0, hidden_states_pad_len))
+
     if encoder_hidden_states_pad_len > 0:
         txt_freqs_cos = F.pad(txt_freqs_cos, (0, 0, 0, encoder_hidden_states_pad_len))
         txt_freqs_sin = F.pad(txt_freqs_sin, (0, 0, 0, encoder_hidden_states_pad_len))
@@ -168,7 +183,8 @@ def QwenImageTransformer2DModelGaudi(
 
             vid_freqs_cos = F.pad(vid_freqs_cos, (0, 0, 0, pad_len_img))
             vid_freqs_sin = F.pad(vid_freqs_sin, (0, 0, 0, pad_len_img))
-
+            if modulate_index is not None:
+                modulate_index = F.pad(modulate_index, (0, pad_len_img))
             seq_len_img = padded_seq_len_img
 
         sp_seq_len_img = seq_len_img // parallel_state.get_sequence_parallel_world_size()
@@ -178,6 +194,8 @@ def QwenImageTransformer2DModelGaudi(
 
         vid_freqs_cos = vid_freqs_cos[start_img:end_img, :]
         vid_freqs_sin = vid_freqs_sin[start_img:end_img, :]
+        if modulate_index is not None:
+            modulate_index = modulate_index[:,start_img:end_img]
 
     image_rotary_emb = (vid_freqs_cos, vid_freqs_sin), (txt_freqs_cos, txt_freqs_sin)
 
@@ -192,6 +210,8 @@ def QwenImageTransformer2DModelGaudi(
                 image_rotary_emb,
                 attention_mask,
                 encoder_hidden_states_pad_len,
+                attention_kwargs,
+                modulate_index,
             )
 
         else:
@@ -204,6 +224,7 @@ def QwenImageTransformer2DModelGaudi(
                 joint_attention_kwargs=attention_kwargs,
                 attention_mask=attention_mask,
                 encoder_hidden_states_pad_len=encoder_hidden_states_pad_len,
+                modulate_index=modulate_index,
             )
 
         htcore.mark_step()
@@ -231,6 +252,9 @@ def QwenImageTransformer2DModelGaudi(
 
         hidden_states = hidden_states[:, :-pad_len_img, :] if pad_len_img > 0 else hidden_states
 
+    if self.zero_cond_t:
+        temb = temb.chunk(2, dim=0)[0]
+
     # Use only the image part (hidden_states) from the dual-stream blocks
     hidden_states = self.norm_out(hidden_states, temb)
     output = self.proj_out(hidden_states)
@@ -244,7 +268,6 @@ def QwenImageTransformer2DModelGaudi(
 
     return Transformer2DModelOutput(sample=output)
 
-
 def QwenImageTransformerBlockForwardGaudi(
     self,
     hidden_states: torch.Tensor,
@@ -255,13 +278,18 @@ def QwenImageTransformerBlockForwardGaudi(
     joint_attention_kwargs: Optional[Dict[str, Any]] = None,
     attention_mask: Optional[torch.Tensor] = None,
     encoder_hidden_states_pad_len: int = 0,
+    modulate_index: Optional[List[int]] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Adapted from https://github.com/huggingface/diffusers/blob/v0.36.0/src/diffusers/models/transformers/transformer_qwenimage.py#L411
+    Adapted from https://github.com/huggingface/diffusers/blob/f9c1e612fb85dd971beeba77c3ddc0826e2146a4/src/diffusers/models/transformers/transformer_qwenimage.py#L574.
     Add attention_mask.
     """
+
     # Get modulation parameters for both streams
     img_mod_params = self.img_mod(temb)  # [B, 6*dim]
+
+    if self.zero_cond_t:
+        temb = torch.chunk(temb, 2, dim=0)[0]
     txt_mod_params = self.txt_mod(temb)  # [B, 6*dim]
 
     # Split modulation parameters for norm1 and norm2
@@ -270,7 +298,7 @@ def QwenImageTransformerBlockForwardGaudi(
 
     # Process image stream - norm1 + modulation
     img_normed = self.img_norm1(hidden_states)
-    img_modulated, img_gate1 = self._modulate(img_normed, img_mod1)
+    img_modulated, img_gate1 = self._modulate(img_normed, img_mod1, modulate_index)
 
     # Process text stream - norm1 + modulation
     txt_normed = self.txt_norm1(encoder_hidden_states)
@@ -302,7 +330,7 @@ def QwenImageTransformerBlockForwardGaudi(
 
     # Process image stream - norm2 + MLP
     img_normed2 = self.img_norm2(hidden_states)
-    img_modulated2, img_gate2 = self._modulate(img_normed2, img_mod2)
+    img_modulated2, img_gate2 = self._modulate(img_normed2, img_mod2, modulate_index)
     img_mlp_output = self.img_mlp(img_modulated2)
     hidden_states = hidden_states + img_gate2 * img_mlp_output
 

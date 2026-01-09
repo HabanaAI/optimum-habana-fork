@@ -255,14 +255,14 @@ class GaudiQwenImagePipeline(GaudiDiffusionPipeline, QwenImagePipeline):
         self.vae.encoder.forward = types.MethodType(QwenImageEncoder3dForwardGaudi, self.vae.encoder)
 
         for attn in self.vae.decoder.mid_block.attentions:
-            attn.forwward = types.MethodType(QwenImageAttentionBlockForwardGaudi, attn)
+            attn.forward = types.MethodType(QwenImageAttentionBlockForwardGaudi, attn)
 
         for attn in self.vae.encoder.mid_block.attentions:
-            attn.forwward = types.MethodType(QwenImageAttentionBlockForwardGaudi, attn)
+            attn.forward = types.MethodType(QwenImageAttentionBlockForwardGaudi, attn)
 
         for layer in self.vae.encoder.down_blocks:
             if isinstance(layer, QwenImageAttentionBlock):
-                layer.forwward = types.MethodType(QwenImageAttentionBlockForwardGaudi, layer)
+                layer.forward = types.MethodType(QwenImageAttentionBlockForwardGaudi, layer)
 
         config = self.transformer.config
         self.transformer.pos_embed = GaudiQwenEmbedRope(
@@ -308,9 +308,13 @@ class GaudiQwenImagePipeline(GaudiDiffusionPipeline, QwenImagePipeline):
 
         template = self.prompt_template_encode
         drop_idx = self.prompt_template_encode_start_idx
+        max_length = self.tokenizer_max_length + drop_idx
+        if max_length % 256 != 0:
+            max_length = int(max_length / 256 + 1) * 256
+
         txt = [template.format(e) for e in prompt]
         txt_tokens = self.tokenizer(
-            txt, max_length=self.tokenizer_max_length + drop_idx, padding=True, truncation=True, return_tensors="pt"
+            txt, max_length=max_length, padding=True, pad_to_multiple_of=256, truncation=True, return_tensors="pt"
         ).to(device)
 
         encoder_hidden_states = self.text_encoder(
@@ -622,11 +626,13 @@ class GaudiQwenImagePipeline(GaudiDiffusionPipeline, QwenImagePipeline):
         # 6. Denoising loop
         self.scheduler.set_begin_index(0)
         with self.progress_bar(total=num_inference_steps) as progress_bar:
-            for i, t in enumerate(timesteps):
+            for i in range(len(timesteps)):
                 if self.interrupt:
                     continue
 
+                t = timesteps[0]
                 self._current_timestep = t
+                timesteps = torch.roll(timesteps, shifts=-1, dims=0)
                 # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
                 timestep = t.expand(latents.shape[0]).to(latents.dtype)
                 with self.transformer.cache_context("cond"):
@@ -689,6 +695,7 @@ class GaudiQwenImagePipeline(GaudiDiffusionPipeline, QwenImagePipeline):
                 # call the callback, if provided
                 if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
                     progress_bar.update()
+                htcore.mark_step()
 
             if not self.use_hpu_graphs:
                 htcore.mark_step()

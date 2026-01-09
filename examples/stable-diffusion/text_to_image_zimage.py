@@ -2,11 +2,9 @@ import torch
 import argparse
 import random
 import numpy as np
-import time as tm_perf
+import time
 
 import habana_frameworks.torch as ht
-import habana_frameworks.torch.core as htcore
-import habana_frameworks.torch.gpu_migration
 
 from optimum.habana.transformers.gaudi_configuration import GaudiConfig
 from optimum.habana.diffusers import GaudiStableDiffusionZImagePipeline
@@ -56,6 +54,18 @@ def main():
         default=0.0,
         help="A lora scale that will be applied to all LoRA layers of the text encoder if LoRA layers are loaded.",
     )
+    parser.add_argument(
+        "--use_hpu_graphs",
+        action="store_true",
+        default=False,
+        help="Use HPU graphs to accelerate inference. Suggest not to enable it for large figure generation",
+    )
+    parser.add_argument(
+        "--loop",
+        type=int,
+        default=1,
+        help="Number of benchmark loops for generation.",
+    )
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -64,7 +74,7 @@ def main():
     gaudi_config = GaudiConfig(**gaudi_config_kwargs)
     kwargs = {
         "use_habana": True,
-        "use_hpu_graphs": True,
+        "use_hpu_graphs": args.use_hpu_graphs,
         "gaudi_config": gaudi_config,
     }
 
@@ -79,40 +89,25 @@ def main():
     )
     pipe.to("hpu")
 
-    warmup = 5
-    for i in range(warmup):
-        # 2. Generate Image
-        pipe(
-            prompt=args.prompts,
-            height=args.height,
-            width=args.width,
-            num_inference_steps=args.num_inference_steps,  # This actually results in 8 DiT forwards
-            guidance_scale=args.guidance_scale,     # Guidance should be 0 for the Turbo models
-            generator=torch.Generator("cpu").manual_seed(args.seed),
-        ).images[0]
-    torch.cuda.synchronize()
-
-    inf_cnt = 5
-    t0 = tm_perf.perf_counter()
-    for i in range(inf_cnt):
+    for i in range(args.loop):
+        t0 = time.time()
         # 2. Generate Image
         image = pipe(
             prompt=args.prompts,
             height=args.height,
             width=args.width,
             num_inference_steps=args.num_inference_steps,  # This actually results in 8 DiT forwards
-            guidance_scale=args.guidance_scale,     # Guidance should be 0 for the Turbo models
+            guidance_scale=args.guidance_scale,            # Guidance should be 0 for the Turbo models
             generator=torch.Generator("cpu").manual_seed(args.seed),
         ).images[0]
-
-    torch.cuda.synchronize()
-    t1 = tm_perf.perf_counter()
-    duration = (t1-t0)/inf_cnt
-    print(f'Z-Image pipeline gaudi duration:{duration:.3f}')
+        torch.hpu.synchronize()
+        t1 = time.time()
+        duration = t1 - t0
+        print("Z-Image Pipeline Latency in Loop #{:d}: {:.1f} sec".format(i, duration))
 
     file_name = f"z_image_output_{args.width}x{args.height}.png"
     image.save(file_name)
-    print(f'save {file_name} done!')
+    print(f'Completed saving {file_name}!')
 
 if "__main__" == __name__:
     main()

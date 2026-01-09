@@ -241,7 +241,7 @@ def transformer_forward_gaudi(
     cap_feats = self.cap_embedder(cap_feats)
     cap_feats[torch.cat(cap_inner_pad_mask)] = self.cap_pad_token
     cap_feats = list(cap_feats.split(cap_item_seqlens, dim=0))
-    cap_freqs_cis = list(self.rope_embedder(torch.cat(cap_pos_ids, dim=0)).split(torch.tensor(cap_item_seqlens), dim=0))
+    cap_freqs_cis = list(self.rope_embedder(torch.cat(cap_pos_ids, dim=0)).split(cap_item_seqlens, dim=0))
 
     cap_feats = pad_sequence(cap_feats, batch_first=True, padding_value=0.0)
     cap_freqs_cis = pad_sequence(cap_freqs_cis, batch_first=True, padding_value=0.0)
