@@ -588,14 +588,21 @@ def apply_rotary_emb_hpu(
     xq: torch.Tensor,
     xk: torch.Tensor,
     freqs_cis: Union[torch.Tensor, Tuple[torch.Tensor]],
+    sequence_dim: int = 2,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Adapted from: https://github.com/huggingface/diffusers/blob/v0.31.0/src/diffusers/models/embeddings.py#L697
+    Adapted from: https://github.com/huggingface/diffusers/blob/v0.36.0/src/diffusers/models/embeddings.py#L1187
     """
-    cos_, sin_ = freqs_cis  # [S, D]
+    cos, sin = freqs_cis  # [S, D]
+    if sequence_dim == 2:
+        cos = cos[None, None, :, :]
+        sin = sin[None, None, :, :]
+    elif sequence_dim == 1:
+        cos = cos[None, :, None, :]
+        sin = sin[None, :, None, :]
+    else:
+        raise ValueError(f"`sequence_dim={sequence_dim}` but should be 1 or 2.")
 
-    cos = cos_[None, None]
-    sin = sin_[None, None]
     cos, sin = cos.to(xq.device), sin.to(xq.device)
 
     xq_out = torch.ops.hpu.rotary_pos_embedding(xq, sin, cos, None, 0, 1)
@@ -793,15 +800,15 @@ class GaudiFlux2AttnProcessor:
             value = torch.cat([encoder_value, value], dim=1)
 
         if image_rotary_emb is not None:
-            query, key = apply_rotary_emb_hpu(query, key, image_rotary_emb)
+            query, key = apply_rotary_emb_hpu(query, key, image_rotary_emb, sequence_dim=1)
 
         from habana_frameworks.torch.hpex.kernels import FusedSDPA
 
         # Fast FSDPA is not supported in training mode
         fsdpa_mode = "None" if self.is_training else "fast"
-        hidden_states = self.fav3.forward(query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2), attention_mask=attention_mask, fsdpa_mode=fsdpa_mode)
+        hidden_states = self.fav3.forward(query, key, value, attention_mask=attention_mask, fsdpa_mode=fsdpa_mode)
         
-        hidden_states = hidden_states.transpose(1, 2).flatten(2, 3)
+        hidden_states = hidden_states.flatten(2, 3)
         hidden_states = hidden_states.to(query.dtype)
 
         if encoder_hidden_states is not None:
@@ -868,15 +875,15 @@ class GaudiFlux2ParallelSelfAttnProcessor:
         key = FusedRMSNorm.apply(key, attn.norm_k.weight, attn.norm_k.eps, use_stages, bwd_mode, fast_math)
 
         if image_rotary_emb is not None:
-            query, key = apply_rotary_emb_hpu(query, key, image_rotary_emb)
+            query, key = apply_rotary_emb_hpu(query, key, image_rotary_emb, sequence_dim=1)
 
         from habana_frameworks.torch.hpex.kernels import FusedSDPA
 
         # Fast FSDPA is not supported in training mode
         fsdpa_mode = "None" if self.is_training else "fast"
-        hidden_states = self.fav3.forward(query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2), attention_mask=attention_mask, fsdpa_mode=fsdpa_mode)
+        hidden_states = self.fav3.forward(query, key, value, attention_mask=attention_mask, fsdpa_mode=fsdpa_mode)
         
-        hidden_states = hidden_states.transpose(1, 2).flatten(2, 3)
+        hidden_states = hidden_states.flatten(2, 3)
         hidden_states = hidden_states.to(query.dtype)
 
         # Handle the feedforward (FF) logic
