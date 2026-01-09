@@ -709,7 +709,9 @@ class GaudiFluxAttnProcessor2_0:
 
         # Fast FSDPA is not supported in training mode
         fsdpa_mode = "None" if self.is_training else "fast"
-        hidden_states = self.fav3.forward(query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2), attention_mask=attention_mask, fsdpa_mode=fsdpa_mode)
+        hidden_states = self.fav3.forward(
+            query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2), attention_mask=attention_mask, fsdpa_mode=fsdpa_mode
+        )
 
         hidden_states = hidden_states.reshape(batch_size, -1, attn.heads * head_dim)
         hidden_states = hidden_states.to(query.dtype)
@@ -764,7 +766,7 @@ class GaudiFlux2AttnProcessor:
 
         # Apply RMSNorm to Q and K
         from habana_frameworks.torch.hpex.normalization import FusedRMSNorm
-        
+
         use_stages = False
         bwd_mode = 0
         fast_math = True
@@ -837,7 +839,7 @@ class GaudiFlux2ParallelSelfAttnProcessor:
       * Modified RoPE to use native PAIRWISE mode ordering HPU RoPE kernel
       * Modified RMSNorm to use fast Gaudi fused RMSNorm kernel
     """
-    
+
     _attention_backend = None
     _parallel_config = None
 
@@ -869,7 +871,7 @@ class GaudiFlux2ParallelSelfAttnProcessor:
 
         # Apply RMSNorm to Q and K
         from habana_frameworks.torch.hpex.normalization import FusedRMSNorm
-        
+
         use_stages = False
         bwd_mode = 0
         fast_math = True
