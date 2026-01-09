@@ -143,14 +143,14 @@ class GaudiQwenImageEditPlusPipeline(GaudiDiffusionPipeline, QwenImageEditPlusPi
         self.vae.encoder.forward = types.MethodType(QwenImageEncoder3dForwardGaudi, self.vae.encoder)
 
         for attn in self.vae.decoder.mid_block.attentions:
-            attn.forwward = types.MethodType(QwenImageAttentionBlockForwardGaudi, attn)
+            attn.forward = types.MethodType(QwenImageAttentionBlockForwardGaudi, attn)
 
         for attn in self.vae.encoder.mid_block.attentions:
-            attn.forwward = types.MethodType(QwenImageAttentionBlockForwardGaudi, attn)
+            attn.forward = types.MethodType(QwenImageAttentionBlockForwardGaudi, attn)
 
         for layer in self.vae.encoder.down_blocks:
             if isinstance(layer, QwenImageAttentionBlock):
-                layer.forwward = types.MethodType(QwenImageAttentionBlockForwardGaudi, layer)
+                layer.forward = types.MethodType(QwenImageAttentionBlockForwardGaudi, layer)
 
         config = self.transformer.config
         self.transformer.pos_embed = GaudiQwenEmbedRope(
@@ -687,11 +687,13 @@ class GaudiQwenImageEditPlusPipeline(GaudiDiffusionPipeline, QwenImageEditPlusPi
         # 6. Denoising loop
         self.scheduler.set_begin_index(0)
         with self.progress_bar(total=num_inference_steps) as progress_bar:
-            for i, t in enumerate(timesteps):
+            for i in range(len(timesteps)):
                 if self.interrupt:
                     continue
 
+                t = timesteps[0]
                 self._current_timestep = t
+                timesteps = torch.roll(timesteps, shifts=-1, dims=0)
 
                 latent_model_input = latents
                 if image_latents is not None:
@@ -766,6 +768,7 @@ class GaudiQwenImageEditPlusPipeline(GaudiDiffusionPipeline, QwenImageEditPlusPi
                 # call the callback, if provided
                 if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
                     progress_bar.update()
+                htcore.mark_step()
 
             # remove bucket padding
             if latents_pad_len > 0:
