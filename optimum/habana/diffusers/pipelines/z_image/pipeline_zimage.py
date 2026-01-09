@@ -28,8 +28,6 @@ from optimum.habana.diffusers.models.unet_2d_condition import set_default_attn_p
 
 import habana_frameworks.torch as ht
 import habana_frameworks.torch.core as htcore
-import habana_frameworks.torch.gpu_migration
-from habana_frameworks.torch.hpex.kernels import FusedSDPA
 from habana_frameworks.torch.hpex.kernels import RotaryPosEmbeddingMode, apply_rotary_pos_emb
 
 logger = logging.get_logger(__name__)
