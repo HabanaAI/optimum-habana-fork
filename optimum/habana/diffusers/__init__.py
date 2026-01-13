@@ -40,6 +40,7 @@ from .pipelines.wan.pipeline_wan import GaudiWanPipeline
 from .pipelines.wan.pipeline_wan_i2v import GaudiWanImageToVideoPipeline
 from .pipelines.z_image.pipeline_zimage import GaudiStableDiffusionZImagePipeline
 from .pipelines.z_image.pipeline_zimage_omni import GaudiStableDiffusionZImageOmniPipeline
+from .pipelines.z_image.pipeline_zimage_controlnet_inpaint import GaudiStableDiffusionZImageControlNetInpaintPipeline
 from .schedulers import (
     GaudiDDIMScheduler,
     GaudiEulerAncestralDiscreteScheduler,
