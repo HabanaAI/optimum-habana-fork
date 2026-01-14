@@ -100,7 +100,7 @@ def main():
         help="Number of benchmark loops for generation.",
     )
     args = parser.parse_args()
-    print(f'get args:\n{args}')
+    print(f'get args:\n{args} \n\n')
     set_seed(args.seed)
 
     gaudi_config_kwargs = {"use_fused_adam": True, "use_fused_clip_norm": True}
@@ -115,21 +115,23 @@ def main():
 
     controlnet = ZImageControlNetModel.from_single_file(
             args.controlnet_path,
+            config='/mnt/ceph1/libo/hf_models/hlky/Z-Image-Turbo-Fun-Controlnet-Union-2.1/config.json',
             torch_dtype = torch.bfloat16
     )
 
     # 1. Load the pipeline
     # Use bfloat16 for optimal performance on supported GPUs
     pipe = GaudiStableDiffusionZImageControlNetInpaintPipeline.from_pretrained(
-            model_name_or_path, 
+            model_name_path, 
             controlnet = controlnet,
             torch_dtype=torch.bfloat16, 
             **kwargs
     )
     pipe.to("hpu")
     image = load_image(args.image_path)
-    mask_image = load_image(args.mask_image)
+    mask_image = load_image(args.mask_path)
     control_image = load_image(args.pose_path)
+    print('load image done, inference...')
     
     for i in range(args.loop):
         t0 = time.time()
@@ -150,7 +152,7 @@ def main():
         t1 = time.time()
         duration = t1 - t0
         print("Z-Image Omni Pipeline Latency in Loop #{:d}: {:.1f} sec".format(i, duration))
-    file_name = f"z_image_omni_output_{args.width}x{args.height}.png"
+    file_name = f"z_image_controlnet_inpaint_output_{args.width}x{args.height}.png"
     image.save(file_name)
     print(f'Completed saving {file_name}!')
 

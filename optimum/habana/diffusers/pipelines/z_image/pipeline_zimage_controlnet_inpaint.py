@@ -1,5 +1,6 @@
 import os
 import torch
+import torch.nn.functional as F
 import types
 from typing import Any, Callable, Dict, List, Optional, Union
 import PIL
@@ -10,17 +11,19 @@ import time as tm_perf
 from einops import rearrange
 from torch.nn.utils.rnn import pad_sequence
 
-from transformers import AutoTokenizer, PreTrainedModel, Siglip2ImageProcessorFast, Siglip2VisionModel
+from transformers import AutoTokenizer, PreTrainedModel
 
 from diffusers.image_processor import PipelineImageInput
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
+from diffusers.models.modeling_outputs import Transformer2DModelOutput
 from diffusers.models.autoencoders import AutoencoderKL
 from diffusers.models.transformers import ZImageTransformer2DModel
 from diffusers.models.controlnets import ZImageControlNetModel
 from diffusers.pipelines.z_image.pipeline_output import ZImagePipelineOutput
-from diffusers.pipelines.z_image.pipeline_z_image_omni import calculate_shift, retrieve_timesteps
+from diffusers.pipelines.z_image.pipeline_z_image_controlnet_inpaint import calculate_shift, retrieve_timesteps, retrieve_latents
 from diffusers.models.attention_processor import Attention
 from diffusers.models.transformers import transformer_z_image
+from diffusers.models.controlnets import controlnet_z_image
 from diffusers import ZImageControlNetInpaintPipeline
 
 
@@ -107,9 +110,13 @@ class ZSingleStreamAttnProcessorGaudi:
         query = query.contiguous()
         key = key.contiguous()
         value = value.contiguous()
+        attention_mask = None
 
         fsdpa_mode = 'fp32' if os.environ.get('FP32_SOFTMAX_VISION', 'false').lower() in ['true', '1' ] else 'fast'
         hidden_states = self.fav3.forward(query, key, value, attention_mask, fsdpa_mode)
+        htcore.mark_step()
+        #print(f'baymax gaudi line 116 sdpa hidden_states:{hidden_states.shape}')
+        #print(f'baymax gaudi line 116 sdpa hidden_states:{hidden_states[0,0,0,:8]}')
 
         # Reshape back
         hidden_states = hidden_states.flatten(2, 3)
@@ -311,6 +318,206 @@ def _Zimage_transformer_build_unified_sequence_gaudi(
 
     return unified, unified_freqs, attn_mask, noise_mask_tensor
 
+SEQ_MULTI_OF = 32
+def controlnet_forward_gaudi(
+    self,
+    x: List[torch.Tensor],
+    t,
+    cap_feats: List[torch.Tensor],
+    control_context: List[torch.Tensor],
+    conditioning_scale: float = 1.0,
+    patch_size=2,
+    f_patch_size=1,
+):
+    if (
+        self.t_scale is None
+        or self.t_embedder is None
+        or self.all_x_embedder is None
+        or self.cap_embedder is None
+        or self.rope_embedder is None
+        or self.noise_refiner is None
+        or self.context_refiner is None
+        or self.x_pad_token is None
+        or self.cap_pad_token is None
+    ):
+        raise ValueError(
+            "Required modules are `None`, use `from_transformer` to share required modules from `transformer`."
+        )
+
+    assert patch_size in self.config.all_patch_size
+    assert f_patch_size in self.config.all_f_patch_size
+
+    bsz = len(x)
+    device = x[0].device
+    t = t * self.t_scale
+    t = self.t_embedder(t)
+
+    (
+        x,
+        cap_feats,
+        x_size,
+        x_pos_ids,
+        cap_pos_ids,
+        x_inner_pad_mask,
+        cap_inner_pad_mask,
+    ) = self.patchify_and_embed(x, cap_feats, patch_size, f_patch_size)
+
+    x_item_seqlens = [len(_) for _ in x]
+    assert all(_ % SEQ_MULTI_OF == 0 for _ in x_item_seqlens)
+    x_max_item_seqlen = max(x_item_seqlens)
+
+    control_context = self.patchify(control_context, patch_size, f_patch_size)
+    control_context = torch.cat(control_context, dim=0)
+    control_context = self.control_all_x_embedder[f"{patch_size}-{f_patch_size}"](control_context)
+
+    control_context[torch.cat(x_inner_pad_mask)] = self.x_pad_token
+    control_context = list(control_context.split(x_item_seqlens, dim=0))
+
+    control_context = pad_sequence(control_context, batch_first=True, padding_value=0.0)
+
+    # x embed & refine
+    x = torch.cat(x, dim=0)
+    x = self.all_x_embedder[f"{patch_size}-{f_patch_size}"](x)
+
+    # Match t_embedder output dtype to x for layerwise casting compatibility
+    adaln_input = t.type_as(x)
+    x[torch.cat(x_inner_pad_mask)] = self.x_pad_token
+    x = list(x.split(x_item_seqlens, dim=0))
+    x_freqs_cis = list(self.rope_embedder(torch.cat(x_pos_ids, dim=0)).split([len(_) for _ in x_pos_ids], dim=0))
+
+    x = pad_sequence(x, batch_first=True, padding_value=0.0)
+    x_freqs_cis = pad_sequence(x_freqs_cis, batch_first=True, padding_value=0.0)
+    # Clarify the length matches to satisfy Dynamo due to "Symbolic Shape Inference" to avoid compilation errors
+    x_freqs_cis = x_freqs_cis[:, : x.shape[1]]
+
+    x_attn_mask = torch.zeros((bsz, x_max_item_seqlen, x_max_item_seqlen), dtype=torch.bool, device=device)
+    for i, seq_len in enumerate(x_item_seqlens):
+        x_attn_mask[i, :seq_len, :seq_len] = 1
+
+    if self.add_control_noise_refiner is not None:
+        if self.add_control_noise_refiner == "control_layers":
+            layers = self.control_layers
+        elif self.add_control_noise_refiner == "control_noise_refiner":
+            layers = self.control_noise_refiner
+        else:
+            raise ValueError(f"Unsupported `add_control_noise_refiner` type: {self.add_control_noise_refiner}.")
+        for layer in layers:
+            if torch.is_grad_enabled() and self.gradient_checkpointing:
+                control_context = self._gradient_checkpointing_func(
+                    layer, control_context, x, x_attn_mask, x_freqs_cis, adaln_input
+                )
+            else:
+                control_context = layer(control_context, x, x_attn_mask, x_freqs_cis, adaln_input)
+            htcore.mark_step()
+
+        hints = torch.unbind(control_context)[:-1]
+        control_context = torch.unbind(control_context)[-1]
+        noise_refiner_block_samples = {
+            layer_idx: hints[idx] * conditioning_scale
+            for idx, layer_idx in enumerate(self.control_refiner_layers_places)
+        }
+    else:
+        noise_refiner_block_samples = None
+
+    if torch.is_grad_enabled() and self.gradient_checkpointing:
+        for layer_idx, layer in enumerate(self.noise_refiner):
+            x = self._gradient_checkpointing_func(layer, x, x_attn_mask, x_freqs_cis, adaln_input)
+            if noise_refiner_block_samples is not None:
+                if layer_idx in noise_refiner_block_samples:
+                    x = x + noise_refiner_block_samples[layer_idx]
+    else:
+        for layer_idx, layer in enumerate(self.noise_refiner):
+            x = layer(x, x_attn_mask, x_freqs_cis, adaln_input)
+            if noise_refiner_block_samples is not None:
+                if layer_idx in noise_refiner_block_samples:
+                    x = x + noise_refiner_block_samples[layer_idx]
+            htcore.mark_step()
+
+    # cap embed & refine
+    cap_item_seqlens = [len(_) for _ in cap_feats]
+    cap_max_item_seqlen = max(cap_item_seqlens)
+
+    cap_feats = torch.cat(cap_feats, dim=0)
+    cap_feats = self.cap_embedder(cap_feats)
+    cap_feats[torch.cat(cap_inner_pad_mask)] = self.cap_pad_token
+
+    cap_feats = list(cap_feats.split(cap_item_seqlens, dim=0))
+    cap_freqs_cis = list(
+        self.rope_embedder(torch.cat(cap_pos_ids, dim=0)).split([len(_) for _ in cap_pos_ids], dim=0)
+    )
+
+    cap_feats = pad_sequence(cap_feats, batch_first=True, padding_value=0.0)
+    cap_freqs_cis = pad_sequence(cap_freqs_cis, batch_first=True, padding_value=0.0)
+    # Clarify the length matches to satisfy Dynamo due to "Symbolic Shape Inference" to avoid compilation errors
+    cap_freqs_cis = cap_freqs_cis[:, : cap_feats.shape[1]]
+
+    cap_attn_mask = torch.zeros((bsz, cap_max_item_seqlen, cap_max_item_seqlen), dtype=torch.bool, device=device)
+    for i, seq_len in enumerate(cap_item_seqlens):
+        cap_attn_mask[i, :seq_len, :seq_len] = 1
+
+    if torch.is_grad_enabled() and self.gradient_checkpointing:
+        for layer in self.context_refiner:
+            cap_feats = self._gradient_checkpointing_func(layer, cap_feats, cap_attn_mask, cap_freqs_cis)
+    else:
+        for layer in self.context_refiner:
+            cap_feats = layer(cap_feats, cap_attn_mask, cap_freqs_cis)
+            htcore.mark_step()
+
+    # unified
+    unified = []
+    unified_freqs_cis = []
+    for i in range(bsz):
+        x_len = x_item_seqlens[i]
+        cap_len = cap_item_seqlens[i]
+        unified.append(torch.cat([x[i][:x_len], cap_feats[i][:cap_len]]))
+        unified_freqs_cis.append(torch.cat([x_freqs_cis[i][:x_len], cap_freqs_cis[i][:cap_len]]))
+    unified_item_seqlens = [a + b for a, b in zip(cap_item_seqlens, x_item_seqlens)]
+    assert unified_item_seqlens == [len(_) for _ in unified]
+    unified_max_item_seqlen = max(unified_item_seqlens)
+
+    unified = pad_sequence(unified, batch_first=True, padding_value=0.0)
+    unified_freqs_cis = pad_sequence(unified_freqs_cis, batch_first=True, padding_value=0.0)
+    unified_attn_mask = torch.zeros((bsz, unified_max_item_seqlen, unified_max_item_seqlen), dtype=torch.bool, device=device)
+    for i, seq_len in enumerate(unified_item_seqlens):
+        unified_attn_mask[i, :seq_len, :seq_len] = 1
+
+    ## ControlNet start
+    if not self.add_control_noise_refiner:
+        if torch.is_grad_enabled() and self.gradient_checkpointing:
+            for layer in self.control_noise_refiner:
+                control_context = self._gradient_checkpointing_func(
+                    layer, control_context, x_attn_mask, x_freqs_cis, adaln_input
+                )
+        else:
+            for layer in self.control_noise_refiner:
+                control_context = layer(control_context, x_attn_mask, x_freqs_cis, adaln_input)
+                htcore.mark_step()
+
+    # unified
+    control_context_unified = []
+    for i in range(bsz):
+        x_len = x_item_seqlens[i]
+        cap_len = cap_item_seqlens[i]
+        control_context_unified.append(torch.cat([control_context[i][:x_len], cap_feats[i][:cap_len]]))
+    control_context_unified = pad_sequence(control_context_unified, batch_first=True, padding_value=0.0)
+
+    for layer in self.control_layers:
+        if torch.is_grad_enabled() and self.gradient_checkpointing:
+            control_context_unified = self._gradient_checkpointing_func(
+                layer, control_context_unified, unified, unified_attn_mask, unified_freqs_cis, adaln_input
+            )
+        else:
+            control_context_unified = layer(
+                control_context_unified, unified, unified_attn_mask, unified_freqs_cis, adaln_input
+            )
+            htcore.mark_step()
+
+    hints = torch.unbind(control_context_unified)[:-1]
+
+    controlnet_block_samples = {
+        layer_idx: hints[idx] * conditioning_scale for idx, layer_idx in enumerate(self.control_layers_places)
+    }
+    return controlnet_block_samples
 
 def Zimage_transformer_forward_gaudi(
     self,
@@ -376,6 +583,7 @@ def Zimage_transformer_forward_gaudi(
     x_seqlens = [len(xi) for xi in x]
     x = self.all_x_embedder[f"{patch_size}-{f_patch_size}"](torch.cat(x, dim=0))  # embed
 
+    htcore.mark_step()
     org_size = x.shape[0]
     x, x_freqs, x_mask, _, x_noise_tensor = self._prepare_sequence(
         list(x.split(x_seqlens, dim=0)), x_pos_ids, x_pad_mask, self.x_pad_token, x_noise_mask, device
@@ -389,6 +597,7 @@ def Zimage_transformer_forward_gaudi(
             if torch.is_grad_enabled() and self.gradient_checkpointing
             else layer(x, x_mask, x_freqs, adaln_input, x_noise_tensor, t_noisy, t_clean)
         )
+        htcore.mark_step()
     x = x[:, :org_size, ...]
     x_freqs = x_freqs[:, :org_size, ...]
 
@@ -396,6 +605,7 @@ def Zimage_transformer_forward_gaudi(
     cap_seqlens = [len(ci) for ci in cap_feats]
     cap_feats = self.cap_embedder(torch.cat(cap_feats, dim=0))  # embed
     org_size = cap_feats.shape[0]
+    htcore.mark_step()
     cap_feats, cap_freqs, cap_mask, _, _ = self._prepare_sequence(
         list(cap_feats.split(cap_seqlens, dim=0)), cap_pos_ids, cap_pad_mask, self.cap_pad_token, None, device
     )
@@ -406,6 +616,7 @@ def Zimage_transformer_forward_gaudi(
             if torch.is_grad_enabled() and self.gradient_checkpointing
             else layer(cap_feats, cap_mask, cap_freqs)
         )
+        htcore.mark_step()
     cap_feats = cap_feats[:, :org_size, :]
     cap_freqs = cap_freqs[:, :org_size, :]
 
@@ -430,6 +641,7 @@ def Zimage_transformer_forward_gaudi(
                 if torch.is_grad_enabled() and self.gradient_checkpointing
                 else layer(siglip_feats, siglip_mask, siglip_freqs)
             )
+            htcore.mark_step()
 
     org_size = x.shape[1] + cap_feats.shape[1]
 
@@ -460,8 +672,10 @@ def Zimage_transformer_forward_gaudi(
             if torch.is_grad_enabled() and self.gradient_checkpointing
             else layer(unified, unified_mask, unified_freqs, adaln_input, unified_noise_tensor, t_noisy, t_clean)
         )
+        htcore.mark_step()
         if controlnet_block_samples is not None and layer_idx in controlnet_block_samples:
             unified = unified + controlnet_block_samples[layer_idx]
+        htcore.mark_step()
 
     unified = (
         self.all_final_layer[f"{patch_size}-{f_patch_size}"](
@@ -479,6 +693,8 @@ def Zimage_transformer_forward_gaudi(
 
 setattr(transformer_z_image, "RopeEmbedder", RopeEmbedderGaudi)
 setattr(transformer_z_image, "ZSingleStreamAttnProcessor", ZSingleStreamAttnProcessorGaudi)
+setattr(controlnet_z_image, "RopeEmbedder", RopeEmbedderGaudi)
+setattr(controlnet_z_image, "ZSingleStreamAttnProcessor", ZSingleStreamAttnProcessorGaudi)
 
 class GaudiStableDiffusionZImageControlNetInpaintPipeline(GaudiDiffusionPipeline, ZImageControlNetInpaintPipeline):
     def __init__(
@@ -524,6 +740,8 @@ class GaudiStableDiffusionZImageControlNetInpaintPipeline(GaudiDiffusionPipeline
                 self.transformer.layers[i] = ht.hpu.wrap_in_hpu_graph(self.transformer.layers[i])
 
         self.transformer.forward = types.MethodType(Zimage_transformer_forward_gaudi, self.transformer)
+        self.controlnet.forward = types.MethodType(controlnet_forward_gaudi, self.controlnet)
+
         self.transformer._prepare_sequence = types.MethodType(_Zimage_tranformer_prepare_sequence_gaudi, self.transformer)
         self.transformer._build_unified_sequence = types.MethodType(_Zimage_transformer_build_unified_sequence_gaudi, self.transformer)
 
@@ -824,6 +1042,7 @@ class GaudiStableDiffusionZImageControlNetInpaintPipeline(GaudiDiffusionPipeline
                     control_image,
                     conditioning_scale=controlnet_conditioning_scale,
                 )
+                htcore.mark_step()
 
                 model_out_list = self.transformer(
                     latent_model_input_list,
@@ -831,6 +1050,7 @@ class GaudiStableDiffusionZImageControlNetInpaintPipeline(GaudiDiffusionPipeline
                     prompt_embeds_model_input,
                     controlnet_block_samples=controlnet_block_samples,
                 )[0]
+                htcore.mark_step()
 
                 if apply_cfg:
                     # Perform CFG
@@ -861,6 +1081,7 @@ class GaudiStableDiffusionZImageControlNetInpaintPipeline(GaudiDiffusionPipeline
                 noise_pred = noise_pred.squeeze(2)
                 noise_pred = -noise_pred
 
+                htcore.mark_step()
                 # compute the previous noisy sample x_t -> x_t-1
                 latents = self.scheduler.step(noise_pred.to(torch.float32), t, latents, return_dict=False)[0]
                 assert latents.dtype == torch.float32
@@ -878,6 +1099,7 @@ class GaudiStableDiffusionZImageControlNetInpaintPipeline(GaudiDiffusionPipeline
                 # call the callback, if provided
                 if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
                     progress_bar.update()
+        htcore.mark_step()
 
         if output_type == "latent":
             image = latents
