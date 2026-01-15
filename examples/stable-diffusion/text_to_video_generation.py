@@ -84,6 +84,15 @@ def main():
         default=0,
         help="The width in pixels of the generated videos (0=default from model config).",
     )
+    parser.add_argument(
+        "--fps",
+        type=int,
+        default=16,
+        help=(
+            "Frames per second. The rate at which the generated images shall be exported to a video after generation."
+            " Note that Stable Diffusion Video's UNet was micro-conditioned on fps-1 during training."
+        ),
+    )
     parser.add_argument("--num_frames", type=int, default=20, help="The number of frames in the generated videos.")
     parser.add_argument(
         "--num_inference_steps",
@@ -267,7 +276,7 @@ def main():
         video_save_dir = Path(args.video_save_dir)
         video_save_dir.mkdir(parents=True, exist_ok=True)
         filename = video_save_dir / "cogvideoX_out.mp4"
-        export_to_video(video, str(filename.resolve()), fps=8)
+        export_to_video(video, str(filename.resolve()), fps=args.fps)
     else:
         # Save the pipeline in the specified directory if not None
         if args.pipeline_save_dir is not None:
@@ -282,7 +291,7 @@ def main():
 
                 for i, video in enumerate(outputs.frames):
                     filename = video_save_dir / f"wan_video_{i + 1}.mp4"
-                    export_to_video(video, str(filename.resolve()), fps=24)
+                    export_to_video(video, str(filename.resolve()), fps=args.fps)
             else:
                 logger.warning("--output_type should be equal to 'mp4' to save videos in --video_save_dir.")
 
