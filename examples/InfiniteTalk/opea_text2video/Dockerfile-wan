@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # HABANA environment
-FROM artifactory-kfs.habana-labs.com/docker-local/1.23.0/ubuntu22.04/habanalabs/pytorch-installer-2.9.0:1.23.0-660 AS hpu
+FROM artifactory-kfs.habana-labs.com/docker-local/1.23.0/ubuntu22.04/habanalabs/pytorch-installer-2.9.0:1.23.0-695 AS hpu
 RUN useradd -m -s /bin/bash user && \
     mkdir -p /home/user && \
     mkdir -p /home/user/video && \
@@ -11,7 +11,7 @@ RUN useradd -m -s /bin/bash user && \
 COPY src /home/user/text2video
 
 RUN apt update && apt install -y ffmpeg
-RUN cd /home/user && git clone https://github.com/Wei-Lin-Intel/Wan2.2.git -b hpu
+RUN cd /home/user && git clone https://github.com/wenbinc-Bin/Wan2.2.git -b hpu
 RUN cd /home/user && git clone https://github.com/opea-project/GenAIComps.git
 RUN chown -R user /home/user/text2video
 

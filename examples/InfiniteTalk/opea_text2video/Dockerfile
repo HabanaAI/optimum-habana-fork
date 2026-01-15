@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # HABANA environment
-FROM vault.habana.ai/gaudi-docker/1.21.4/ubuntu22.04/habanalabs/pytorch-installer-2.6.0 AS hpu
+FROM artifactory-kfs.habana-labs.com/docker-local/1.23.0/ubuntu22.04/habanalabs/pytorch-installer-2.9.0:1.23.0-695 AS hpu
 RUN useradd -m -s /bin/bash user && \
     mkdir -p /home/user && \
     mkdir -p /home/user/video && \

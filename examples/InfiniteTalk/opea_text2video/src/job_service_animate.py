@@ -75,6 +75,9 @@ def _validate_args(args):
     if args.sample_shift is None:
         args.sample_shift = cfg.sample_shift
 
+    if args.sample_guide_scale is None:
+        args.sample_guide_scale = cfg.sample_guide_scale
+
 
 def _parse_args():
     """Parse command line arguments."""
@@ -126,7 +129,7 @@ def _parse_args():
     parser.add_argument(
         "--sample_solver",
         type=str,
-        default="dpm++",
+        default="unipc",
         choices=["unipc", "dpm++"],
         help="Sampling solver algorithm."
     )
@@ -145,13 +148,19 @@ def _parse_args():
     parser.add_argument(
         "--convert_model_dtype",
         action="store_true",
-        default=False,
+        default=True,
         help="Convert DiT model parameters dtype."
+    )
+    parser.add_argument(
+        "--sample_guide_scale",
+        type=float,
+        default=None,
+        help="Classifier-free guidance scale."
     )
     parser.add_argument(
         "--use_relighting_lora",
         action="store_true",
-        default=False,
+        default=True,
         help="Whether to use relighting lora for character replacement."
     )
     parser.add_argument(
@@ -207,6 +216,7 @@ def run_preprocessing(args, job_dir: str, input_data: dict) -> str:
     image_path = input_data["image_path"]
     mode = input_data.get("mode", "animate")
     size = input_data.get("size", "1280*720")
+    seconds = input_data.get("seconds", 2)
 
     # Parse resolution
     width, height = map(int, size.split("*"))
@@ -216,7 +226,22 @@ def run_preprocessing(args, job_dir: str, input_data: dict) -> str:
     det_checkpoint_path = os.path.join(args.process_ckpt_dir, "det/yolov10m.onnx")
 
     replace_flag = (mode == "replace")
-    sam2_checkpoint_path = os.path.join(args.process_ckpt_dir, "sam2/sam2_hiera_large.pt") if replace_flag else None
+    # SAM2 checkpoint must be passed as [checkpoint_path, config_yaml] list
+    # Use smaller SAM2 model for shorter videos (<=2 seconds) for faster preprocessing
+    if replace_flag:
+        if int(seconds) <= 2:
+            logging.info("Using small SAM2 model for short video")
+            sam2_checkpoint_path = [
+                os.path.join(args.process_ckpt_dir, "sam2/sam2_hiera_small.pt"),
+                "sam2_hiera_s.yaml"
+            ]
+        else:
+            sam2_checkpoint_path = [
+                os.path.join(args.process_ckpt_dir, "sam2/sam2_hiera_large.pt"),
+                "sam2_hiera_l.yaml"
+            ]
+    else:
+        sam2_checkpoint_path = None
 
     # Create preprocessing pipeline
     process_pipeline = ProcessPipeline(
@@ -373,6 +398,9 @@ def generate(args):
                     with open(input_json_path, "r", encoding="utf-8") as f:
                         input_data = json.load(f)
 
+                    # Add seconds to input_data for SAM2 model selection in preprocessing
+                    input_data["seconds"] = int(seconds)
+
                     logging.info(f"Processing job {job_id}: mode={mode}, size={size}, seconds={seconds}")
 
                     # Step 1: Preprocessing
@@ -404,19 +432,23 @@ def generate(args):
                         shift=float(shift),
                         sample_solver=args.sample_solver,
                         sampling_steps=int(steps),
-                        guide_scale=1,  # Fixed for animate
+                        guide_scale=args.sample_guide_scale,
                         input_prompt=prompt,
                         n_prompt="",
                         seed=int(seed),
                         offload_model=args.offload_model,
                     )
 
+                    # Synchronize HPU before saving (like generate_UI.py)
+                    if hasattr(torch, 'hpu'):
+                        torch.hpu.synchronize()
+
                     if rank == 0:
                         logging.info(f"Saving generated video to {video_path}")
                         save_video(
                             tensor=video[None],
                             save_file=video_path,
-                            fps=30,
+                            fps=cfg.sample_fps,
                             nrow=1,
                             normalize=True,
                             value_range=(-1, 1)
