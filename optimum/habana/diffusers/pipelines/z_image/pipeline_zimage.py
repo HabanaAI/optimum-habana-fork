@@ -473,7 +473,6 @@ def Zimage_transformer_forward_gaudi(
     return (x,) if not return_dict else Transformer2DModelOutput(sample=x)
 
 setattr(transformer_z_image, "RopeEmbedder", RopeEmbedderGaudi)
-setattr(transformer_z_image, "ZSingleStreamAttnProcessor", ZSingleStreamAttnProcessorGaudi)
 
 class GaudiStableDiffusionZImagePipeline(GaudiDiffusionPipeline, ZImagePipeline):
     def __init__(
@@ -519,6 +518,18 @@ class GaudiStableDiffusionZImagePipeline(GaudiDiffusionPipeline, ZImagePipeline)
         self.transformer.forward = types.MethodType(Zimage_transformer_forward_gaudi, self.transformer)
         self.transformer._prepare_sequence = types.MethodType(_Zimage_tranformer_prepare_sequence_gaudi, self.transformer)
         self.transformer._build_unified_sequence = types.MethodType(_Zimage_transformer_build_unified_sequence_gaudi, self.transformer)
+        for layer in self.transformer.noise_refiner:
+            layer.attention.set_processor(ZSingleStreamAttnProcessorGaudi())
+
+        for layer in self.transformer.context_refiner:
+            layer.attention.set_processor(ZSingleStreamAttnProcessorGaudi())
+        
+        if not self.transformer.siglip_refiner is None:
+            for layer in self.transformer.siglip_refiner:
+                layer.attention.set_processor(ZSingleStreamAttnProcessorGaudi())
+
+        for layer in self.transformer.layers:
+            layer.attention.set_processor(ZSingleStreamAttnProcessorGaudi())
 
         use_bucket = "1" == os.getenv("USE_ZIMAGE_BUCKET", "0")
         if use_bucket and self.use_hpu_graphs:

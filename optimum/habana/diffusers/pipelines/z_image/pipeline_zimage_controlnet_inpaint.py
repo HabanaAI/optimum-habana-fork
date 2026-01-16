@@ -114,9 +114,6 @@ class ZSingleStreamAttnProcessorGaudi:
 
         fsdpa_mode = 'fp32' if os.environ.get('FP32_SOFTMAX_VISION', 'false').lower() in ['true', '1' ] else 'fast'
         hidden_states = self.fav3.forward(query, key, value, attention_mask, fsdpa_mode)
-        htcore.mark_step()
-        #print(f'baymax gaudi line 116 sdpa hidden_states:{hidden_states.shape}')
-        #print(f'baymax gaudi line 116 sdpa hidden_states:{hidden_states[0,0,0,:8]}')
 
         # Reshape back
         hidden_states = hidden_states.flatten(2, 3)
@@ -692,9 +689,7 @@ def Zimage_transformer_forward_gaudi(
     return (x,) if not return_dict else Transformer2DModelOutput(sample=x)
 
 setattr(transformer_z_image, "RopeEmbedder", RopeEmbedderGaudi)
-setattr(transformer_z_image, "ZSingleStreamAttnProcessor", ZSingleStreamAttnProcessorGaudi)
 setattr(controlnet_z_image, "RopeEmbedder", RopeEmbedderGaudi)
-setattr(controlnet_z_image, "ZSingleStreamAttnProcessor", ZSingleStreamAttnProcessorGaudi)
 
 class GaudiStableDiffusionZImageControlNetInpaintPipeline(GaudiDiffusionPipeline, ZImageControlNetInpaintPipeline):
     def __init__(
@@ -744,6 +739,25 @@ class GaudiStableDiffusionZImageControlNetInpaintPipeline(GaudiDiffusionPipeline
 
         self.transformer._prepare_sequence = types.MethodType(_Zimage_tranformer_prepare_sequence_gaudi, self.transformer)
         self.transformer._build_unified_sequence = types.MethodType(_Zimage_transformer_build_unified_sequence_gaudi, self.transformer)
+
+        for layer in self.transformer.noise_refiner:
+            layer.attention.set_processor(ZSingleStreamAttnProcessorGaudi())
+
+        for layer in self.transformer.context_refiner:
+            layer.attention.set_processor(ZSingleStreamAttnProcessorGaudi())
+        
+        if not self.transformer.siglip_refiner is None:
+            for layer in self.transformer.siglip_refiner:
+                layer.attention.set_processor(ZSingleStreamAttnProcessorGaudi())
+
+        for layer in self.transformer.layers:
+            layer.attention.set_processor(ZSingleStreamAttnProcessorGaudi())
+
+        for layer in self.controlnet.control_layers:
+            layer.attention.set_processor(ZSingleStreamAttnProcessorGaudi())
+
+        for layer in self.controlnet.control_noise_refiner:
+            layer.attention.set_processor(ZSingleStreamAttnProcessorGaudi())
 
         #use_bucket = "1" == os.getenv("USE_ZIMAGE_BUCKET", "0")
         #if use_bucket and self.use_hpu_graphs:

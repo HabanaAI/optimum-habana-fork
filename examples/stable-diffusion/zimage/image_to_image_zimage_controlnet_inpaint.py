@@ -151,7 +151,7 @@ def main():
         torch.hpu.synchronize()
         t1 = time.time()
         duration = t1 - t0
-        print("Z-Image Omni Pipeline Latency in Loop #{:d}: {:.1f} sec".format(i, duration))
+        print("Z-Image Controlnet inpaint Pipeline Latency in Loop #{:d}: {:.1f} sec".format(i, duration))
     file_name = f"z_image_controlnet_inpaint_output_{args.width}x{args.height}.png"
     image.save(file_name)
     print(f'Completed saving {file_name}!')
