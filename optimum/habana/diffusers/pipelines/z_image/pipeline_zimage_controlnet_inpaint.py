@@ -110,7 +110,7 @@ class ZSingleStreamAttnProcessorGaudi:
         query = query.contiguous()
         key = key.contiguous()
         value = value.contiguous()
-        attention_mask = None
+        #attention_mask = None
 
         fsdpa_mode = 'fp32' if os.environ.get('FP32_SOFTMAX_VISION', 'false').lower() in ['true', '1' ] else 'fast'
         hidden_states = self.fav3.forward(query, key, value, attention_mask, fsdpa_mode)
@@ -209,7 +209,7 @@ def _Zimage_tranformer_prepare_sequence_gaudi(
         freqs_cis = torch.nn.functional.pad(freqs_cis, (0, 0, 0, 0, 0, bucket_pad_len), value=0.0)
 
     # Attention mask
-    attn_mask = torch.zeros((bsz, bucket_total_len, bucket_total_len), dtype=torch.bool, device=device)
+    attn_mask = torch.zeros((bsz, bsz, bucket_total_len, bucket_total_len), dtype=torch.bool, device=device)
     for i, seq_len in enumerate(item_seqlens):
         attn_mask[i, :seq_len, :seq_len] = 1
 
@@ -302,7 +302,7 @@ def _Zimage_transformer_build_unified_sequence_gaudi(
         unified_freqs =  torch.nn.functional.pad(unified_freqs, (0, 0, 0, 0, 0, bucket_pad_len), value=0.0)
 
     # Attention mask
-    attn_mask = torch.zeros((bsz, bucket_total_len, bucket_total_len), dtype=torch.bool, device=device)
+    attn_mask = torch.zeros((bsz, bsz, bucket_total_len, bucket_total_len), dtype=torch.bool, device=device)
     for i, seq_len in enumerate(unified_seqlens):
         attn_mask[i, :seq_len, :seq_len] = 1
 
@@ -387,7 +387,7 @@ def controlnet_forward_gaudi(
     # Clarify the length matches to satisfy Dynamo due to "Symbolic Shape Inference" to avoid compilation errors
     x_freqs_cis = x_freqs_cis[:, : x.shape[1]]
 
-    x_attn_mask = torch.zeros((bsz, x_max_item_seqlen, x_max_item_seqlen), dtype=torch.bool, device=device)
+    x_attn_mask = torch.zeros((bsz, bsz, x_max_item_seqlen, x_max_item_seqlen), dtype=torch.bool, device=device)
     for i, seq_len in enumerate(x_item_seqlens):
         x_attn_mask[i, :seq_len, :seq_len] = 1
 
@@ -448,7 +448,7 @@ def controlnet_forward_gaudi(
     # Clarify the length matches to satisfy Dynamo due to "Symbolic Shape Inference" to avoid compilation errors
     cap_freqs_cis = cap_freqs_cis[:, : cap_feats.shape[1]]
 
-    cap_attn_mask = torch.zeros((bsz, cap_max_item_seqlen, cap_max_item_seqlen), dtype=torch.bool, device=device)
+    cap_attn_mask = torch.zeros((bsz, bsz, cap_max_item_seqlen, cap_max_item_seqlen), dtype=torch.bool, device=device)
     for i, seq_len in enumerate(cap_item_seqlens):
         cap_attn_mask[i, :seq_len, :seq_len] = 1
 
@@ -474,7 +474,7 @@ def controlnet_forward_gaudi(
 
     unified = pad_sequence(unified, batch_first=True, padding_value=0.0)
     unified_freqs_cis = pad_sequence(unified_freqs_cis, batch_first=True, padding_value=0.0)
-    unified_attn_mask = torch.zeros((bsz, unified_max_item_seqlen, unified_max_item_seqlen), dtype=torch.bool, device=device)
+    unified_attn_mask = torch.zeros((bsz, bsz, unified_max_item_seqlen, unified_max_item_seqlen), dtype=torch.bool, device=device)
     for i, seq_len in enumerate(unified_item_seqlens):
         unified_attn_mask[i, :seq_len, :seq_len] = 1
 
