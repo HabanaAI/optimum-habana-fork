@@ -7,25 +7,48 @@ import sys
 import time
 import json
 import fcntl
-import random
 import logging
 import argparse
 import warnings
+import base64
+import subprocess
+import traceback
 
 import torch
 import torch.distributed as dist
+from decord import VideoReader
 
 from wan.utils.utils import save_video, str2bool
 from wan.distributed.util import init_distributed_group
-from wan.configs import WAN_CONFIGS, SIZE_CONFIGS, SUPPORTED_SIZES
+from wan.configs import WAN_CONFIGS
 import wan
 
 warnings.filterwarnings('ignore')
+
+# Default prompt for animate task (not user-configurable)
+DEFAULT_PROMPT = "视频中的人在做动作"
+
+
+def encode_error_msg(error_msg: str) -> str:
+    """
+    Encode error message to base64 to handle special characters (newlines, commas).
+
+    Args:
+        error_msg: Raw error message string
+
+    Returns:
+        Base64 encoded string, or empty string if input is empty
+    """
+    if not error_msg:
+        return ""
+    return base64.b64encode(error_msg.encode('utf-8')).decode('ascii')
 
 
 def update_job(job_processed: list, args):
     """
     Update job status in job_animate.txt file.
+
+    Job format: job_id,status,generate_duration,start_time,end_time,error_msg_encoded
 
     Args:
         job_processed: List of job attributes to update
@@ -193,77 +216,121 @@ def _init_logging(rank: int):
         logging.basicConfig(level=logging.ERROR)
 
 
-def run_preprocessing(args, job_dir: str, input_data: dict) -> str:
+def init_process_pipeline(args):
     """
-    Run preprocessing pipeline for animate job.
+    Initialize the preprocessing pipeline once at service startup.
+
+    This loads the pose detection, SAM2, and other models into memory
+    so they can be reused across multiple jobs.
 
     Args:
-        args: Command line arguments
-        job_dir: Directory for job files
-        input_data: Input parameters from input.json
+        args: Command line arguments containing process_ckpt_dir
 
     Returns:
-        Path to preprocessed data directory
+        ProcessPipeline instance
     """
-    # Import preprocessing modules
-    # WAN_ROOT is set in Docker to the Wan2.2 installation directory
+    # Import preprocessing modules from Wan2.2
     wan_root = os.getenv("WAN_ROOT", "/home/user/Wan2.2")
     preprocess_path = os.path.join(wan_root, "wan/modules/animate/preprocess")
-    sys.path.insert(0, preprocess_path)
+    if preprocess_path not in sys.path:
+        sys.path.insert(0, preprocess_path)
     from process_pipepline import ProcessPipeline
 
-    video_path = input_data["video_path"]
-    image_path = input_data["image_path"]
-    mode = input_data.get("mode", "animate")
-    size = input_data.get("size", "1280*720")
-    seconds = input_data.get("seconds", 2)
-
-    # Parse resolution
-    width, height = map(int, size.split("*"))
-
-    # Setup checkpoint paths
+    # Setup checkpoint paths (matching preprocess_data.py)
     pose2d_checkpoint_path = os.path.join(args.process_ckpt_dir, "pose2d/vitpose_h_wholebody.onnx")
     det_checkpoint_path = os.path.join(args.process_ckpt_dir, "det/yolov10m.onnx")
+    # Load SAM2 checkpoint for replace mode support
+    sam2_checkpoint_path = os.path.join(args.process_ckpt_dir, "sam2/sam2_hiera_large.pt")
+    # FLUX is disabled by default (as in preprocess_data.py default)
+    flux_kontext_path = None
 
-    replace_flag = (mode == "replace")
-    # SAM2 checkpoint must be passed as [checkpoint_path, config_yaml] list
-    # Use smaller SAM2 model for shorter videos (<=2 seconds) for faster preprocessing
-    if replace_flag:
-        if int(seconds) <= 2:
-            logging.info("Using small SAM2 model for short video")
-            sam2_checkpoint_path = [
-                os.path.join(args.process_ckpt_dir, "sam2/sam2_hiera_small.pt"),
-                "sam2_hiera_s.yaml"
-            ]
-        else:
-            sam2_checkpoint_path = [
-                os.path.join(args.process_ckpt_dir, "sam2/sam2_hiera_large.pt"),
-                "sam2_hiera_l.yaml"
-            ]
-    else:
-        sam2_checkpoint_path = None
-
-    # Create preprocessing pipeline
+    logging.info("Initializing preprocessing pipeline (one-time initialization)...")
     process_pipeline = ProcessPipeline(
         det_checkpoint_path=det_checkpoint_path,
         pose2d_checkpoint_path=pose2d_checkpoint_path,
         sam_checkpoint_path=sam2_checkpoint_path,
-        flux_kontext_path=None  # FLUX disabled by default
+        flux_kontext_path=flux_kontext_path
     )
+    logging.info("Preprocessing pipeline initialized successfully.")
+
+    return process_pipeline
+
+
+def run_preprocessing(process_pipeline, job_dir: str, input_data: dict) -> tuple:
+    """
+    Run preprocessing pipeline for animate job.
+
+    This function runs the preprocessing pipeline from Wan2.2.
+    The preprocessing extracts pose, face, and optionally mask/background
+    from the driving video and reference image.
+
+    Args:
+        process_pipeline: Pre-initialized ProcessPipeline instance
+        job_dir: Directory for job files
+        input_data: Input parameters from input.json
+
+    Returns:
+        tuple: (preprocess_output_path, actual_frame_count)
+    """
+    video_path = input_data["video_path"]
+    image_path = input_data["image_path"]
+    mode = input_data.get("mode", "animate")
+    size = input_data.get("size", "832*480")
+    seconds = input_data.get("seconds", None)  # None means use full video length
+
+    # Parse resolution from size string (e.g., "832*480" -> [832, 480])
+    width, height = map(int, size.split("*"))
+
+    replace_flag = (mode == "replace")
+
+    # Determine FPS (fixed at 30 for animate-14B)
+    fps = 30
+
+    # If seconds is specified, truncate the driving video before preprocessing
+    actual_video_path = video_path
+    if seconds is not None and seconds > 0:
+        logging.info(f"Truncating driving video to {seconds} seconds...")
+        truncated_video_path = os.path.join(job_dir, "truncated_driving.mp4")
+        try:
+            # Use ffmpeg to truncate video
+            cmd = [
+                "ffmpeg", "-y", "-i", video_path,
+                "-t", str(seconds),
+                "-c:v", "libx264", "-preset", "fast",
+                "-c:a", "aac",
+                truncated_video_path
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            if result.returncode == 0 and os.path.exists(truncated_video_path):
+                actual_video_path = truncated_video_path
+                logging.info(f"Video truncated successfully to {truncated_video_path}")
+            else:
+                logging.warning(f"Failed to truncate video: {result.stderr}. Using original video.")
+        except Exception as e:
+            logging.warning(f"Failed to truncate video: {e}. Using original video.")
 
     # Output path for preprocessed data
     preprocess_output = os.path.join(job_dir, "preprocess")
     os.makedirs(preprocess_output, exist_ok=True)
 
     # Run preprocessing
+    # The process_pipepline.py handles:
+    # - For animate mode: pose retargeting with retarget_flag=True
+    # - For replace mode: mask generation with replace_flag=True
+    #
+    # Preprocessing parameters (matching the shell scripts):
+    # - animate: --retarget_flag
+    # - replace: --replace_flag --iterations 3 --k 7 --w_len 1 --h_len 1
+    logging.info(f"Running preprocessing: mode={mode}, size={size}, fps={fps}")
+
     process_pipeline(
-        video_path=video_path,
+        video_path=actual_video_path,
         refer_image_path=image_path,
         output_path=preprocess_output,
         resolution_area=[width, height],
-        fps=30,  # Fixed for animate-14B
-        iterations=3,  # Default for replace mode
-        k=7,  # Default for replace mode
+        fps=fps,
+        iterations=3,  # Default for replace mode (as in replace_preprocess.sh)
+        k=7,           # Default for replace mode
         w_len=1,
         h_len=1,
         retarget_flag=(mode == "animate"),  # Enable retargeting for animate mode
@@ -271,17 +338,32 @@ def run_preprocessing(args, job_dir: str, input_data: dict) -> str:
         replace_flag=replace_flag
     )
 
-    return preprocess_output
+    # Count actual frames generated (from src_pose.mp4)
+    src_pose_path = os.path.join(preprocess_output, "src_pose.mp4")
+    if os.path.exists(src_pose_path):
+        vr = VideoReader(src_pose_path)
+        actual_frame_count = len(vr)
+        del vr  # Release VideoReader memory
+    else:
+        # Fallback: estimate from truncated video or original
+        actual_frame_count = fps * seconds if seconds else 0
+
+    return preprocess_output, actual_frame_count
 
 
-def calculate_frame_num(seconds: int, fps: int = 30) -> int:
+def calculate_frame_num(frame_count: int) -> int:
     """
-    Calculate frame number from seconds.
-    Frame number must be 4n+1 for Animate-14B.
+    Adjust frame count to be 4n+1 for Animate-14B.
+
+    Args:
+        frame_count: Raw frame count
+
+    Returns:
+        Frame number adjusted to 4n+1
     """
-    frame_num = fps * seconds
-    frame_num = ((frame_num - 1) // 4) * 4 + 1
-    return frame_num
+    # Frame number must be 4n+1 for Animate-14B
+    frame_num = ((frame_count - 1) // 4) * 4 + 1
+    return max(5, frame_num)  # Minimum 5 frames
 
 
 def generate(args):
@@ -298,8 +380,7 @@ def generate(args):
         logging.info(f"offload_model is not specified, set to {args.offload_model}.")
 
     if world_size > 1:
-        # For HPU/Gaudi, we don't call torch.cuda.set_device
-        # The device is set via HABANA_VISIBLE_DEVICES environment variable
+        # For HPU/Gaudi, use hccl backend
         dist.init_process_group(
             backend="hccl",
             init_method="env://",
@@ -324,8 +405,17 @@ def generate(args):
 
     logging.info(f"Job service args: {args}")
     logging.info(f"Model config: {cfg}")
+
+    # Initialize preprocessing pipeline once at startup (rank 0 only for now)
+    # This loads pose detection, SAM2, and other models into memory
+    process_pipeline = None
+    if rank == 0:
+        logging.info("Initializing preprocessing pipeline...")
+        process_pipeline = init_process_pipeline(args)
+
     logging.info("Creating WanAnimate pipeline.")
 
+    # Create WanAnimate model (matching generate.py)
     wan_animate = wan.WanAnimate(
         config=cfg,
         checkpoint_dir=args.ckpt_dir,
@@ -359,11 +449,11 @@ def generate(args):
 
                         for line in lines:
                             parts = line.strip().split(args.sep)
-                            # Job format: id,status,created_time,seconds,size,mode,fps,shift,steps,refert_num,seed,generate_duration,start_time,end_time,error_msg
-                            if not job_found and len(parts) >= 15 and parts[1] in ["processing", "queued"]:
+                            # Job format: job_id,status,generate_duration,start_time,end_time,error_msg_encoded
+                            if not job_found and len(parts) >= 6 and parts[1] in ["processing", "queued"]:
                                 job_found = True
                                 parts[1] = "processing"
-                                parts[12] = str(int(time.time()))  # Set start time
+                                parts[3] = str(int(time.time()))  # Set start time
                                 job_to_process = parts
                                 updated_lines.append(args.sep.join(map(str, parts)) + "\n")
                             else:
@@ -384,11 +474,10 @@ def generate(args):
             if job_to_process:
                 try:
                     # Parse job info
-                    # Format: id,status,created_time,seconds,size,mode,fps,shift,steps,refert_num,seed,generate_duration,start_time,end_time,error_msg
-                    (job_id, status, created_str, seconds, size, mode, fps, shift, steps,
-                     refert_num, seed, generate_duration, start_time, end_time, *error_msg_parts) = job_to_process
+                    # Format: job_id,status,generate_duration,start_time,end_time,error_msg_encoded
+                    (job_id, status, generate_duration_str, start_time, end_time, *error_msg_parts) = job_to_process
 
-                    generate_start_time = float(start_time)
+                    generate_start_time = float(start_time) if start_time else time.time()
                     job_dir = os.path.join(args.video_dir, job_id)
                     os.makedirs(job_dir, exist_ok=True)
 
@@ -398,32 +487,33 @@ def generate(args):
                     with open(input_json_path, "r", encoding="utf-8") as f:
                         input_data = json.load(f)
 
-                    # Add seconds to input_data for SAM2 model selection in preprocessing
-                    input_data["seconds"] = int(seconds)
+                    # Get parameters from input.json
+                    mode = input_data.get("mode", "animate")
+                    size = input_data.get("size", "832*480")
+                    seconds = input_data.get("seconds")  # Can be None for full video
+                    shift = input_data.get("shift", 5.0)
+                    steps = input_data.get("steps", 20)
+                    refert_num = input_data.get("refert_num", 1)
+                    seed = input_data.get("seed", 0)
 
                     logging.info(f"Processing job {job_id}: mode={mode}, size={size}, seconds={seconds}")
 
-                    # Step 1: Preprocessing
-                    # Note: The preprocessing extracts all frames from the driving video.
-                    # The output video length is determined by the driving video length,
-                    # not by the 'seconds' parameter (which is used for time estimation).
+                    # Step 1: Preprocessing (uses pre-initialized pipeline)
                     logging.info(f"Running preprocessing for job {job_id}...")
-                    preprocess_path = run_preprocessing(args, job_dir, input_data)
-                    logging.info(f"Preprocessing completed: {preprocess_path}")
+                    preprocess_path, actual_frame_count = run_preprocessing(process_pipeline, job_dir, input_data)
+                    logging.info(f"Preprocessing completed: {preprocess_path}, frames={actual_frame_count}")
 
                     # Step 2: Generation
                     logging.info(f"Running generation for job {job_id}...")
 
-                    # Calculate frame number
-                    frame_num = calculate_frame_num(int(seconds), fps=30)
+                    # Calculate frame number (must be 4n+1)
+                    frame_num = calculate_frame_num(actual_frame_count)
+                    logging.info(f"Using frame_num={frame_num} (adjusted from {actual_frame_count})")
 
                     # Determine if replace mode
                     replace_flag = (mode == "replace")
 
-                    # Get prompt
-                    prompt = input_data.get("prompt", "视频中的人在做动作")
-
-                    # Run generation
+                    # Run generation (matching generate.py animate task)
                     video = wan_animate.generate(
                         src_root_path=preprocess_path,
                         replace_flag=replace_flag,
@@ -433,15 +523,18 @@ def generate(args):
                         sample_solver=args.sample_solver,
                         sampling_steps=int(steps),
                         guide_scale=args.sample_guide_scale,
-                        input_prompt=prompt,
+                        input_prompt=DEFAULT_PROMPT,
                         n_prompt="",
                         seed=int(seed),
                         offload_model=args.offload_model,
                     )
 
-                    # Synchronize HPU before saving (like generate_UI.py)
+                    # Synchronize HPU before saving
                     if hasattr(torch, 'hpu'):
                         torch.hpu.synchronize()
+
+                    if dist.is_initialized():
+                        dist.barrier()
 
                     if rank == 0:
                         logging.info(f"Saving generated video to {video_path}")
@@ -455,30 +548,43 @@ def generate(args):
                         )
 
                         generate_end_time = time.time()
+                        # Job format: job_id,status,generate_duration,start_time,end_time,error_msg_encoded
                         job_processed = [
-                            job_id, "completed", created_str, seconds, size, mode, fps,
-                            shift, steps, refert_num, seed,
+                            job_id,
+                            "completed",
                             max(0, int(generate_end_time - generate_start_time)),
-                            int(generate_start_time), int(generate_end_time), ""
+                            int(generate_start_time),
+                            int(generate_end_time),
+                            ""  # No error
                         ]
                         update_job(job_processed, args)
                         logging.info(f"Job {job_id} completed successfully.")
 
+                    # Memory cleanup after job completion
+                    del video
+                    if hasattr(torch, 'hpu'):
+                        torch.hpu.empty_cache()
+                    elif torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+
                 except Exception as e:
-                    import traceback
-                    logging.error(f"Error processing job {job_id}: {e}\n{traceback.format_exc()}")
+                    error_msg = f"{e}\n{traceback.format_exc()}"
+                    logging.error(f"Error processing job {job_id}: {error_msg}")
                     if rank == 0:
                         generate_end_time = time.time()
+                        # Encode error message to handle special characters
+                        encoded_error = encode_error_msg(str(e))
                         job_processed = [
-                            job_id, "error", created_str, seconds, size, mode, fps,
-                            shift, steps, refert_num, seed,
+                            job_id,
+                            "error",
                             max(0, int(generate_end_time - generate_start_time)),
-                            int(generate_start_time), int(generate_end_time), str(e)
+                            int(generate_start_time),
+                            int(generate_end_time),
+                            encoded_error
                         ]
                         update_job(job_processed, args)
 
         except Exception as e:
-            import traceback
             logging.error(f"Job worker encountered an error: {e}\n{traceback.format_exc()}")
 
 

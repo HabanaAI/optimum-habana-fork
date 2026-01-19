@@ -7,6 +7,7 @@ import time
 import fcntl
 import shutil
 import math
+import json
 
 from fastapi import Depends, Request, status
 from fastapi.responses import FileResponse, JSONResponse
@@ -19,7 +20,14 @@ from comps import (
     register_statistics,
     statistics_dict,
 )
-from component_animate import AnimateInput, AnimateOutput, ServiceType, OpeaAnimate, SUPPORTED_ANIMATE_SIZES
+from component_animate import (
+    AnimateInput,
+    AnimateOutput,
+    ServiceType,
+    OpeaAnimate,
+    SUPPORTED_ANIMATE_SIZES,
+    decode_error_msg,
+)
 
 
 # Initialize logger and component loader
@@ -42,7 +50,7 @@ def validate_form_parameters(form, files):
         if mode not in ["animate", "replace"]:
             raise ValueError(f"Invalid mode: {mode}. Must be 'animate' or 'replace'.")
 
-        size = form.get("size", "1280*720")
+        size = form.get("size", "832*480")
         if size not in SUPPORTED_ANIMATE_SIZES:
             raise ValueError(f"Invalid size: {size}. Supported: {SUPPORTED_ANIMATE_SIZES}")
 
@@ -50,14 +58,15 @@ def validate_form_parameters(form, files):
         if refert_num not in [1, 5]:
             raise ValueError(f"Invalid refert_num: {refert_num}. Must be 1 or 5.")
 
-        seconds = int(form.get("seconds", 2))
-        if seconds <= 0:
-            raise ValueError("seconds must be greater than 0.")
+        # seconds is optional - None means use full driving video length
+        seconds_str = form.get("seconds", None)
+        seconds = int(seconds_str) if seconds_str is not None and seconds_str != "" else None
+        if seconds is not None and seconds <= 0:
+            raise ValueError("seconds must be greater than 0 or omitted (for full video length).")
 
         params = {
             "image": files["image"],
             "video": files["video"],
-            "prompt": form.get("prompt", "视频中的人在做动作"),
             "mode": mode,
             "size": size,
             "seconds": seconds,
@@ -93,32 +102,57 @@ def estimate_queue_time(seconds: int, steps: int) -> int:
     Estimate generation time in minutes for Animate-14B.
 
     Args:
-        seconds: Video duration in seconds
+        seconds: Video duration in seconds (0 or empty means unknown/full video)
         steps: Diffusion sampling steps
 
     Returns:
         Estimated time in minutes
     """
     rank_size = int(os.getenv("RANK_SIZE", 1))
+    # If seconds is 0 or unknown, assume average video length of 3 seconds
+    effective_seconds = seconds if seconds and seconds > 0 else 3
     # Animate-14B is slower than TI2V due to preprocessing + larger model
     # Rough estimate: preprocessing ~30s + generation ~2min per second of video at 20 steps
     preprocessing_time = 0.5  # minutes
-    generation_time = seconds * 2.0 * steps * rank_size / (20 * 8)
+    generation_time = effective_seconds * 2.0 * steps * rank_size / (20 * 8)
     return max(1, math.ceil(preprocessing_time + generation_time))
 
 
-def calculate_progress(job_info: list) -> tuple:
+def load_input_json(job_id: str) -> dict:
+    """
+    Load input.json for a job to get parameters.
+
+    Args:
+        job_id: The job ID
+
+    Returns:
+        Dictionary with job parameters, or empty dict if not found
+    """
+    input_json_path = os.path.join(os.getenv("VIDEO_DIR"), job_id, "input.json")
+    if os.path.exists(input_json_path):
+        try:
+            with open(input_json_path, "r") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def calculate_progress(job_info: list, input_data: dict) -> tuple:
     """
     Calculate job progress and remaining time.
 
     Args:
-        job_info: Job information list
+        job_info: Job information list [job_id, status, generate_duration, start_time, end_time, error_msg_encoded]
+        input_data: Parameters loaded from input.json
 
     Returns:
         Tuple of (progress percentage, remaining time in minutes)
     """
-    estimated_time = estimate_queue_time(int(job_info[3]), int(job_info[8]))
-    start_time = int(job_info[12])
+    seconds = input_data.get("seconds", 0) or 0
+    steps = input_data.get("steps", 20)
+    estimated_time = estimate_queue_time(seconds, steps)
+    start_time = int(job_info[3]) if job_info[3] else 0
     elapsed_time = int(time.time()) - start_time
     progress = int(min(int((elapsed_time / (estimated_time * 60)) * 100), 99))
     left_time = int(max(1, int(estimated_time - (elapsed_time / 60))))
@@ -141,6 +175,7 @@ def generate_response(video_id: str) -> AnimateOutput:
         queue_estimated_time_in_minutes = 0
         queue_length = 0
         job_info = None
+        job_input_data = None
 
         with open(job_file, "r") as f:
             fcntl.flock(f, fcntl.LOCK_EX)
@@ -149,53 +184,72 @@ def generate_response(video_id: str) -> AnimateOutput:
                 for line in lines:
                     job = line.strip().split(sep)
 
-                    if len(job) < 15:
+                    # New format: job_id,status,generate_duration,start_time,end_time,error_msg_encoded
+                    if len(job) < 6:
                         continue
 
-                    if job[0] == video_id:
+                    current_job_id = job[0]
+                    current_input_data = load_input_json(current_job_id)
+
+                    if current_job_id == video_id:
                         job_info = job
-                        queue_estimated_time_in_minutes += estimate_queue_time(int(job[3]), int(job[8]))
+                        job_input_data = current_input_data
+                        seconds = current_input_data.get("seconds", 0) or 0
+                        steps = current_input_data.get("steps", 20)
+                        queue_estimated_time_in_minutes += estimate_queue_time(seconds, steps)
                         break
 
                     if job[1] == "queued":
                         queue_length += 1
-                        queue_estimated_time_in_minutes += estimate_queue_time(int(job[3]), int(job[8]))
+                        seconds = current_input_data.get("seconds", 0) or 0
+                        steps = current_input_data.get("steps", 20)
+                        queue_estimated_time_in_minutes += estimate_queue_time(seconds, steps)
 
                     if job[1] == "processing":
-                        progress, left_time = calculate_progress(job)
+                        progress, left_time = calculate_progress(job, current_input_data)
                         queue_length += 1
                         queue_estimated_time_in_minutes += left_time
             finally:
                 fcntl.flock(f, fcntl.LOCK_UN)
 
         if job_info:
-            # Job format: id,status,created_time,seconds,size,mode,fps,shift,steps,refert_num,seed,generate_duration,start_time,end_time,error_msg
+            # Job format: job_id,status,generate_duration,start_time,end_time,error_msg_encoded
+            # Parameters (seconds, steps, etc.) come from input.json
+            created_at = job_input_data.get("created_at", 0)
+            seconds = job_input_data.get("seconds")  # Can be None
+            seconds_str = str(seconds) if seconds is not None else ""
+
             if job_info[1] == "processing":
-                progress, left_time = calculate_progress(job_info)
+                progress, left_time = calculate_progress(job_info, job_input_data)
                 return AnimateOutput(
                     id=job_info[0],
                     model=os.getenv("MODEL", "Wan2.2-Animate-14B"),
                     status=job_info[1],
                     progress=progress,
-                    created_at=int(job_info[2]),
-                    seconds=job_info[3],
+                    created_at=created_at,
+                    seconds=seconds_str,
                     duration=0,
                     estimated_time=left_time,
                     queue_length=0,
                     error=""
                 )
             else:
+                # Decode error message if status is error
+                error_msg = ""
+                if job_info[1] == "error" and len(job_info) > 5:
+                    error_msg = decode_error_msg(job_info[5])
+
                 return AnimateOutput(
                     id=job_info[0],
                     model=os.getenv("MODEL", "Wan2.2-Animate-14B"),
                     status=job_info[1],
                     progress=100 if job_info[1] == "completed" else 0,
-                    created_at=int(job_info[2]),
-                    seconds=job_info[3],
-                    duration=int(job_info[11]) if job_info[1] == "completed" else 0,
+                    created_at=created_at,
+                    seconds=seconds_str,
+                    duration=int(job_info[2]) if job_info[1] == "completed" else 0,
                     estimated_time=0 if job_info[1] == "completed" else int(queue_estimated_time_in_minutes),
                     queue_length=0 if job_info[1] == "completed" else queue_length,
-                    error=job_info[14] if job_info[1] == "error" else ""
+                    error=error_msg
                 )
 
     content = {
@@ -322,6 +376,12 @@ async def delete_animate(video_id: str):
                 fcntl.flock(f, fcntl.LOCK_UN)
 
         if deleted_job_info:
+            # Load input.json to get parameters for response
+            deleted_input_data = load_input_json(deleted_job_info[0])
+            created_at = deleted_input_data.get("created_at", 0)
+            seconds = deleted_input_data.get("seconds")
+            seconds_str = str(seconds) if seconds is not None else ""
+
             video_folder_path = os.path.join(os.getenv("VIDEO_DIR"), deleted_job_info[0])
             if os.path.isdir(video_folder_path):
                 shutil.rmtree(video_folder_path)
@@ -330,9 +390,9 @@ async def delete_animate(video_id: str):
                 model=os.getenv("MODEL", "Wan2.2-Animate-14B"),
                 status="deleted",
                 progress=0,
-                created_at=int(deleted_job_info[2]),
-                seconds=deleted_job_info[3],
-                duration=int(deleted_job_info[11]),
+                created_at=created_at,
+                seconds=seconds_str,
+                duration=int(deleted_job_info[2]) if deleted_job_info[2] else 0,
                 estimated_time=0,
                 queue_length=0,
                 error=""

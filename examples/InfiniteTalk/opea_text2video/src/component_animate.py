@@ -6,10 +6,11 @@ import time
 import random
 import json
 import fcntl
+import base64
 
 from enum import Enum
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional
 from fastapi import Form, File, UploadFile
 from comps import CustomLogger, OpeaComponent, OpeaComponentRegistry
 
@@ -28,10 +29,9 @@ class AnimateInput:
         self,
         image: UploadFile = File(...),
         video: UploadFile = File(...),
-        prompt: Optional[str] = Form("视频中的人在做动作"),
         mode: Optional[str] = Form("animate"),
-        size: Optional[str] = Form("1280*720"),
-        seconds: Optional[int] = Form(2),
+        size: Optional[str] = Form("832*480"),
+        seconds: Optional[int] = Form(None),
         refert_num: Optional[int] = Form(1),
         seed: Optional[int] = Form(-1),
         shift: Optional[float] = Form(5.0),
@@ -39,10 +39,9 @@ class AnimateInput:
     ):
         self.image = image
         self.video = video
-        self.prompt = prompt
         self.mode = mode
         self.size = size
-        self.seconds = seconds
+        self.seconds = seconds  # None means use full driving video length
         self.refert_num = refert_num
         self.seed = seed
         self.shift = shift
@@ -66,6 +65,39 @@ class AnimateOutput(BaseModel):
 
 # Supported sizes for Animate-14B (720P and 480P)
 SUPPORTED_ANIMATE_SIZES = ["1280*720", "720*1280", "832*480", "480*832"]
+
+
+def encode_error_msg(error_msg: str) -> str:
+    """
+    Encode error message to base64 to handle special characters (newlines, commas).
+
+    Args:
+        error_msg: Raw error message string
+
+    Returns:
+        Base64 encoded string, or empty string if input is empty
+    """
+    if not error_msg:
+        return ""
+    return base64.b64encode(error_msg.encode('utf-8')).decode('ascii')
+
+
+def decode_error_msg(encoded_msg: str) -> str:
+    """
+    Decode base64 encoded error message.
+
+    Args:
+        encoded_msg: Base64 encoded error message
+
+    Returns:
+        Decoded error message string, or empty string if input is empty
+    """
+    if not encoded_msg:
+        return ""
+    try:
+        return base64.b64decode(encoded_msg.encode('ascii')).decode('utf-8')
+    except Exception:
+        return encoded_msg  # Return as-is if decoding fails
 
 
 def calculate_frame_num(seconds: int, fps: int = 30) -> int:
@@ -137,8 +169,8 @@ class OpeaAnimate(OpeaComponent):
         if input.refert_num not in [1, 5]:
             raise ValueError(f"Invalid refert_num: {input.refert_num}. Must be 1 or 5.")
 
-        if input.seconds <= 0:
-            raise ValueError("seconds must be greater than 0.")
+        if input.seconds is not None and input.seconds <= 0:
+            raise ValueError("seconds must be greater than 0 or None (for full video length).")
 
         # Save input files
         image_path = os.path.join(job_dir, input.image.filename)
@@ -151,27 +183,27 @@ class OpeaAnimate(OpeaComponent):
         with open(video_path, "wb") as f:
             f.write(video_contents)
 
-        # Create input.json
+        # Create input.json (stores all job parameters)
         input_json_content = {
-            "prompt": input.prompt,
             "image_path": image_path,
             "video_path": video_path,
             "mode": input.mode,
             "size": input.size,
-            "seconds": input.seconds,
+            "seconds": input.seconds,  # Can be None for full video length
             "refert_num": input.refert_num,
             "seed": input.seed if input.seed >= 0 else random.randint(0, 2**32 - 1),
             "shift": input.shift,
             "steps": input.steps,
+            "created_at": int(created),
         }
 
         input_json_path = os.path.join(job_dir, "input.json")
         with open(input_json_path, "w") as f:
             json.dump(input_json_content, f, indent=4)
 
-        # Create job entry
-        # Format: id,status,created_time,seconds,size,mode,fps,shift,steps,refert_num,seed,generate_duration,start_time,end_time,error_msg
-        fps = 30  # Fixed for Animate-14B
+        # Create job entry (simplified format)
+        # Format: job_id,status,generate_duration,start_time,end_time,error_msg_encoded
+        # All other parameters are stored in input.json
         status = "queued"
         generate_duration = 0
         start_time = 0
@@ -181,19 +213,10 @@ class OpeaAnimate(OpeaComponent):
         job = [
             job_id,
             status,
-            int(created),
-            input.seconds,
-            input.size,
-            input.mode,
-            fps,
-            input.shift,
-            input.steps,
-            input.refert_num,
-            input_json_content["seed"],  # Use the resolved seed
             generate_duration,
             start_time,
             end_time,
-            error_msg
+            error_msg  # Will be base64 encoded when there's an actual error
         ]
 
         sep = os.getenv("SEP", ",")
