@@ -266,7 +266,7 @@ def main():
         from optimum.habana.diffusers import GaudiStableDiffusionImg2ImgPipeline as Img2ImgPipeline
 
     if "image-variations" in args.model_name_or_path:
-        im = PIL.Image.open(requests.get(args.src_image_path, stream=True).raw)
+        im = PIL.Image.open(args.src_image_path)
         tform = transforms.Compose(
             [
                 transforms.ToTensor(),
@@ -280,7 +280,7 @@ def main():
         )
         image = tform(im).unsqueeze(0)
     else:
-        image = PIL.Image.open(requests.get(args.src_image_path, stream=True).raw)
+        image = PIL.Image.open(args.src_image_path)
         image = PIL.ImageOps.exif_transpose(image)
         image = image.convert("RGB")
 
