@@ -162,4 +162,36 @@ curl http://10.239.15.29:9370/v1/audio/speech/5da20842-db01-11f/delete
 Output example:
 ```shell
 {"success":{"message":"task 5da20842-db01-11f is deleted","code":"200"}}
+```
 
+## streaming
+The task is processed in segments and streamed.
+
+Command example:
+```shell
+curl http://10.239.15.29:9370/v1/audio/speech/stream \
+    -F text="收到好友从远方寄来的生日礼物，那份意外的惊喜与深深的祝福让我心中充满了甜蜜的快乐，笑容如花儿般绽放。" \
+    -F mode="zero_shot" \
+    -F prompt_text="希望你以后能够做的比我还好呦。" \
+    -F prompt_audio="@asset/zero_shot_prompt.wav"
+```
+
+Output example:
+```shell
+{"id":"c592ee5c-e0a7-11f","model":"CosyVoice2-0.5B","status":"queued","progress":0,"created_time":"2025-12-24 17:06:02","started_time":"","finished_time":"","queue_length":2,"error":"","stream":true}
+```
+
+## Download the fragmented results of streaming processing
+
+Command example： Keep calling this interface to get all audio segments until it returns 204.
+```shell
+curl http://10.239.15.29:9370/v1/audio/speech/c592ee5c-e0a7-11f/content/stream -o test.wav
+```
+
+
+If the task is "completed", the full audio can be obtained by calling the regular API.
+```shell
+curl http://10.239.15.29:9370/v1/audio/speech/c592ee5c-e0a7-11f/content/ -o test.wav
+```
+
+If the task is in the "queued" state, calling this interface will return a 400 error.

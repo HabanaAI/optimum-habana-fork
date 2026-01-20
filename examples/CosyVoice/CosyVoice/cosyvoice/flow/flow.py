@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import logging
+import math
 import random
 from typing import Dict, Optional
 import torch
@@ -20,6 +21,7 @@ from torch.nn import functional as F
 from omegaconf import DictConfig
 from cosyvoice.utils.mask import make_pad_mask
 import time
+import habana_frameworks.torch as htorch
 
 class MaskedDiffWithXvec(torch.nn.Module):
     def __init__(self,
@@ -256,31 +258,38 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
         embedding = self.spk_embed_affine_layer(embedding)
 #        torch.hpu.synchronize()
         t1 = time.time()
-
         # concat text and prompt_text
         token, token_len = torch.concat([prompt_token, token], dim=1), prompt_token_len + token_len
-        mask = (~make_pad_mask(token_len)).unsqueeze(-1).to(embedding)
+        mask = (~make_pad_mask(token_len, token.shape[1])).unsqueeze(-1).to(embedding)
         token = self.input_embedding(torch.clamp(token, min=0)) * mask
 #        torch.hpu.synchronize()
         t2 = time.time()
-
         # text encode
+        ori_len = token.shape[1]
+        padded_len = math.ceil(ori_len / 100) * 100 - ori_len
+        token = torch.nn.functional.pad(token, (0,0,padded_len,0,0,0))
+        htorch.core.mark_step()
         if finalize is True:
-            h, h_lengths = self.encoder(token, token_len, streaming=streaming)
+            h, h_lengths = self.encoder(token, token_len + padded_len, streaming=streaming)
         else:
             token, context = token[:, :-self.pre_lookahead_len], token[:, -self.pre_lookahead_len:]
-            h, h_lengths = self.encoder(token, token_len, context=context, streaming=streaming)
+            h, h_lengths = self.encoder(token, token_len + padded_len, context=context, streaming=streaming)
         mel_len1, mel_len2 = prompt_feat.shape[1], h.shape[1] - prompt_feat.shape[1]
         h = self.encoder_proj(h)
+        h = h[:,padded_len*2:,:]
+        htorch.core.mark_step()
 #        torch.hpu.synchronize()
         t3 = time.time()
-
+        h_len = h.shape[1]
+        padded_len = math.ceil(h_len / 512) * 512 - h_len
+        h = torch.nn.functional.pad(h, (0,0,0,padded_len,0,0))
         # get conditions
-        conds = torch.zeros([1, mel_len1 + mel_len2, self.output_size], device=token.device).to(h.dtype)
+        conds = torch.zeros([1, h.shape[1], self.output_size], device=token.device).to(h.dtype)
         conds[:, :mel_len1] = prompt_feat
         conds = conds.transpose(1, 2)
 
-        mask = (~make_pad_mask(torch.tensor([mel_len1 + mel_len2]))).to(h)
+        mask = (~make_pad_mask(torch.tensor([mel_len1 + mel_len2]), h.shape[1])).to(h)
+        htorch.core.mark_step()
 #        torch.hpu.synchronize()
         t4 = time.time()
         feat, _ = self.decoder(
@@ -291,7 +300,8 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
             n_timesteps=10,
             streaming=streaming
         )
-        feat = feat[:, :, mel_len1:]
+        feat = feat[:, :, mel_len1:h_len]
+        htorch.core.mark_step()
 #        torch.hpu.synchronize()
         t5 = time.time()
 #        print("%%%% flow stage1 latency: " + str(t2-t1) + " sec")
@@ -299,4 +309,4 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
 #        print("%%%% flow stage3 latency: " + str(t4-t3) + " sec")
 #        print("%%%% flow stage4 latency: " + str(t5-t4) + " sec")
 #        assert feat.shape[2] == mel_len2
-        return feat.float().cpu(), None
+        return feat.float(), None

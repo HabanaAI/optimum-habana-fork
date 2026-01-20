@@ -320,7 +320,7 @@ def main():
             duration = t1 - t0
 
             if (args.context_parallel_size > 1 and torch.distributed.get_rank() == 0) or args.context_parallel_size == 1:
-                print("Wan Pipeline FP8 Latency in loop #{:d}: {:.1f} sec".format(i, duration))
+                logger.info("Wan Pipeline FP8 Latency in loop #{:d}: {:.1f} sec".format(i, duration))
 
     if args.quant_mode == "measure":
         from neural_compressor.torch.quantization import finalize_calibration
