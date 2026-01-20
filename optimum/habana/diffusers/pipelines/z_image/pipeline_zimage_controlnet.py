@@ -109,13 +109,10 @@ class ZSingleStreamAttnProcessorGaudi:
         query = query.contiguous()
         key = key.contiguous()
         value = value.contiguous()
-        attention_mask = None
+        #attention_mask = None
 
         fsdpa_mode = 'fp32' if os.environ.get('FP32_SOFTMAX_VISION', 'false').lower() in ['true', '1' ] else 'fast'
         hidden_states = self.fav3.forward(query, key, value, attention_mask, fsdpa_mode)
-        htcore.mark_step()
-        #print(f'baymax gaudi line 116 sdpa hidden_states:{hidden_states.shape}')
-        #print(f'baymax gaudi line 116 sdpa hidden_states:{hidden_states[0,0,0,:8]}')
 
         # Reshape back
         hidden_states = hidden_states.flatten(2, 3)
@@ -211,7 +208,7 @@ def _Zimage_tranformer_prepare_sequence_gaudi(
         freqs_cis = torch.nn.functional.pad(freqs_cis, (0, 0, 0, 0, 0, bucket_pad_len), value=0.0)
 
     # Attention mask
-    attn_mask = torch.zeros((bsz, bucket_total_len, bucket_total_len), dtype=torch.bool, device=device)
+    attn_mask = torch.zeros((bsz, bsz, bucket_total_len, bucket_total_len), dtype=torch.bool, device=device)
     for i, seq_len in enumerate(item_seqlens):
         attn_mask[i, :seq_len, :seq_len] = 1
 
@@ -304,7 +301,7 @@ def _Zimage_transformer_build_unified_sequence_gaudi(
         unified_freqs =  torch.nn.functional.pad(unified_freqs, (0, 0, 0, 0, 0, bucket_pad_len), value=0.0)
 
     # Attention mask
-    attn_mask = torch.zeros((bsz, bucket_total_len, bucket_total_len), dtype=torch.bool, device=device)
+    attn_mask = torch.zeros((bsz, bsz, bucket_total_len, bucket_total_len), dtype=torch.bool, device=device)
     for i, seq_len in enumerate(unified_seqlens):
         attn_mask[i, :seq_len, :seq_len] = 1
 
@@ -389,7 +386,7 @@ def controlnet_forward_gaudi(
     # Clarify the length matches to satisfy Dynamo due to "Symbolic Shape Inference" to avoid compilation errors
     x_freqs_cis = x_freqs_cis[:, : x.shape[1]]
 
-    x_attn_mask = torch.zeros((bsz, x_max_item_seqlen, x_max_item_seqlen), dtype=torch.bool, device=device)
+    x_attn_mask = torch.zeros((bsz, bsz, x_max_item_seqlen, x_max_item_seqlen), dtype=torch.bool, device=device)
     for i, seq_len in enumerate(x_item_seqlens):
         x_attn_mask[i, :seq_len, :seq_len] = 1
 
@@ -450,7 +447,7 @@ def controlnet_forward_gaudi(
     # Clarify the length matches to satisfy Dynamo due to "Symbolic Shape Inference" to avoid compilation errors
     cap_freqs_cis = cap_freqs_cis[:, : cap_feats.shape[1]]
 
-    cap_attn_mask = torch.zeros((bsz, cap_max_item_seqlen, cap_max_item_seqlen), dtype=torch.bool, device=device)
+    cap_attn_mask = torch.zeros((bsz, bsz, cap_max_item_seqlen, cap_max_item_seqlen), dtype=torch.bool, device=device)
     for i, seq_len in enumerate(cap_item_seqlens):
         cap_attn_mask[i, :seq_len, :seq_len] = 1
 
@@ -476,7 +473,7 @@ def controlnet_forward_gaudi(
 
     unified = pad_sequence(unified, batch_first=True, padding_value=0.0)
     unified_freqs_cis = pad_sequence(unified_freqs_cis, batch_first=True, padding_value=0.0)
-    unified_attn_mask = torch.zeros((bsz, unified_max_item_seqlen, unified_max_item_seqlen), dtype=torch.bool, device=device)
+    unified_attn_mask = torch.zeros((bsz, bsz, unified_max_item_seqlen, unified_max_item_seqlen), dtype=torch.bool, device=device)
     for i, seq_len in enumerate(unified_item_seqlens):
         unified_attn_mask[i, :seq_len, :seq_len] = 1
 
@@ -691,9 +688,7 @@ def Zimage_transformer_forward_gaudi(
     return (x,) if not return_dict else Transformer2DModelOutput(sample=x)
 
 setattr(transformer_z_image, "RopeEmbedder", RopeEmbedderGaudi)
-setattr(transformer_z_image, "ZSingleStreamAttnProcessor", ZSingleStreamAttnProcessorGaudi)
 setattr(controlnet_z_image, "RopeEmbedder", RopeEmbedderGaudi)
-setattr(controlnet_z_image, "ZSingleStreamAttnProcessor", ZSingleStreamAttnProcessorGaudi)
 
 class GaudiStableDiffusionZImageControlNetPipeline(GaudiDiffusionPipeline, ZImageControlNetInpaintPipeline):
     def __init__(
@@ -743,6 +738,25 @@ class GaudiStableDiffusionZImageControlNetPipeline(GaudiDiffusionPipeline, ZImag
 
         self.transformer._prepare_sequence = types.MethodType(_Zimage_tranformer_prepare_sequence_gaudi, self.transformer)
         self.transformer._build_unified_sequence = types.MethodType(_Zimage_transformer_build_unified_sequence_gaudi, self.transformer)
+
+        for layer in self.transformer.noise_refiner:
+            layer.attention.set_processor(ZSingleStreamAttnProcessorGaudi())
+
+        for layer in self.transformer.context_refiner:
+            layer.attention.set_processor(ZSingleStreamAttnProcessorGaudi())
+        
+        if not self.transformer.siglip_refiner is None:
+            for layer in self.transformer.siglip_refiner:
+                layer.attention.set_processor(ZSingleStreamAttnProcessorGaudi())
+
+        for layer in self.transformer.layers:
+            layer.attention.set_processor(ZSingleStreamAttnProcessorGaudi())
+
+        for layer in self.controlnet.control_layers:
+            layer.attention.set_processor(ZSingleStreamAttnProcessorGaudi())
+
+        for layer in self.controlnet.control_noise_refiner:
+            layer.attention.set_processor(ZSingleStreamAttnProcessorGaudi())
 
         #use_bucket = "1" == os.getenv("USE_ZIMAGE_BUCKET", "0")
         #if use_bucket and self.use_hpu_graphs:
