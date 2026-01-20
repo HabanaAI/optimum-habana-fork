@@ -104,7 +104,7 @@ def main():
     controlnet = ZImageControlNetModel.from_single_file(
             args.controlnet_path,
             config='hlky/Z-Image-Turbo-Fun-Controlnet-Union-2.1/config.json',
-            torch_dtype = torch.bfloat16
+            torch_dtype=torch.bfloat16
     )
 
     # 1. Load the pipeline
