@@ -111,7 +111,7 @@ def main():
     # Use bfloat16 for optimal performance on supported GPUs
     pipe = GaudiStableDiffusionZImageControlNetPipeline.from_pretrained(
         model_name_path,
-        controlnet=controlnet
+        controlnet=controlnet,
         torch_dtype=torch.bfloat16,
         **kwargs,
     )
