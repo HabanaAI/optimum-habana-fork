@@ -170,7 +170,7 @@ docker exec -it animate-gaudi-service bash
 
 # 切换到工作目录并启动服务
 cd /home/user/text2video
-python3 web_service_animate.py --model_name_or_path Wan2.2-Animate-14B --rank_size ${HPU} 2>&1 &
+python3 web_service_animate.py --model_name_or_path Wan2.2-Animate-14B --rank_size ${HPU} > web.log 2>&1 &
 ```
 
 #### 4.3 启动预处理服务 (CPU)
@@ -227,7 +227,7 @@ torchrun --nproc_per_node=4 --standalone \
 | `mode`       | 字符串 |  否  | `animate`  | `animate`, `replace`                         | 动画模式。`animate`: 动作迁移；`replace`: 角色替换。                     |
 | `size`       | 字符串 |  否  | `832*480`  | `1280*720`, `720*1280`, `832*480`, `480*832` | 输出视频分辨率。                                                         |
 | `seconds`    | 整数   |  否  | _(不设置)_ | -                                            | 最大视频时长（秒）。若不设置或超过驱动视频时长，则使用完整驱动视频长度。 |
-| `refert_num` | 整数   |  否  | `1`        | 正整数 (推荐: `1`, `5`)                      | 时序引导帧数。1=更快；5=更好的时序一致性。                               |
+| `refert_num` | 整数   |  否  | `1`        | `1`, `5`                                     | 时序引导帧数。必须为 1 或 5。1=更快；5=更好的时序一致性。                |
 | `seed`       | 整数   |  否  | `-1`       | -                                            | 随机种子。-1 表示随机生成。                                              |
 | `shift`      | 浮点数 |  否  | `5.0`      | -                                            | 噪声调度偏移参数。                                                       |
 | `steps`      | 整数   |  否  | `20`       | -                                            | 扩散采样步数。数值越高质量越好，但速度越慢。                             |
@@ -568,7 +568,7 @@ API 返回标准的 HTTP 状态码和一致的 JSON 错误体，以帮助诊断�
 ```json
 {
   "error": {
-    "message": "Invalid refert_num: 0. Must be a positive integer (recommended: 1 or 5).",
+    "message": "Invalid refert_num: 3. Must be 1 or 5.",
     "code": "400"
   }
 }
