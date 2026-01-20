@@ -791,10 +791,6 @@ class GaudiStableDiffusionZImageControlNetInpaintPipeline(GaudiDiffusionPipeline
         for layer in self.controlnet.control_noise_refiner:
             layer.attention.set_processor(ZSingleStreamAttnProcessorGaudi())
 
-        #use_bucket = "1" == os.getenv("USE_ZIMAGE_BUCKET", "0")
-        #if use_bucket and self.use_hpu_graphs:
-        #    self.vae.forward = self.vae.decode
-        #    self.vae = ht.hpu.wrap_in_hpu_graph(self.vae)
         self.to(self._device)
 
     @torch.no_grad()

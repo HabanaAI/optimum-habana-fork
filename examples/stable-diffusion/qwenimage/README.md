@@ -313,12 +313,3 @@ deepspeed --num_nodes 1 \
 
     --loop 性能测试循环数
 
-注意：
-
-截止2026/01/07，Qwen-Image-Layered,Qwen-Image-2512,Qwen-Image-Edit-2511仅在Diffusers开发分支上，因此需要安装Diffusers开发版本:
-
-```bash
-    pip uninstall diffusers
-    pip install -r requirements-diffusers.txt
-```
-
