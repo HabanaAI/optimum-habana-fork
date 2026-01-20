@@ -222,15 +222,19 @@ class OpeaAnimate(OpeaComponent):
         sep = os.getenv("SEP", ",")
         line = sep.join(map(str, job)) + "\n"
         job_file = os.path.join(self.video_dir, "job_animate.txt")
+        lock_file = job_file + ".lock"
 
-        with open(job_file, "a") as f:
-            fcntl.flock(f, fcntl.LOCK_EX)
+        # Use the same lock file as update operations for consistency
+        # Use "a" mode to avoid truncating the lock file which can cause race conditions
+        with open(lock_file, "a") as lf:
+            fcntl.flock(lf, fcntl.LOCK_EX)
             try:
-                f.write(line)
-                f.flush()
-                os.fsync(f.fileno())
+                with open(job_file, "a") as f:
+                    f.write(line)
+                    f.flush()
+                    os.fsync(f.fileno())
             finally:
-                fcntl.flock(f, fcntl.LOCK_UN)
+                fcntl.flock(lf, fcntl.LOCK_UN)
 
         logger.info(f"Animate job {job_id} queued with mode: {input.mode}, size: {input.size}")
         return job_id

@@ -170,6 +170,8 @@ def generate_response(video_id: str) -> AnimateOutput:
         AnimateOutput with job status
     """
     job_file = os.path.join(os.getenv("VIDEO_DIR"), "job_animate.txt")
+    lock_file = job_file + ".lock"
+
     if os.path.exists(job_file):
         sep = os.getenv("SEP", ",")
         queue_estimated_time_in_minutes = 0
@@ -177,10 +179,14 @@ def generate_response(video_id: str) -> AnimateOutput:
         job_info = None
         job_input_data = None
 
-        with open(job_file, "r") as f:
-            fcntl.flock(f, fcntl.LOCK_EX)
+        # Use lock file for consistency with write operations
+        # Use "a" mode to avoid truncating the lock file which can cause race conditions
+        with open(lock_file, "a") as lf:
+            fcntl.flock(lf, fcntl.LOCK_SH)  # Shared lock for read-only
             try:
-                lines = f.readlines()
+                with open(job_file, "r") as f:
+                    lines = f.readlines()
+
                 for line in lines:
                     job = line.strip().split(sep)
 
@@ -210,7 +216,7 @@ def generate_response(video_id: str) -> AnimateOutput:
                         queue_length += 1
                         queue_estimated_time_in_minutes += left_time
             finally:
-                fcntl.flock(f, fcntl.LOCK_UN)
+                fcntl.flock(lf, fcntl.LOCK_UN)
 
         if job_info:
             # Job format: job_id,status,generate_duration,start_time,end_time,error_msg_encoded
@@ -334,6 +340,9 @@ async def delete_animate(video_id: str):
     """Cancel/delete an animate job."""
     try:
         job_file = os.path.join(os.getenv("VIDEO_DIR"), "job_animate.txt")
+        temp_file = job_file + ".tmp"
+        lock_file = job_file + ".lock"
+
         if not os.path.exists(job_file):
             return JSONResponse(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -345,10 +354,14 @@ async def delete_animate(video_id: str):
         updated_lines = []
         job_found = False
 
-        with open(job_file, "r+") as f:
-            fcntl.flock(f, fcntl.LOCK_EX)
+        # Use atomic write pattern for crash safety
+        # Use "a" mode to avoid truncating the lock file which can cause race conditions
+        with open(lock_file, "a") as lf:
+            fcntl.flock(lf, fcntl.LOCK_EX)
             try:
-                lines = f.readlines()
+                with open(job_file, "r") as f:
+                    lines = f.readlines()
+
                 for line in lines:
                     job = line.strip().split(sep)
                     if job[0] == video_id:
@@ -368,12 +381,14 @@ async def delete_animate(video_id: str):
                         content={"error": {"message": f"Video with id {video_id} not found.", "code": "404"}},
                     )
 
-                # Rewrite the file without the deleted line
-                f.seek(0)
-                f.truncate()
-                f.writelines(updated_lines)
+                # Write to temp file first, then atomic rename
+                with open(temp_file, "w") as f:
+                    f.writelines(updated_lines)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(temp_file, job_file)
             finally:
-                fcntl.flock(f, fcntl.LOCK_UN)
+                fcntl.flock(lf, fcntl.LOCK_UN)
 
         if deleted_job_info:
             # Load input.json to get parameters for response

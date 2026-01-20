@@ -173,7 +173,20 @@ cd /home/user/text2video
 python3 web_service_animate.py --model_name_or_path Wan2.2-Animate-14B --rank_size ${HPU} 2>&1 &
 ```
 
-#### 4.3 启动 Gaudi 作业服务
+#### 4.3 启动预处理服务 (CPU)
+
+预处理服务运行在 CPU 上，负责姿态提取、人脸检测等预处理任务。
+
+```bash
+python3 job_service_preprocess.py \
+  --process_ckpt_dir /hf/Wan2.2-Animate-14B/process_checkpoint \
+  --video_dir /home/user/video \
+  > preprocess_job.log 2>&1 &
+```
+
+#### 4.4 启动生成服务 (HPU)
+
+生成服务运行在 HPU 上，使用多卡并行进行视频生成。
 
 ```bash
 PT_HPU_RECIPE_CACHE_CONFIG=/home/user/cache_animate,false,40960 \
@@ -181,12 +194,11 @@ PT_HPU_SYNC_LAUNCH=1 \
 PT_HPU_GPU_MIGRATION=1 \
 PT_HPU_LAZY_MODE=1 \
 torchrun --nproc_per_node=4 --standalone \
-  job_service_animate.py \
+  job_service_generate.py \
   --ckpt_dir /hf/Wan2.2-Animate-14B \
-  --process_ckpt_dir /hf/Wan2.2-Animate-14B/process_checkpoint \
   --ulysses_size 4 \
-  --sample_solver dpm++ \
-  > animate_job.log 2>&1 &
+  --video_dir /home/user/video \
+  > generate_job.log 2>&1 &
 ```
 
 ---
@@ -208,17 +220,17 @@ torchrun --nproc_per_node=4 --standalone \
 
 #### 请求参数
 
-| 参数         | 类型   | 必需 | 默认值     | 可选值                                       | 描述                                                                      |
-| ------------ | ------ | :--: | ---------- | -------------------------------------------- | ------------------------------------------------------------------------- |
-| `image`      | 文件   |  是  | -          | -                                            | 参考图像文件，包含要动画化的角色。                                        |
-| `video`      | 文件   |  是  | -          | -                                            | 驱动视频文件，提供动作来源。                                              |
-| `mode`       | 字符串 |  否  | `animate`  | `animate`, `replace`                         | 动画模式。`animate`: 动作迁移；`replace`: 角色替换。                      |
-| `size`       | 字符串 |  否  | `832*480`  | `1280*720`, `720*1280`, `832*480`, `480*832` | 输出视频分辨率。                                                          |
-| `seconds`    | 整数   |  否  | _(不设置)_ | -                                            | 最大视频时长（秒）。若不设置则使用完整驱动视频长度。必须 ≤ 驱动视频时长。 |
-| `refert_num` | 整数   |  否  | `1`        | `1`, `5`                                     | 时序引导帧数。1=更快；5=更好的时序一致性。                                |
-| `seed`       | 整数   |  否  | `-1`       | -                                            | 随机种子。-1 表示随机生成。                                               |
-| `shift`      | 浮点数 |  否  | `5.0`      | -                                            | 噪声调度偏移参数。                                                        |
-| `steps`      | 整数   |  否  | `20`       | -                                            | 扩散采样步数。数值越高质量越好，但速度越慢。                              |
+| 参数         | 类型   | 必需 | 默认值     | 可选值                                       | 描述                                                                     |
+| ------------ | ------ | :--: | ---------- | -------------------------------------------- | ------------------------------------------------------------------------ |
+| `image`      | 文件   |  是  | -          | -                                            | 参考图像文件，包含要动画化的角色。                                       |
+| `video`      | 文件   |  是  | -          | -                                            | 驱动视频文件，提供动作来源。                                             |
+| `mode`       | 字符串 |  否  | `animate`  | `animate`, `replace`                         | 动画模式。`animate`: 动作迁移；`replace`: 角色替换。                     |
+| `size`       | 字符串 |  否  | `832*480`  | `1280*720`, `720*1280`, `832*480`, `480*832` | 输出视频分辨率。                                                         |
+| `seconds`    | 整数   |  否  | _(不设置)_ | -                                            | 最大视频时长（秒）。若不设置或超过驱动视频时长，则使用完整驱动视频长度。 |
+| `refert_num` | 整数   |  否  | `1`        | `1`, `5`                                     | 时序引导帧数。1=更快；5=更好的时序一致性。                               |
+| `seed`       | 整数   |  否  | `-1`       | -                                            | 随机种子。-1 表示随机生成。                                              |
+| `shift`      | 浮点数 |  否  | `5.0`      | -                                            | 噪声调度偏移参数。                                                       |
+| `steps`      | 整数   |  否  | `20`       | -                                            | 扩散采样步数。数值越高质量越好，但速度越慢。                             |
 
 **模式说明：**
 
@@ -244,19 +256,19 @@ torchrun --nproc_per_node=4 --standalone \
 
 成功的请求会将作业加入队列，并返回一个具有以下结构的 JSON 对象：
 
-| 参数             | 类型   | 描述                                                                       |
-| ---------------- | ------ | -------------------------------------------------------------------------- |
-| `id`             | 字符串 | 视频生成作业的唯一标识符。                                                 |
-| `object`         | 字符串 | 对象类型，始终为 `"video"`。                                               |
-| `model`          | 字符串 | 用于生成的模型 (例如, `"Wan2.2-Animate-14B"`)。                            |
-| `status`         | 字符串 | 作业的当前状态 (`queued`, `processing`, `completed`, `deleted`, `error`)。 |
-| `progress`       | 整数   | 任务的大致完成百分比。                                                     |
-| `created_at`     | 整数   | 作业创建时的 Unix 时间戳（秒）。                                           |
-| `estimated_time` | 整数   | 预计完成时间（分钟）。                                                     |
-| `queue_length`   | 整数   | 在此作业之前排队的作业数量。                                               |
-| `duration`       | 整数   | 生成视频所花费的时间（秒）。                                               |
-| `seconds`        | 整数   | 生成视频的最终时长（秒）。                                                 |
-| `error`          | 字符串 | 解释失败原因的消息（如果有）。                                             |
+| 参数             | 类型   | 描述                                                                                                        |
+| ---------------- | ------ | ----------------------------------------------------------------------------------------------------------- |
+| `id`             | 字符串 | 视频生成作业的唯一标识符。                                                                                  |
+| `object`         | 字符串 | 对象类型，始终为 `"video"`。                                                                                |
+| `model`          | 字符串 | 用于生成的模型 (例如, `"Wan2.2-Animate-14B"`)。                                                             |
+| `status`         | 字符串 | 作业的当前状态 (`queued`, `preprocessing`, `preprocessed`, `processing`, `completed`, `deleted`, `error`)。 |
+| `progress`       | 整数   | 任务的大致完成百分比。                                                                                      |
+| `created_at`     | 整数   | 作业创建时的 Unix 时间戳（秒）。                                                                            |
+| `estimated_time` | 整数   | 预计完成时间（分钟）。                                                                                      |
+| `queue_length`   | 整数   | 在此作业之前排队的作业数量。                                                                                |
+| `duration`       | 整数   | 生成视频所花费的时间（秒）。                                                                                |
+| `seconds`        | 整数   | 生成视频的最终时长（秒）。                                                                                  |
+| `error`          | 字符串 | 解释失败原因的消息（如果有）。                                                                              |
 
 <details>
 <summary><strong>响应示例</strong></summary>
@@ -457,21 +469,60 @@ curl -X DELETE http://localhost:9397/v1/animate/video_1767068943_3357
 
 ## 处理流程
 
-Animate 服务包含两个主要阶段：
+Animate 服务采用流水线架构，包含两个独立运行的服务：
 
-### 1. 预处理阶段
+### 服务架构
+
+```
+┌─────────────────┐    ┌─────────────────────┐    ┌─────────────────────┐
+│   Web Service   │───▶│  Preprocess Service │───▶│  Generate Service   │
+│   (FastAPI)     │    │       (CPU)         │    │       (HPU)         │
+└─────────────────┘    └─────────────────────┘    └─────────────────────┘
+        │                       │                         │
+        ▼                       ▼                         ▼
+   job_animate.txt         preprocess_info.json      output.mp4
+```
+
+### 状态流转
+
+```
+queued → preprocessing → preprocessed → processing → completed/error
+```
+
+| 状态            | 描述                                   | 执行服务           |
+| --------------- | -------------------------------------- | ------------------ |
+| `queued`        | 作业已创建，等待预处理                 | -                  |
+| `preprocessing` | 正在进行预处理（姿态提取、人脸检测等） | Preprocess Service |
+| `preprocessed`  | 预处理完成，等待生成                   | -                  |
+| `processing`    | 正在进行视频生成                       | Generate Service   |
+| `completed`     | 生成完成                               | -                  |
+| `error`         | 处理失败                               | -                  |
+
+### 1. 预处理服务 (CPU)
+
+预处理服务运行在 CPU 上，监听 `queued` 状态的作业：
 
 - **姿态提取**: 从驱动视频中提取每帧的人体姿态关键点。
 - **人脸区域提取**: 提取驱动视频中的人脸区域用于表情引导。
 - **参考图像处理**: 对参考图像进行姿态检测和尺寸调整。
 - **姿态重定向** (animate 模式): 将驱动视频的姿态映射到参考图像角色的身体比例。
 - **遮罩生成** (replace 模式): 生成用于角色替换的分割遮罩和背景。
+- **元数据保存**: 将预处理结果保存到 `preprocess_info.json`。
 
-### 2. 生成阶段
+### 2. 生成服务 (HPU)
+
+生成服务运行在 HPU 上，监听 `preprocessed` 状态的作业：
 
 - **扩散模型推理**: 使用预处理数据生成最终视频帧。
 - **时序引导**: 利用 `refert_num` 参数控制帧间一致性。
 - **视频合成**: 将生成的帧合成为最终视频文件。
+
+### 流水线优势
+
+- **并行执行**: 当 HPU 生成视频 A 时，CPU 可以同时预处理视频 B。
+- **资源隔离**: CPU 预处理和 HPU 生成互不干扰，充分利用硬件资源。
+- **独立扩展**: 可根据瓶颈独立扩展预处理或生成服务实例。
+- **故障隔离**: 预处理失败不影响生成服务的运行。
 
 ---
 
@@ -577,14 +628,25 @@ API 返回标准的 HTTP 状态码和一致的 JSON 错误体，以帮助诊断�
 
 以下参数在服务启动时设置，**用户不可配置**：
 
-| 参数                 | 说明                                | 默认值                                      |
-| -------------------- | ----------------------------------- | ------------------------------------------- |
-| `--ckpt_dir`         | Wan2.2-Animate-14B 模型检查点路径   | `/hf/Wan2.2-Animate-14B`                    |
-| `--process_ckpt_dir` | 预处理模型检查点路径                | `/hf/Wan2.2-Animate-14B/process_checkpoint` |
-| `--ulysses_size`     | 多卡推理的序列并行大小              | `1`                                         |
-| `--video_dir`        | 生成视频的输出目录                  | `/home/user/video`                          |
-| `--sample_solver`    | 采样求解器算法 (`unipc` 或 `dpm++`) | `dpm++`                                     |
-| `--sep`              | 作业文件字段分隔符                  | `,`                                         |
+### 预处理服务参数 (job_service_preprocess.py)
+
+| 参数                 | 说明                 | 默认值                                      |
+| -------------------- | -------------------- | ------------------------------------------- |
+| `--process_ckpt_dir` | 预处理模型检查点路径 | `/hf/Wan2.2-Animate-14B/process_checkpoint` |
+| `--video_dir`        | 视频作业目录         | `/home/user/video`                          |
+| `--sep`              | 作业文件字段分隔符   | `,`                                         |
+| `--poll_interval`    | 轮询间隔（秒）       | `5.0`                                       |
+
+### 生成服务参数 (job_service_generate.py)
+
+| 参数              | 说明                                | 默认值                   |
+| ----------------- | ----------------------------------- | ------------------------ |
+| `--ckpt_dir`      | Wan2.2-Animate-14B 模型检查点路径   | `/hf/Wan2.2-Animate-14B` |
+| `--ulysses_size`  | 多卡推理的序列并行大小              | `1`                      |
+| `--video_dir`     | 视频作业目录                        | `/home/user/video`       |
+| `--sample_solver` | 采样求解器算法 (`unipc` 或 `dpm++`) | `unipc`                  |
+| `--sep`           | 作业文件字段分隔符                  | `,`                      |
+| `--poll_interval` | 轮询间隔（秒）                      | `5.0`                    |
 
 ---
 
@@ -594,11 +656,30 @@ API 返回标准的 HTTP 状态码和一致的 JSON 错误体，以帮助诊断�
 opea_text2video/
 ├── src/
 │   ├── web_service_animate.py    # FastAPI Web 服务
-│   ├── job_service_animate.py    # 后台作业处理服务
+│   ├── job_service_preprocess.py # 预处理服务 (CPU)
+│   ├── job_service_generate.py   # 生成服务 (HPU)
+│   ├── job_service_animate.py    # 合并服务 (旧版，已弃用)
 │   ├── component_animate.py      # OPEA 组件定义
 │   └── util.py                   # 共享工具函数
 ├── Dockerfile-animate            # Docker 构建文件
 ├── docker-compose-animate.yml    # Docker Compose 配置
 ├── README_animate.md             # 本文档
 └── design_animate.md             # 设计文档
+```
+
+### 作业目录结构
+
+每个作业在 `video_dir` 下创建独立目录：
+
+```
+video_dir/
+├── job_animate.txt               # 作业状态文件
+└── video_1234567890_1234/        # 作业目录
+    ├── input.json                # 输入参数
+    ├── preprocess/               # 预处理输出目录
+    │   ├── src_pose.mp4          # 姿态视频
+    │   ├── src_face.mp4          # 人脸视频
+    │   └── ...                   # 其他预处理文件
+    ├── preprocess_info.json      # 预处理元数据（供生成服务使用）
+    └── output.mp4                # 最终生成的视频
 ```
