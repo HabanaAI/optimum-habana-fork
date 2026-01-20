@@ -6,11 +6,11 @@ export FP32_SOFTMAX_VISION=0
 
 #    --use_hpu_graphs \
 python3 ./image_to_image_zimage_controlnet_inpaint.py \
-    --model_name_or_path '/mnt/ceph1/libo/hf_models/Z-Image-Turbo/' \
-    --controlnet_path '/mnt/ceph1/libo/hf_models/Z-Image-Turbo-Fun-Controlnet-Union-2.1/Z-Image-Turbo-Fun-Controlnet-Union-2.1.safetensors' \
-    --image_path '/mnt/ceph1/libo/zimage/inpaint/inpaint.jpg' \
-    --mask_path '/mnt/ceph1/libo/zimage/inpaint/mask.jpg' \
-    --pose_path '/mnt/ceph1/libo/zimage/inpaint/pose.jpg' \
+    --model_name_or_path 'Tongyi-MAI/Z-Image-Turbo/' \
+    --controlnet_path 'alibaba-pai/Z-Image-Turbo-Fun-Controlnet-Union-2.1/Z-Image-Turbo-Fun-Controlnet-Union-2.1.safetensors' \
+    --image_path 'inpaint.jpg' \
+    --mask_path 'mask.jpg' \
+    --pose_path 'pose.jpg' \
     --width 992 \
     --height 1728 \
     --controlnet_conditioning_scale 0.75 \
