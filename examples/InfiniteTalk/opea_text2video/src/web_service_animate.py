@@ -55,8 +55,8 @@ def validate_form_parameters(form, files):
             raise ValueError(f"Invalid size: {size}. Supported: {SUPPORTED_ANIMATE_SIZES}")
 
         refert_num = int(form.get("refert_num", 1))
-        if refert_num not in [1, 5]:
-            raise ValueError(f"Invalid refert_num: {refert_num}. Must be 1 or 5.")
+        if refert_num < 1:
+            raise ValueError(f"Invalid refert_num: {refert_num}. Must be a positive integer (recommended: 1 or 5).")
 
         # seconds is optional - None means use full driving video length
         seconds_str = form.get("seconds", None)

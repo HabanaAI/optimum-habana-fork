@@ -166,8 +166,8 @@ class OpeaAnimate(OpeaComponent):
         if input.size not in SUPPORTED_ANIMATE_SIZES:
             raise ValueError(f"Invalid size: {input.size}. Supported: {SUPPORTED_ANIMATE_SIZES}")
 
-        if input.refert_num not in [1, 5]:
-            raise ValueError(f"Invalid refert_num: {input.refert_num}. Must be 1 or 5.")
+        if input.refert_num < 1:
+            raise ValueError(f"Invalid refert_num: {input.refert_num}. Must be a positive integer (recommended: 1 or 5).")
 
         if input.seconds is not None and input.seconds <= 0:
             raise ValueError("seconds must be greater than 0 or None (for full video length).")

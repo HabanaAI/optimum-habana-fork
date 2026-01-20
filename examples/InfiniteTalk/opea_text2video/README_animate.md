@@ -227,7 +227,7 @@ torchrun --nproc_per_node=4 --standalone \
 | `mode`       | 字符串 |  否  | `animate`  | `animate`, `replace`                         | 动画模式。`animate`: 动作迁移；`replace`: 角色替换。                     |
 | `size`       | 字符串 |  否  | `832*480`  | `1280*720`, `720*1280`, `832*480`, `480*832` | 输出视频分辨率。                                                         |
 | `seconds`    | 整数   |  否  | _(不设置)_ | -                                            | 最大视频时长（秒）。若不设置或超过驱动视频时长，则使用完整驱动视频长度。 |
-| `refert_num` | 整数   |  否  | `1`        | `1`, `5`                                     | 时序引导帧数。1=更快；5=更好的时序一致性。                               |
+| `refert_num` | 整数   |  否  | `1`        | 正整数 (推荐: `1`, `5`)                      | 时序引导帧数。1=更快；5=更好的时序一致性。                               |
 | `seed`       | 整数   |  否  | `-1`       | -                                            | 随机种子。-1 表示随机生成。                                              |
 | `shift`      | 浮点数 |  否  | `5.0`      | -                                            | 噪声调度偏移参数。                                                       |
 | `steps`      | 整数   |  否  | `20`       | -                                            | 扩散采样步数。数值越高质量越好，但速度越慢。                             |
@@ -568,7 +568,7 @@ API 返回标准的 HTTP 状态码和一致的 JSON 错误体，以帮助诊断�
 ```json
 {
   "error": {
-    "message": "Invalid refert_num: 3. Must be 1 or 5.",
+    "message": "Invalid refert_num: 0. Must be a positive integer (recommended: 1 or 5).",
     "code": "400"
   }
 }
@@ -623,63 +623,3 @@ API 返回标准的 HTTP 状态码和一致的 JSON 错误体，以帮助诊断�
 - **高质量模式**: `refert_num=5`, `steps=30`
 
 ---
-
-## 服务启动配置
-
-以下参数在服务启动时设置，**用户不可配置**：
-
-### 预处理服务参数 (job_service_preprocess.py)
-
-| 参数                 | 说明                 | 默认值                                      |
-| -------------------- | -------------------- | ------------------------------------------- |
-| `--process_ckpt_dir` | 预处理模型检查点路径 | `/hf/Wan2.2-Animate-14B/process_checkpoint` |
-| `--video_dir`        | 视频作业目录         | `/home/user/video`                          |
-| `--sep`              | 作业文件字段分隔符   | `,`                                         |
-| `--poll_interval`    | 轮询间隔（秒）       | `5.0`                                       |
-
-### 生成服务参数 (job_service_generate.py)
-
-| 参数              | 说明                                | 默认值                   |
-| ----------------- | ----------------------------------- | ------------------------ |
-| `--ckpt_dir`      | Wan2.2-Animate-14B 模型检查点路径   | `/hf/Wan2.2-Animate-14B` |
-| `--ulysses_size`  | 多卡推理的序列并行大小              | `1`                      |
-| `--video_dir`     | 视频作业目录                        | `/home/user/video`       |
-| `--sample_solver` | 采样求解器算法 (`unipc` 或 `dpm++`) | `unipc`                  |
-| `--sep`           | 作业文件字段分隔符                  | `,`                      |
-| `--poll_interval` | 轮询间隔（秒）                      | `5.0`                    |
-
----
-
-## 文件结构
-
-```
-opea_text2video/
-├── src/
-│   ├── web_service_animate.py    # FastAPI Web 服务
-│   ├── job_service_preprocess.py # 预处理服务 (CPU)
-│   ├── job_service_generate.py   # 生成服务 (HPU)
-│   ├── job_service_animate.py    # 合并服务 (旧版，已弃用)
-│   ├── component_animate.py      # OPEA 组件定义
-│   └── util.py                   # 共享工具函数
-├── Dockerfile-animate            # Docker 构建文件
-├── docker-compose-animate.yml    # Docker Compose 配置
-├── README_animate.md             # 本文档
-└── design_animate.md             # 设计文档
-```
-
-### 作业目录结构
-
-每个作业在 `video_dir` 下创建独立目录：
-
-```
-video_dir/
-├── job_animate.txt               # 作业状态文件
-└── video_1234567890_1234/        # 作业目录
-    ├── input.json                # 输入参数
-    ├── preprocess/               # 预处理输出目录
-    │   ├── src_pose.mp4          # 姿态视频
-    │   ├── src_face.mp4          # 人脸视频
-    │   └── ...                   # 其他预处理文件
-    ├── preprocess_info.json      # 预处理元数据（供生成服务使用）
-    └── output.mp4                # 最终生成的视频
-```
