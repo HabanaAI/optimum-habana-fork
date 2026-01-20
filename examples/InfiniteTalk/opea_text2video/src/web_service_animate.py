@@ -97,25 +97,51 @@ async def resolve_request(request: Request):
     return AnimateInput(**validated_params)
 
 
-def estimate_queue_time(seconds: int, steps: int) -> int:
+def estimate_queue_time(seconds: int, steps: int, mode: str = "animate") -> int:
     """
     Estimate generation time in minutes for Animate-14B.
+    Based on actual benchmark results from Gaudi accelerators.
 
     Args:
         seconds: Video duration in seconds (0 or empty means unknown/full video)
         steps: Diffusion sampling steps
+        mode: "animate" or "replace"
 
     Returns:
         Estimated time in minutes
     """
-    rank_size = int(os.getenv("RANK_SIZE", 1))
     # If seconds is 0 or unknown, assume average video length of 3 seconds
     effective_seconds = seconds if seconds and seconds > 0 else 3
-    # Animate-14B is slower than TI2V due to preprocessing + larger model
-    # Rough estimate: preprocessing ~30s + generation ~2min per second of video at 20 steps
-    preprocessing_time = 0.5  # minutes
-    generation_time = effective_seconds * 2.0 * steps * rank_size / (20 * 8)
-    return max(1, math.ceil(preprocessing_time + generation_time))
+
+    # Based on benchmark data:
+    # - Video is processed in clips (~2.5s per clip due to clip_len=77 frames at 30fps)
+    # - Each clip has overlap, so effective clip length is shorter
+    # - Processing time grows non-linearly due to clip boundaries
+
+    # Calculate number of clips (with overlap consideration)
+    # Observed pattern: 1-3s=1clip, 4-5s=2clips, 6-7s=2-3clips, 8-10s=3-4clips
+    num_clips = max(1, math.ceil(effective_seconds / 2.5))
+
+    # Preprocessing time in seconds (~20-30s average)
+    preprocessing_time_sec = 25
+
+    # Per-clip generation time based on benchmark data:
+    # At steps=20: ~80-90s/clip average
+    # At steps=10: ~50-60s/clip average
+    # Linear relationship: base_time + factor * steps
+    time_per_clip_sec = 30 + 3.0 * steps
+
+    # Total generation time in seconds
+    generation_time_sec = num_clips * time_per_clip_sec
+
+    # Replace mode takes about 1.7x longer (extra mask/background processing)
+    if mode == "replace":
+        generation_time_sec *= 1.7
+
+    total_time_sec = preprocessing_time_sec + generation_time_sec
+
+    # Convert to minutes and round up
+    return max(1, math.ceil(total_time_sec / 60))
 
 
 def load_input_json(job_id: str) -> dict:
@@ -151,7 +177,8 @@ def calculate_progress(job_info: list, input_data: dict) -> tuple:
     """
     seconds = input_data.get("seconds", 0) or 0
     steps = input_data.get("steps", 20)
-    estimated_time = estimate_queue_time(seconds, steps)
+    mode = input_data.get("mode", "animate")
+    estimated_time = estimate_queue_time(seconds, steps, mode)
     start_time = int(job_info[3]) if job_info[3] else 0
     elapsed_time = int(time.time()) - start_time
     progress = int(min(int((elapsed_time / (estimated_time * 60)) * 100), 99))
@@ -202,14 +229,16 @@ def generate_response(video_id: str) -> AnimateOutput:
                         job_input_data = current_input_data
                         seconds = current_input_data.get("seconds", 0) or 0
                         steps = current_input_data.get("steps", 20)
-                        queue_estimated_time_in_minutes += estimate_queue_time(seconds, steps)
+                        mode = current_input_data.get("mode", "animate")
+                        queue_estimated_time_in_minutes += estimate_queue_time(seconds, steps, mode)
                         break
 
                     if job[1] == "queued":
                         queue_length += 1
                         seconds = current_input_data.get("seconds", 0) or 0
                         steps = current_input_data.get("steps", 20)
-                        queue_estimated_time_in_minutes += estimate_queue_time(seconds, steps)
+                        mode = current_input_data.get("mode", "animate")
+                        queue_estimated_time_in_minutes += estimate_queue_time(seconds, steps, mode)
 
                     if job[1] == "processing":
                         progress, left_time = calculate_progress(job, current_input_data)
