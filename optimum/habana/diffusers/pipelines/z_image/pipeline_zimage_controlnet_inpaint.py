@@ -386,10 +386,18 @@ def controlnet_forward_gaudi(
     x_freqs_cis = pad_sequence(x_freqs_cis, batch_first=True, padding_value=0.0)
     # Clarify the length matches to satisfy Dynamo due to "Symbolic Shape Inference" to avoid compilation errors
     x_freqs_cis = x_freqs_cis[:, : x.shape[1]]
+    use_bucket = "1" == os.getenv("USE_ZIMAGE_BUCKET", "0")
+    bucket_total_len = x_max_item_seqlen
+    if use_bucket:
+        bucket_total_len = (x_max_item_seqlen // BUCKET_SIZE + 1)*BUCKET_SIZE
+        bucket_pad_len = bucket_total_len - x_max_item_seqlen
+        x = torch.nn.functional.pad(x, (0, 0, 0, bucket_pad_len), value=0.0)
+        control_context = torch.nn.functional.pad(control_context, (0, 0, 0, bucket_pad_len), value=0.0)
+        x_freqs_cis = torch.nn.functional.pad(x_freqs_cis, (0, 0, 0, 0, 0, bucket_pad_len), value=0.0)
 
-    x_attn_mask = torch.zeros((bsz, bsz, x_max_item_seqlen, x_max_item_seqlen), dtype=torch.bool, device=device)
+    x_attn_mask = torch.zeros((bsz, bsz, bucket_total_len, bucket_total_len), dtype=torch.bool, device=device)
     for i, seq_len in enumerate(x_item_seqlens):
-        x_attn_mask[i, :seq_len, :seq_len] = 1
+        x_attn_mask[i, i, :seq_len, :seq_len] = 1
 
     if self.add_control_noise_refiner is not None:
         if self.add_control_noise_refiner == "control_layers":
@@ -429,6 +437,8 @@ def controlnet_forward_gaudi(
                 if layer_idx in noise_refiner_block_samples:
                     x = x + noise_refiner_block_samples[layer_idx]
             htcore.mark_step()
+    x = x[:, :x_max_item_seqlen, :]
+    control_context = control_context[:, :x_max_item_seqlen, :]
 
     # cap embed & refine
     cap_item_seqlens = [len(_) for _ in cap_feats]
@@ -448,9 +458,17 @@ def controlnet_forward_gaudi(
     # Clarify the length matches to satisfy Dynamo due to "Symbolic Shape Inference" to avoid compilation errors
     cap_freqs_cis = cap_freqs_cis[:, : cap_feats.shape[1]]
 
-    cap_attn_mask = torch.zeros((bsz, bsz, cap_max_item_seqlen, cap_max_item_seqlen), dtype=torch.bool, device=device)
+    use_bucket = "1" == os.getenv("USE_ZIMAGE_BUCKET", "0")
+    bucket_total_len = cap_max_item_seqlen
+    if use_bucket:
+        bucket_total_len = (cap_max_item_seqlen // BUCKET_SIZE + 1)*BUCKET_SIZE
+        bucket_pad_len = bucket_total_len - cap_max_item_seqlen
+        cap_feats = torch.nn.functional.pad(cap_feats, (0, 0, 0, bucket_pad_len), value=0.0)
+        cap_freqs_cis = torch.nn.functional.pad(cap_freqs_cis, (0, 0, 0, 0, 0, bucket_pad_len), value=0.0)
+
+    cap_attn_mask = torch.zeros((bsz, bsz, bucket_total_len, bucket_total_len), dtype=torch.bool, device=device)
     for i, seq_len in enumerate(cap_item_seqlens):
-        cap_attn_mask[i, :seq_len, :seq_len] = 1
+        cap_attn_mask[i, i, :seq_len, :seq_len] = 1
 
     if torch.is_grad_enabled() and self.gradient_checkpointing:
         for layer in self.context_refiner:
@@ -459,6 +477,7 @@ def controlnet_forward_gaudi(
         for layer in self.context_refiner:
             cap_feats = layer(cap_feats, cap_attn_mask, cap_freqs_cis)
             htcore.mark_step()
+    cap_feats = cap_feats[:, :cap_max_item_seqlen, :]
 
     # unified
     unified = []
@@ -474,9 +493,18 @@ def controlnet_forward_gaudi(
 
     unified = pad_sequence(unified, batch_first=True, padding_value=0.0)
     unified_freqs_cis = pad_sequence(unified_freqs_cis, batch_first=True, padding_value=0.0)
-    unified_attn_mask = torch.zeros((bsz, bsz, unified_max_item_seqlen, unified_max_item_seqlen), dtype=torch.bool, device=device)
+
+    use_bucket = "1" == os.getenv("USE_ZIMAGE_BUCKET", "0")
+    bucket_total_len = unified_max_item_seqlen
+    if use_bucket:
+        bucket_total_len = (unified_max_item_seqlen // BUCKET_SIZE + 1)*BUCKET_SIZE
+        bucket_pad_len = bucket_total_len - unified_max_item_seqlen
+        unified = torch.nn.functional.pad(unified, (0, 0, 0, bucket_pad_len), value=0.0)
+        unified_freqs_cis = torch.nn.functional.pad(unified_freqs_cis, (0, 0, 0, 0, 0, bucket_pad_len), value=0.0)
+
+    unified_attn_mask = torch.zeros((bsz, bsz, bucket_total_len, bucket_total_len), dtype=torch.bool, device=device)
     for i, seq_len in enumerate(unified_item_seqlens):
-        unified_attn_mask[i, :seq_len, :seq_len] = 1
+        unified_attn_mask[i, i, :seq_len, :seq_len] = 1
 
     ## ControlNet start
     if not self.add_control_noise_refiner:
@@ -497,6 +525,9 @@ def controlnet_forward_gaudi(
         cap_len = cap_item_seqlens[i]
         control_context_unified.append(torch.cat([control_context[i][:x_len], cap_feats[i][:cap_len]]))
     control_context_unified = pad_sequence(control_context_unified, batch_first=True, padding_value=0.0)
+    use_bucket = "1" == os.getenv("USE_ZIMAGE_BUCKET", "0")
+    if use_bucket:
+        control_context_unified = torch.nn.functional.pad(control_context_unified, (0, 0, 0, bucket_pad_len), value=0.0)
 
     for layer in self.control_layers:
         if torch.is_grad_enabled() and self.gradient_checkpointing:
@@ -508,6 +539,7 @@ def controlnet_forward_gaudi(
                 control_context_unified, unified, unified_attn_mask, unified_freqs_cis, adaln_input
             )
             htcore.mark_step()
+    control_context_unified = control_context_unified[:, :, :unified_max_item_seqlen, :]
 
     hints = torch.unbind(control_context_unified)[:-1]
 
