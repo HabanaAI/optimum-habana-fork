@@ -88,7 +88,7 @@ class ZSingleStreamAttnProcessorGaudi:
 
                 return out.type_as(x_in)
             else:
-                with torch.amp.autocast("cuda", enabled=False):
+                with torch.amp.autocast("hpu", enabled=False):
                     x = torch.view_as_complex(x_in.float().reshape(*x_in.shape[:-1], -1, 2))
                     freqs_cis = freqs_cis.unsqueeze(2)
                     x_out = torch.view_as_real(x * freqs_cis).flatten(3)
@@ -109,7 +109,6 @@ class ZSingleStreamAttnProcessorGaudi:
         query = query.contiguous()
         key = key.contiguous()
         value = value.contiguous()
-        #attention_mask = None
 
         fsdpa_mode = 'fp32' if os.environ.get('FP32_SOFTMAX_VISION', 'false').lower() in ['true', '1' ] else 'fast'
         hidden_states = self.fav3.forward(query, key, value, attention_mask, fsdpa_mode)
@@ -208,9 +207,9 @@ def _Zimage_tranformer_prepare_sequence_gaudi(
         freqs_cis = torch.nn.functional.pad(freqs_cis, (0, 0, 0, 0, 0, bucket_pad_len), value=0.0)
 
     # Attention mask
-    attn_mask = torch.zeros((bsz, bsz, bucket_total_len, bucket_total_len), dtype=torch.bool, device=device)
+    attn_mask = torch.zeros((bsz, 1, bucket_total_len, bucket_total_len), dtype=torch.bool, device=device)
     for i, seq_len in enumerate(item_seqlens):
-        attn_mask[i, :seq_len, :seq_len] = 1
+        attn_mask[i, 0, :seq_len, :seq_len] = 1
 
     # Noise mask
     noise_mask_tensor = None
@@ -301,9 +300,9 @@ def _Zimage_transformer_build_unified_sequence_gaudi(
         unified_freqs =  torch.nn.functional.pad(unified_freqs, (0, 0, 0, 0, 0, bucket_pad_len), value=0.0)
 
     # Attention mask
-    attn_mask = torch.zeros((bsz, bsz, bucket_total_len, bucket_total_len), dtype=torch.bool, device=device)
+    attn_mask = torch.zeros((bsz, 1, bucket_total_len, bucket_total_len), dtype=torch.bool, device=device)
     for i, seq_len in enumerate(unified_seqlens):
-        attn_mask[i, :seq_len, :seq_len] = 1
+        attn_mask[i, 0, :seq_len, :seq_len] = 1
 
     # Noise mask
     noise_mask_tensor = None
@@ -394,9 +393,9 @@ def controlnet_forward_gaudi(
         control_context = torch.nn.functional.pad(control_context, (0, 0, 0, bucket_pad_len), value=0.0)
         x_freqs_cis = torch.nn.functional.pad(x_freqs_cis, (0, 0, 0, 0, 0, bucket_pad_len), value=0.0)
 
-    x_attn_mask = torch.zeros((bsz, bsz, bucket_total_len, bucket_total_len), dtype=torch.bool, device=device)
+    x_attn_mask = torch.zeros((bsz, 1, bucket_total_len, bucket_total_len), dtype=torch.bool, device=device)
     for i, seq_len in enumerate(x_item_seqlens):
-        x_attn_mask[i, i, :seq_len, :seq_len] = 1
+        x_attn_mask[i, 0, :seq_len, :seq_len] = 1
 
     if self.add_control_noise_refiner is not None:
         if self.add_control_noise_refiner == "control_layers":
@@ -465,9 +464,9 @@ def controlnet_forward_gaudi(
         cap_feats = torch.nn.functional.pad(cap_feats, (0, 0, 0, bucket_pad_len), value=0.0)
         cap_freqs_cis = torch.nn.functional.pad(cap_freqs_cis, (0, 0, 0, 0, 0, bucket_pad_len), value=0.0)
 
-    cap_attn_mask = torch.zeros((bsz, bsz, bucket_total_len, bucket_total_len), dtype=torch.bool, device=device)
+    cap_attn_mask = torch.zeros((bsz, 1, bucket_total_len, bucket_total_len), dtype=torch.bool, device=device)
     for i, seq_len in enumerate(cap_item_seqlens):
-        cap_attn_mask[i, i, :seq_len, :seq_len] = 1
+        cap_attn_mask[i, 0, :seq_len, :seq_len] = 1
 
     if torch.is_grad_enabled() and self.gradient_checkpointing:
         for layer in self.context_refiner:
@@ -501,9 +500,9 @@ def controlnet_forward_gaudi(
         unified = torch.nn.functional.pad(unified, (0, 0, 0, bucket_pad_len), value=0.0)
         unified_freqs_cis = torch.nn.functional.pad(unified_freqs_cis, (0, 0, 0, 0, 0, bucket_pad_len), value=0.0)
 
-    unified_attn_mask = torch.zeros((bsz, bsz, bucket_total_len, bucket_total_len), dtype=torch.bool, device=device)
+    unified_attn_mask = torch.zeros((bsz, 1, bucket_total_len, bucket_total_len), dtype=torch.bool, device=device)
     for i, seq_len in enumerate(unified_item_seqlens):
-        unified_attn_mask[i, i, :seq_len, :seq_len] = 1
+        unified_attn_mask[i, 0, :seq_len, :seq_len] = 1
 
     ## ControlNet start
     if not self.add_control_noise_refiner:

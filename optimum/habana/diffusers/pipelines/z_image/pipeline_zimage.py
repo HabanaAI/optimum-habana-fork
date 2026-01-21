@@ -82,7 +82,7 @@ class ZSingleStreamAttnProcessorGaudi:
 
                 return out.type_as(x_in)
             else:
-                with torch.amp.autocast("cuda", enabled=False):
+                with torch.amp.autocast("hpu", enabled=False):
                     x = torch.view_as_complex(x_in.float().reshape(*x_in.shape[:-1], -1, 2))
                     freqs_cis = freqs_cis.unsqueeze(2)
                     x_out = torch.view_as_real(x * freqs_cis).flatten(3)
