@@ -97,48 +97,87 @@ async def resolve_request(request: Request):
     return AnimateInput(**validated_params)
 
 
-def estimate_queue_time(seconds: int, steps: int, mode: str = "animate") -> int:
+def estimate_queue_time(seconds: int, steps: int, mode: str = "animate", size: str = "832*480") -> int:
     """
     Estimate generation time in minutes for Animate-14B.
-    Based on actual benchmark results from Gaudi accelerators.
+    Based on actual benchmark results from Gaudi accelerators with 8 HPU cards.
+    Scales with actual rank_size from RANK_SIZE environment variable.
 
     Args:
         seconds: Video duration in seconds (0 or empty means unknown/full video)
         steps: Diffusion sampling steps
         mode: "animate" or "replace"
+        size: Video resolution (e.g., "832*480", "1280*720")
 
     Returns:
         Estimated time in minutes
     """
+    # Get the actual number of HPU cards being used
+    rank_size = int(os.getenv("RANK_SIZE", 1))
+
     # If seconds is 0 or unknown, assume average video length of 3 seconds
     effective_seconds = seconds if seconds and seconds > 0 else 3
 
-    # Based on benchmark data:
-    # - Video is processed in clips (~2.5s per clip due to clip_len=77 frames at 30fps)
-    # - Each clip has overlap, so effective clip length is shorter
-    # - Processing time grows non-linearly due to clip boundaries
+    # Resolution multiplier based on benchmark data
+    # Standard resolutions (832*480, 480*832): 1.0x
+    # HD resolutions (1280*720, 720*1280): ~2.5x
+    resolution_multiplier = 1.0
+    if size in ["1280*720", "720*1280"]:
+        resolution_multiplier = 2.5
 
-    # Calculate number of clips (with overlap consideration)
-    # Observed pattern: 1-3s=1clip, 4-5s=2clips, 6-7s=2-3clips, 8-10s=3-4clips
-    num_clips = max(1, math.ceil(effective_seconds / 2.5))
+    # Benchmark data shows linear relationship between steps and time
+    # For animate mode at 832*480 with 8 HPUs:
+    # - 2s: steps=10→71s, steps=15→83s, steps=20→96s, steps=25→113s
+    # - 4s: steps=10→140s, steps=15→179s, steps=20→216s, steps=25→254s
+    # - 6s: steps=20→360s
+    # - 8s: steps=20→536s
+    # - 10s: steps=20→774s
 
-    # Preprocessing time in seconds (~20-30s average)
-    preprocessing_time_sec = 25
+    if mode == "animate":
+        # Base time per second of video (varies by duration due to clip overhead)
+        if effective_seconds <= 2:
+            # ~48s per second at steps=20
+            base_time_per_sec = 2.4 * steps
+        elif effective_seconds <= 4:
+            # ~54s per second at steps=20
+            base_time_per_sec = 2.7 * steps
+        elif effective_seconds <= 6:
+            # ~60s per second at steps=20
+            base_time_per_sec = 3.0 * steps
+        else:
+            # ~67s per second at steps=20 for longer videos
+            base_time_per_sec = 3.35 * steps
 
-    # Per-clip generation time based on benchmark data:
-    # At steps=20: ~80-90s/clip average
-    # At steps=10: ~50-60s/clip average
-    # Linear relationship: base_time + factor * steps
-    time_per_clip_sec = 30 + 3.0 * steps
+        total_time_sec = base_time_per_sec * effective_seconds
+    else:
+        # Replace mode: ~1.67-1.75x slower than animate mode
+        # For replace mode at 832*480 with 8 HPUs:
+        # - 2s: steps=10→136s, steps=15→153s, steps=20→167s, steps=25→182s
+        # - 4s: steps=10→276s, steps=15→319s, steps=20→355s, steps=25→394s
+        # - 6s: steps=20→571s
+        # - 8s: steps=20→817s
 
-    # Total generation time in seconds
-    generation_time_sec = num_clips * time_per_clip_sec
+        if effective_seconds <= 2:
+            # ~83.5s per second at steps=20
+            base_time_per_sec = 4.2 * steps
+        elif effective_seconds <= 4:
+            # ~88.75s per second at steps=20
+            base_time_per_sec = 4.4 * steps
+        elif effective_seconds <= 6:
+            # ~95s per second at steps=20
+            base_time_per_sec = 4.75 * steps
+        else:
+            # ~102s per second at steps=20 for longer videos
+            base_time_per_sec = 5.1 * steps
 
-    # Replace mode takes about 1.7x longer (extra mask/background processing)
-    if mode == "replace":
-        generation_time_sec *= 1.7
+        total_time_sec = base_time_per_sec * effective_seconds
 
-    total_time_sec = preprocessing_time_sec + generation_time_sec
+    # Apply resolution multiplier
+    total_time_sec *= resolution_multiplier
+
+    # Scale by rank_size (benchmark data is for 8 cards, so scale inversely)
+    # More cards = faster processing
+    total_time_sec = total_time_sec * rank_size / 8
 
     # Convert to minutes and round up
     return max(1, math.ceil(total_time_sec / 60))
@@ -178,7 +217,8 @@ def calculate_progress(job_info: list, input_data: dict) -> tuple:
     seconds = input_data.get("seconds", 0) or 0
     steps = input_data.get("steps", 20)
     mode = input_data.get("mode", "animate")
-    estimated_time = estimate_queue_time(seconds, steps, mode)
+    size = input_data.get("size", "832*480")
+    estimated_time = estimate_queue_time(seconds, steps, mode, size)
     start_time = int(job_info[3]) if job_info[3] else 0
     elapsed_time = int(time.time()) - start_time
     progress = int(min(int((elapsed_time / (estimated_time * 60)) * 100), 99))
@@ -230,7 +270,8 @@ def generate_response(video_id: str) -> AnimateOutput:
                         seconds = current_input_data.get("seconds", 0) or 0
                         steps = current_input_data.get("steps", 20)
                         mode = current_input_data.get("mode", "animate")
-                        queue_estimated_time_in_minutes += estimate_queue_time(seconds, steps, mode)
+                        size = current_input_data.get("size", "832*480")
+                        queue_estimated_time_in_minutes += estimate_queue_time(seconds, steps, mode, size)
                         break
 
                     if job[1] == "queued":
@@ -238,7 +279,8 @@ def generate_response(video_id: str) -> AnimateOutput:
                         seconds = current_input_data.get("seconds", 0) or 0
                         steps = current_input_data.get("steps", 20)
                         mode = current_input_data.get("mode", "animate")
-                        queue_estimated_time_in_minutes += estimate_queue_time(seconds, steps, mode)
+                        size = current_input_data.get("size", "832*480")
+                        queue_estimated_time_in_minutes += estimate_queue_time(seconds, steps, mode, size)
 
                     if job[1] == "processing":
                         progress, left_time = calculate_progress(job, current_input_data)
