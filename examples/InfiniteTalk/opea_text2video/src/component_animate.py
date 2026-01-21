@@ -213,12 +213,12 @@ class OpeaAnimate(OpeaComponent):
 
         # Get actual video duration using ffprobe
         video_duration = get_video_duration(video_path)
-        video_duration_int = int(math.ceil(video_duration)) if video_duration > 0 else None
+        video_duration_rounded = round(video_duration, 2) if video_duration > 0 else None
 
         # Determine effective seconds: use user-specified or actual video duration
         effective_seconds = input.seconds
-        if effective_seconds is None and video_duration_int is not None:
-            effective_seconds = video_duration_int
+        if effective_seconds is None and video_duration_rounded is not None:
+            effective_seconds = video_duration_rounded
 
         # Create input.json (stores all job parameters)
         input_json_content = {
@@ -227,7 +227,7 @@ class OpeaAnimate(OpeaComponent):
             "mode": input.mode,
             "size": input.size,
             "seconds": input.seconds,  # User-specified seconds (can be None)
-            "video_duration": video_duration_int,  # Actual video duration in seconds
+            "video_duration": video_duration_rounded,  # Actual video duration in seconds (rounded to 2 decimal places)
             "effective_seconds": effective_seconds,  # Used for estimation (user-specified or actual)
             "refert_num": input.refert_num,
             "seed": input.seed if input.seed >= 0 else random.randint(0, 2**32 - 1),

@@ -331,6 +331,23 @@ def generate_response(video_id: str) -> AnimateOutput:
                     queue_length=0,
                     error=""
                 )
+            elif job_info[1] in ("queued", "preprocessing", "preprocessed"):
+                # For waiting statuses, calculate estimated time for current job (with preprocess buffer)
+                # and add to queue time for jobs ahead
+                _, current_job_estimated_time = calculate_progress(job_info, job_input_data)
+                total_estimated_time = queue_estimated_time_in_minutes + current_job_estimated_time
+                return AnimateOutput(
+                    id=job_info[0],
+                    model=os.getenv("MODEL", "Wan2.2-Animate-14B"),
+                    status=job_info[1],
+                    progress=0,
+                    created_at=created_at,
+                    seconds=seconds_str,
+                    duration=0,
+                    estimated_time=int(total_estimated_time),
+                    queue_length=queue_length,
+                    error=""
+                )
             else:
                 # Decode error message if status is error
                 error_msg = ""

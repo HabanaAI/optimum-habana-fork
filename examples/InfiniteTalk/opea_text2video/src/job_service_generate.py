@@ -280,21 +280,6 @@ def _init_logging(rank: int):
         logging.basicConfig(level=logging.ERROR)
 
 
-def calculate_frame_num(frame_count: int) -> int:
-    """
-    Adjust frame count to be 4n+1 for Animate-14B.
-
-    Args:
-        frame_count: Raw frame count
-
-    Returns:
-        Frame number adjusted to 4n+1
-    """
-    # Frame number must be 4n+1 for Animate-14B
-    frame_num = ((frame_count - 1) // 4) * 4 + 1
-    return max(5, frame_num)  # Minimum 5 frames
-
-
 def load_preprocess_info(job_dir: str) -> dict:
     """
     Load preprocessing metadata from preprocess_info.json.
@@ -456,9 +441,8 @@ def run_generation_service(args):
 
                     logging.info(f"Loaded preprocess info: path={preprocess_path}, frames={actual_frame_count}, mode={mode}")
 
-                    # Calculate frame number (must be 4n+1)
-                    frame_num = calculate_frame_num(actual_frame_count)
-                    logging.info(f"Using frame_num={frame_num} (adjusted from {actual_frame_count})")
+                    # clip_len is the sliding window size for generation (fixed at 77 from animate-14B config)
+                    clip_len = 77
 
                     # Determine if replace mode
                     replace_flag = (mode == "replace")
@@ -469,7 +453,7 @@ def run_generation_service(args):
                     video = wan_animate.generate(
                         src_root_path=preprocess_path,
                         replace_flag=replace_flag,
-                        clip_len=frame_num,
+                        clip_len=clip_len,
                         refert_num=int(refert_num),
                         shift=float(shift),
                         sample_solver=args.sample_solver,
