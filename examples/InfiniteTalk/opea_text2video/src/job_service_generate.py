@@ -429,8 +429,6 @@ def run_generation_service(args):
                 # Initialize timing variables before try block to ensure they're always defined
                 job_id = None
                 overall_start_time = time.time()
-                generate_start_time = time.time()
-
                 try:
                     # Parse job info
                     # Format: job_id,status,generate_duration,start_time,end_time,error_msg_encoded
@@ -438,7 +436,6 @@ def run_generation_service(args):
 
                     # start_time is from preprocessing phase (overall start)
                     overall_start_time = float(start_time) if start_time and start_time != "0" else time.time()
-                    generate_start_time = time.time()
 
                     job_dir = os.path.join(args.video_dir, job_id)
                     video_path = os.path.join(job_dir, "output.mp4")

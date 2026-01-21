@@ -7,6 +7,8 @@ import random
 import json
 import fcntl
 import base64
+import subprocess
+import math
 
 from enum import Enum
 from pydantic import BaseModel
@@ -100,6 +102,32 @@ def decode_error_msg(encoded_msg: str) -> str:
         return encoded_msg  # Return as-is if decoding fails
 
 
+def get_video_duration(video_path: str) -> float:
+    """
+    Get the duration of a video file using ffprobe.
+
+    Args:
+        video_path: Path to the video file
+
+    Returns:
+        Duration in seconds, or 0.0 if unable to determine
+    """
+    try:
+        cmd = [
+            "ffprobe",
+            "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            video_path
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode == 0 and result.stdout.strip():
+            return float(result.stdout.strip())
+    except (subprocess.TimeoutExpired, ValueError, Exception) as e:
+        logger.warning(f"Failed to get video duration: {e}")
+    return 0.0
+
+
 def calculate_frame_num(seconds: int, fps: int = 30) -> int:
     """
     Calculate frame number from seconds.
@@ -183,13 +211,24 @@ class OpeaAnimate(OpeaComponent):
         with open(video_path, "wb") as f:
             f.write(video_contents)
 
+        # Get actual video duration using ffprobe
+        video_duration = get_video_duration(video_path)
+        video_duration_int = int(math.ceil(video_duration)) if video_duration > 0 else None
+
+        # Determine effective seconds: use user-specified or actual video duration
+        effective_seconds = input.seconds
+        if effective_seconds is None and video_duration_int is not None:
+            effective_seconds = video_duration_int
+
         # Create input.json (stores all job parameters)
         input_json_content = {
             "image_path": image_path,
             "video_path": video_path,
             "mode": input.mode,
             "size": input.size,
-            "seconds": input.seconds,  # Can be None for full video length
+            "seconds": input.seconds,  # User-specified seconds (can be None)
+            "video_duration": video_duration_int,  # Actual video duration in seconds
+            "effective_seconds": effective_seconds,  # Used for estimation (user-specified or actual)
             "refert_num": input.refert_num,
             "seed": input.seed if input.seed >= 0 else random.randint(0, 2**32 - 1),
             "shift": input.shift,
