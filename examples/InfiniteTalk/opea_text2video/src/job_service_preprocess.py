@@ -395,7 +395,8 @@ def run_preprocess_service(args):
                         if not job_found and len(parts) >= 6 and parts[1] == "queued":
                             job_found = True
                             parts[1] = "preprocessing"
-                            parts[3] = str(int(time.time()))  # Set start time
+                            # Don't set start_time here - it will be set when entering 'processing' status
+                            # start_time is only for HPU generation phase
                             job_to_process = parts
                             updated_lines.append(args.sep.join(map(str, parts)) + "\n")
                         else:
@@ -418,7 +419,6 @@ def run_preprocess_service(args):
                     # Format: job_id,status,generate_duration,start_time,end_time,error_msg_encoded
                     (job_id, status, generate_duration_str, start_time, end_time, *error_msg_parts) = job_to_process
 
-                    preprocess_start_time = float(start_time) if start_time else time.time()
                     job_dir = os.path.join(args.video_dir, job_id)
                     os.makedirs(job_dir, exist_ok=True)
 
@@ -449,12 +449,13 @@ def run_preprocess_service(args):
                     save_preprocess_info(job_dir, preprocess_path, actual_frame_count, input_data, has_audio=has_audio)
 
                     # Mark job as preprocessed
-                    # Keep the start_time from preprocessing phase
+                    # Don't set start_time here - it will be set when entering 'processing' status
+                    # start_time is only for HPU generation phase
                     job_processed = [
                         job_id,
                         "preprocessed",
                         "0",  # generate_duration not yet known
-                        int(preprocess_start_time),
+                        "0",  # start_time will be set when entering 'processing' status
                         "0",  # end_time not yet known
                         ""    # No error
                     ]
@@ -465,15 +466,16 @@ def run_preprocess_service(args):
                     error_msg = f"{e}\n{traceback.format_exc()}"
                     logging.error(f"Error preprocessing job {job_id}: {error_msg}")
 
-                    preprocess_end_time = time.time()
+                    error_time = int(time.time())
                     # Encode error message to handle special characters
                     encoded_error = encode_error_msg(str(e))
+                    # For errors during preprocessing, start_time and end_time are the same (no HPU time)
                     job_processed = [
                         job_id,
                         "error",
-                        "0",
-                        int(preprocess_start_time),
-                        int(preprocess_end_time),
+                        "0",  # No HPU generation duration
+                        error_time,  # Use error time as placeholder
+                        error_time,
                         encoded_error
                     ]
                     update_job(job_processed, args)

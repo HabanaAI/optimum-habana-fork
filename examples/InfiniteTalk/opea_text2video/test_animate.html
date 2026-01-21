@@ -739,13 +739,15 @@
 
             switch (status.status) {
                 case 'queued':
+                case 'preprocessing':
+                case 'preprocessed':
+                    // All waiting statuses show as queued with queue length
                     statusIndicator.classList.add('queued');
                     statusIndicator.textContent = `排队中 (队列位置: ${status.queue_length || 0})`;
                     break;
                 case 'processing':
-                case 'in_progress':
                     statusIndicator.classList.add('processing');
-                    statusIndicator.textContent = '处理中';
+                    statusIndicator.textContent = '视频生成中';
                     break;
                 case 'completed':
                     statusIndicator.classList.add('completed');

@@ -97,7 +97,7 @@ async def resolve_request(request: Request):
     return AnimateInput(**validated_params)
 
 
-def estimate_queue_time(seconds: int, steps: int, mode: str = "animate", size: str = "832*480") -> int:
+def estimate_queue_time(seconds: int, steps: int, mode: str = "animate", size: str = "832*480", include_preprocess_buffer: bool = False) -> int:
     """
     Estimate generation time in minutes for Animate-14B.
     Based on actual benchmark results from Gaudi accelerators with 8 HPU cards.
@@ -108,6 +108,8 @@ def estimate_queue_time(seconds: int, steps: int, mode: str = "animate", size: s
         steps: Diffusion sampling steps
         mode: "animate" or "replace"
         size: Video resolution (e.g., "832*480", "1280*720")
+        include_preprocess_buffer: Whether to include preprocessing time buffer
+            (True for waiting statuses: queued, preprocessing, preprocessed)
 
     Returns:
         Estimated time in minutes
@@ -181,6 +183,14 @@ def estimate_queue_time(seconds: int, steps: int, mode: str = "animate", size: s
     # More cards = faster processing, fewer cards = slower processing
     total_time_sec = total_time_sec * 8 / rank_size
 
+    # Add preprocessing buffer if in waiting status
+    # Preprocessing runs on CPU before HPU generation
+    if include_preprocess_buffer:
+        if mode == "animate":
+            total_time_sec += 10  # ~10s preprocessing for animate mode
+        else:
+            total_time_sec += 60  # ~60s preprocessing for replace mode
+
     # Convert to minutes and round up
     return max(1, math.ceil(total_time_sec / 60))
 
@@ -209,6 +219,9 @@ def calculate_progress(job_info: list, input_data: dict) -> tuple:
     """
     Calculate job progress and remaining time.
 
+    Only calculates progress for 'processing' status (HPU generation phase).
+    For waiting statuses (queued, preprocessing, preprocessed), returns 0% progress.
+
     Args:
         job_info: Job information list [job_id, status, generate_duration, start_time, end_time, error_msg_encoded]
         input_data: Parameters loaded from input.json
@@ -216,12 +229,20 @@ def calculate_progress(job_info: list, input_data: dict) -> tuple:
     Returns:
         Tuple of (progress percentage, remaining time in minutes)
     """
-    # Use user-specified seconds first, fall back to effective_seconds (auto-detected video duration)
+    status = job_info[1]
     seconds = input_data.get("seconds") or input_data.get("effective_seconds", 0) or 0
     steps = input_data.get("steps", 20)
     mode = input_data.get("mode", "animate")
     size = input_data.get("size", "832*480")
-    estimated_time = estimate_queue_time(seconds, steps, mode, size)
+
+    # For waiting statuses, return 0% progress with full estimated time (including preprocess buffer)
+    if status in ("queued", "preprocessing", "preprocessed"):
+        estimated_time = estimate_queue_time(seconds, steps, mode, size, include_preprocess_buffer=True)
+        return 0, estimated_time
+
+    # For processing status, calculate progress based on HPU generation time only
+    # start_time is set when job enters 'processing' status
+    estimated_time = estimate_queue_time(seconds, steps, mode, size, include_preprocess_buffer=False)
     start_time = int(job_info[3]) if job_info[3] else 0
     elapsed_time = int(time.time()) - start_time
     progress = int(min(int((elapsed_time / (estimated_time * 60)) * 100), 99))
@@ -270,27 +291,21 @@ def generate_response(video_id: str) -> AnimateOutput:
                     if current_job_id == video_id:
                         job_info = job
                         job_input_data = current_input_data
-                        # Use user-specified seconds first, fall back to effective_seconds (auto-detected)
-                        seconds = current_input_data.get("seconds") or current_input_data.get("effective_seconds", 0) or 0
-                        steps = current_input_data.get("steps", 20)
-                        mode = current_input_data.get("mode", "animate")
-                        size = current_input_data.get("size", "832*480")
-                        queue_estimated_time_in_minutes += estimate_queue_time(seconds, steps, mode, size)
                         break
 
-                    if job[1] == "queued":
+                    # Count jobs ahead in queue (all active statuses except completed/error)
+                    if job[1] in ("queued", "preprocessing", "preprocessed", "processing"):
                         queue_length += 1
-                        # Use user-specified seconds first, fall back to effective_seconds (auto-detected)
                         seconds = current_input_data.get("seconds") or current_input_data.get("effective_seconds", 0) or 0
                         steps = current_input_data.get("steps", 20)
                         mode = current_input_data.get("mode", "animate")
                         size = current_input_data.get("size", "832*480")
-                        queue_estimated_time_in_minutes += estimate_queue_time(seconds, steps, mode, size)
-
-                    if job[1] == "processing":
-                        progress, left_time = calculate_progress(job, current_input_data)
-                        queue_length += 1
-                        queue_estimated_time_in_minutes += left_time
+                        if job[1] == "processing":
+                            _, left_time = calculate_progress(job, current_input_data)
+                            queue_estimated_time_in_minutes += left_time
+                        else:
+                            # Include preprocess buffer for waiting statuses
+                            queue_estimated_time_in_minutes += estimate_queue_time(seconds, steps, mode, size, include_preprocess_buffer=True)
             finally:
                 fcntl.flock(lf, fcntl.LOCK_UN)
 

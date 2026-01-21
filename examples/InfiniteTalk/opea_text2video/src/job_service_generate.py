@@ -402,7 +402,8 @@ def run_generation_service(args):
                             if not job_found and len(parts) >= 6 and parts[1] == "preprocessed":
                                 job_found = True
                                 parts[1] = "processing"
-                                # Keep the start_time from preprocessing phase
+                                # Set start_time NOW when entering 'processing' status (HPU generation start)
+                                parts[3] = str(int(time.time()))
                                 job_to_process = parts
                                 updated_lines.append(args.sep.join(map(str, parts)) + "\n")
                             else:
@@ -428,14 +429,14 @@ def run_generation_service(args):
             if job_to_process:
                 # Initialize timing variables before try block to ensure they're always defined
                 job_id = None
-                overall_start_time = time.time()
+                generate_start_time = time.time()
                 try:
                     # Parse job info
                     # Format: job_id,status,generate_duration,start_time,end_time,error_msg_encoded
                     (job_id, status, generate_duration_str, start_time, end_time, *error_msg_parts) = job_to_process
 
-                    # start_time is from preprocessing phase (overall start)
-                    overall_start_time = float(start_time) if start_time and start_time != "0" else time.time()
+                    # start_time is when job entered 'processing' status (HPU generation start)
+                    generate_start_time = float(start_time) if start_time and start_time != "0" else time.time()
 
                     job_dir = os.path.join(args.video_dir, job_id)
                     video_path = os.path.join(job_dir, "output.mp4")
@@ -524,14 +525,14 @@ def run_generation_service(args):
 
                         generate_end_time = time.time()
                         # Job format: job_id,status,generate_duration,start_time,end_time,error_msg_encoded
-                        # generate_duration = total duration from overall start
-                        # start_time = preprocessing start (overall start)
-                        # end_time = generation end (overall end)
+                        # generate_duration = HPU generation duration only (end_time - start_time)
+                        # start_time = when job entered 'processing' status (HPU generation start)
+                        # end_time = HPU generation end
                         job_processed = [
                             job_id,
                             "completed",
-                            max(0, int(generate_end_time - overall_start_time)),
-                            int(overall_start_time),
+                            max(0, int(generate_end_time - generate_start_time)),
+                            int(generate_start_time),
                             int(generate_end_time),
                             ""  # No error
                         ]
@@ -557,8 +558,8 @@ def run_generation_service(args):
                             job_processed = [
                                 job_id if job_id else "unknown",
                                 "error",
-                                max(0, int(generate_end_time - overall_start_time)),
-                                int(overall_start_time),
+                                max(0, int(generate_end_time - generate_start_time)),
+                                int(generate_start_time),
                                 int(generate_end_time),
                                 encoded_error
                             ]
