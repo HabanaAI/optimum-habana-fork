@@ -33,6 +33,48 @@ from decord import VideoReader
 warnings.filterwarnings('ignore')
 
 
+def extract_audio(video_path: str, output_audio_path: str, duration: float = None) -> bool:
+    """
+    Extract audio from video file using ffmpeg.
+
+    Args:
+        video_path: Path to the input video file
+        output_audio_path: Path to save the extracted audio
+        duration: Optional duration in seconds to truncate the audio
+
+    Returns:
+        bool: True if audio was successfully extracted, False otherwise
+    """
+    try:
+        # Build ffmpeg command to extract audio
+        cmd = ["ffmpeg", "-y", "-i", video_path]
+        if duration is not None and duration > 0:
+            cmd.extend(["-t", str(duration)])
+        cmd.extend(["-vn", "-acodec", "aac", "-b:a", "128k", output_audio_path])
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+
+        if result.returncode == 0 and os.path.exists(output_audio_path):
+            # Check if the audio file has content (not empty)
+            if os.path.getsize(output_audio_path) > 0:
+                logging.info(f"Audio extracted successfully to {output_audio_path}")
+                return True
+            else:
+                os.remove(output_audio_path)
+                logging.info("Extracted audio file is empty, driving video has no audio track.")
+                return False
+        else:
+            # No audio track or extraction failed
+            logging.info(f"No audio track found or extraction failed: {result.stderr}")
+            return False
+    except subprocess.TimeoutExpired:
+        logging.warning("Audio extraction timed out.")
+        return False
+    except Exception as e:
+        logging.warning(f"Failed to extract audio: {e}")
+        return False
+
+
 def encode_error_msg(error_msg: str) -> str:
     """
     Encode error message to base64 to handle special characters (newlines, commas).
@@ -278,7 +320,7 @@ def run_preprocessing(process_pipeline, job_dir: str, input_data: dict) -> tuple
     return preprocess_output, actual_frame_count
 
 
-def save_preprocess_info(job_dir: str, preprocess_path: str, actual_frame_count: int, input_data: dict):
+def save_preprocess_info(job_dir: str, preprocess_path: str, actual_frame_count: int, input_data: dict, has_audio: bool = False):
     """
     Save preprocessing metadata to preprocess_info.json.
 
@@ -287,6 +329,7 @@ def save_preprocess_info(job_dir: str, preprocess_path: str, actual_frame_count:
         preprocess_path: Path to preprocessed data
         actual_frame_count: Number of frames in preprocessed video
         input_data: Original input parameters
+        has_audio: Whether audio was extracted from driving video
     """
     preprocess_info = {
         "preprocess_path": preprocess_path,
@@ -297,6 +340,7 @@ def save_preprocess_info(job_dir: str, preprocess_path: str, actual_frame_count:
         "steps": input_data.get("steps", 20),
         "refert_num": input_data.get("refert_num", 1),
         "seed": input_data.get("seed", 0),
+        "has_audio": has_audio,
     }
 
     preprocess_info_path = os.path.join(job_dir, "preprocess_info.json")
@@ -394,8 +438,15 @@ def run_preprocess_service(args):
                     preprocess_path, actual_frame_count = run_preprocessing(process_pipeline, job_dir, input_data)
                     logging.info(f"Preprocessing completed: {preprocess_path}, frames={actual_frame_count}")
 
+                    # Extract audio from driving video
+                    video_path = input_data["video_path"]
+                    audio_path = os.path.join(job_dir, "audio.aac")
+                    audio_duration = input_data.get("seconds")  # None means full duration
+                    has_audio = extract_audio(video_path, audio_path, duration=audio_duration)
+                    logging.info(f"Audio extraction result: has_audio={has_audio}")
+
                     # Save preprocessing info for generation service
-                    save_preprocess_info(job_dir, preprocess_path, actual_frame_count, input_data)
+                    save_preprocess_info(job_dir, preprocess_path, actual_frame_count, input_data, has_audio=has_audio)
 
                     # Mark job as preprocessed
                     # Keep the start_time from preprocessing phase

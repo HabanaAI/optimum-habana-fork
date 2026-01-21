@@ -26,6 +26,7 @@ import argparse
 import warnings
 import base64
 import traceback
+import subprocess
 
 import torch
 import torch.distributed as dist
@@ -51,6 +52,47 @@ def encode_error_msg(error_msg: str) -> str:
     if not error_msg:
         return ""
     return base64.b64encode(error_msg.encode('utf-8')).decode('ascii')
+
+
+def merge_audio_to_video(video_path: str, audio_path: str, output_path: str) -> bool:
+    """
+    Merge audio track into video file using ffmpeg.
+
+    Args:
+        video_path: Path to the input video (without audio)
+        audio_path: Path to the audio file
+        output_path: Path to save the merged video with audio
+
+    Returns:
+        bool: True if merge was successful, False otherwise
+    """
+    try:
+        # Use ffmpeg to merge audio and video
+        # -shortest ensures the output matches the shortest stream (video or audio)
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", video_path,
+            "-i", audio_path,
+            "-c:v", "copy",
+            "-c:a", "aac",
+            "-shortest",
+            output_path
+        ]
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+
+        if result.returncode == 0 and os.path.exists(output_path):
+            logging.info(f"Audio merged successfully to {output_path}")
+            return True
+        else:
+            logging.warning(f"Failed to merge audio: {result.stderr}")
+            return False
+    except subprocess.TimeoutExpired:
+        logging.warning("Audio merging timed out.")
+        return False
+    except Exception as e:
+        logging.warning(f"Failed to merge audio: {e}")
+        return False
 
 
 def update_job(job_processed: list, args):
@@ -456,6 +498,32 @@ def run_generation_service(args):
                             normalize=True,
                             value_range=(-1, 1)
                         )
+
+                        # Merge audio if available
+                        has_audio = preprocess_info.get("has_audio", False)
+                        if has_audio:
+                            audio_path = os.path.join(job_dir, "audio.aac")
+                            if os.path.exists(audio_path):
+                                # Save video without audio first, then merge
+                                video_no_audio_path = os.path.join(job_dir, "output_no_audio.mp4")
+                                os.rename(video_path, video_no_audio_path)
+
+                                merge_success = merge_audio_to_video(
+                                    video_path=video_no_audio_path,
+                                    audio_path=audio_path,
+                                    output_path=video_path
+                                )
+
+                                if merge_success:
+                                    logging.info(f"Audio merged successfully into {video_path}")
+                                    # Optionally remove the no-audio version
+                                    os.remove(video_no_audio_path)
+                                else:
+                                    # Fallback: rename back to original if merge failed
+                                    logging.warning("Audio merge failed, keeping video without audio.")
+                                    os.rename(video_no_audio_path, video_path)
+                            else:
+                                logging.warning(f"Audio file not found at {audio_path}, skipping audio merge.")
 
                         generate_end_time = time.time()
                         # Job format: job_id,status,generate_duration,start_time,end_time,error_msg_encoded
