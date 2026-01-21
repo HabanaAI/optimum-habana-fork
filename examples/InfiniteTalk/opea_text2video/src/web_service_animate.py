@@ -216,8 +216,8 @@ def calculate_progress(job_info: list, input_data: dict) -> tuple:
     Returns:
         Tuple of (progress percentage, remaining time in minutes)
     """
-    # Use effective_seconds which accounts for actual video duration when seconds is not specified
-    seconds = input_data.get("effective_seconds") or input_data.get("seconds", 0) or 0
+    # Use user-specified seconds first, fall back to effective_seconds (auto-detected video duration)
+    seconds = input_data.get("seconds") or input_data.get("effective_seconds", 0) or 0
     steps = input_data.get("steps", 20)
     mode = input_data.get("mode", "animate")
     size = input_data.get("size", "832*480")
@@ -270,8 +270,8 @@ def generate_response(video_id: str) -> AnimateOutput:
                     if current_job_id == video_id:
                         job_info = job
                         job_input_data = current_input_data
-                        # Use effective_seconds which accounts for actual video duration
-                        seconds = current_input_data.get("effective_seconds") or current_input_data.get("seconds", 0) or 0
+                        # Use user-specified seconds first, fall back to effective_seconds (auto-detected)
+                        seconds = current_input_data.get("seconds") or current_input_data.get("effective_seconds", 0) or 0
                         steps = current_input_data.get("steps", 20)
                         mode = current_input_data.get("mode", "animate")
                         size = current_input_data.get("size", "832*480")
@@ -280,8 +280,8 @@ def generate_response(video_id: str) -> AnimateOutput:
 
                     if job[1] == "queued":
                         queue_length += 1
-                        # Use effective_seconds which accounts for actual video duration
-                        seconds = current_input_data.get("effective_seconds") or current_input_data.get("seconds", 0) or 0
+                        # Use user-specified seconds first, fall back to effective_seconds (auto-detected)
+                        seconds = current_input_data.get("seconds") or current_input_data.get("effective_seconds", 0) or 0
                         steps = current_input_data.get("steps", 20)
                         mode = current_input_data.get("mode", "animate")
                         size = current_input_data.get("size", "832*480")
@@ -298,9 +298,9 @@ def generate_response(video_id: str) -> AnimateOutput:
             # Job format: job_id,status,generate_duration,start_time,end_time,error_msg_encoded
             # Parameters (seconds, steps, etc.) come from input.json
             created_at = job_input_data.get("created_at", 0)
-            # Use effective_seconds to show actual video duration when user didn't specify seconds
-            effective_seconds = job_input_data.get("effective_seconds") or job_input_data.get("seconds")
-            seconds_str = str(effective_seconds) if effective_seconds is not None else ""
+            # Use user-specified seconds first, fall back to effective_seconds (auto-detected)
+            display_seconds = job_input_data.get("seconds") or job_input_data.get("effective_seconds")
+            seconds_str = str(display_seconds) if display_seconds is not None else ""
 
             if job_info[1] == "processing":
                 progress, left_time = calculate_progress(job_info, job_input_data)
@@ -471,9 +471,9 @@ async def delete_animate(video_id: str):
             # Load input.json to get parameters for response
             deleted_input_data = load_input_json(deleted_job_info[0])
             created_at = deleted_input_data.get("created_at", 0)
-            # Use effective_seconds to show actual video duration
-            effective_seconds = deleted_input_data.get("effective_seconds") or deleted_input_data.get("seconds")
-            seconds_str = str(effective_seconds) if effective_seconds is not None else ""
+            # Use user-specified seconds first, fall back to effective_seconds (auto-detected)
+            display_seconds = deleted_input_data.get("seconds") or deleted_input_data.get("effective_seconds")
+            seconds_str = str(display_seconds) if display_seconds is not None else ""
 
             video_folder_path = os.path.join(os.getenv("VIDEO_DIR"), deleted_job_info[0])
             if os.path.isdir(video_folder_path):
