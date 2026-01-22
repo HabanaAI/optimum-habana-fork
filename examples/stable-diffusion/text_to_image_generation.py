@@ -325,16 +325,20 @@ def main():
     sdxl_models = ["stable-diffusion-xl", "sdxl"]
     sd3_models = ["stable-diffusion-3", "sd3"]
     flux_models = ["FLUX.1", "flux"]
+    flux2_models = ["FLUX.2", "flux2"]
     sdxl = True if any(model in args.model_name_or_path for model in sdxl_models) else False
     sd3 = True if any(model in args.model_name_or_path for model in sd3_models) else False
     flux = True if any(model in args.model_name_or_path for model in flux_models) else False
+    flux2 = True if any(model in args.model_name_or_path for model in flux2_models) else False
     controlnet = True if args.control_image is not None else False
     inpainting = True if (args.base_image is not None) and (args.mask_image is not None) else False
 
     # Set the scheduler
     kwargs = {"timestep_spacing": args.timestep_spacing, "rescale_betas_zero_snr": args.use_zero_snr}
 
-    if flux or sd3 or args.scheduler == "flow_match_euler_discrete":
+    if flux2:
+        pass
+    elif flux or sd3 or args.scheduler == "flow_match_euler_discrete":
         scheduler = GaudiFlowMatchEulerDiscreteScheduler.from_pretrained(
             args.model_name_or_path, subfolder="scheduler", **kwargs
         )
@@ -549,6 +553,27 @@ def main():
                 **kwargs,
             )
 
+    elif flux2:
+        # Flux2 pipelines
+        from optimum.habana.diffusers import GaudiFlux2Pipeline
+        from transformers import PixtralProcessor, Mistral3ForConditionalGeneration
+
+        tokenizer = PixtralProcessor.from_pretrained(args.model_name_or_path, subfolder="tokenizer")
+        text_encoder = Mistral3ForConditionalGeneration.from_pretrained(
+            args.model_name_or_path, subfolder="text_encoder", torch_dtype=torch.float32, attn_implementation="eager",
+        ).to("cpu")
+
+        prompt_embeds_cpu = GaudiFlux2Pipeline._get_mistral_3_small_prompt_embeds(
+            text_encoder=text_encoder, tokenizer=tokenizer, prompt=args.prompts, device=torch.device("cpu"), dtype=torch.float32,
+        )
+        prompt_embeds_hpu = prompt_embeds_cpu.to("hpu", dtype=torch.bfloat16)
+
+        pipeline = GaudiFlux2Pipeline.from_pretrained(
+            args.model_name_or_path,
+            text_encoder=None,
+            **kwargs,
+        )
+
     else:
         # SD pipelines (SD1.x, SD2.x)
         if controlnet:
@@ -685,6 +710,8 @@ def main():
                 prompt_embeds = compel(args.prompts)
                 outputs = pipeline(prompt_embeds=prompt_embeds, **kwargs_call)
         else:
+            if flux2:
+                outputs = pipeline(prompt_embeds=prompt_embeds_hpu, **kwargs_call)
             outputs = pipeline(prompt=args.prompts, **kwargs_call)
 
     if args.optimize and quant_config_path and config.measure:
