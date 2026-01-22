@@ -337,7 +337,7 @@ def main():
     kwargs = {"timestep_spacing": args.timestep_spacing, "rescale_betas_zero_snr": args.use_zero_snr}
 
     if flux2:
-        pass
+        scheduler = None
     elif flux or sd3 or args.scheduler == "flow_match_euler_discrete":
         scheduler = GaudiFlowMatchEulerDiscreteScheduler.from_pretrained(
             args.model_name_or_path, subfolder="scheduler", **kwargs
