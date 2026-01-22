@@ -3,6 +3,7 @@ import os
 import threading
 import uuid
 import pytz
+import io
 from datetime import datetime
 from comps.cores.mega.logger import CustomLogger
 from comps.cores.mega.constants import ServiceType
@@ -10,11 +11,12 @@ from comps.cores.mega.micro_service import opea_microservices, register_microser
 from comps.cores.mega.base_statistics import statistics_dict, register_statistics
 from habana_frameworks.torch.hpu import wrap_in_hpu_graph
 from fastapi import Depends, Request, status
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, Response
 import time
 import torch
 import torchaudio
 import librosa
+import soundfile
 from fastapi import File, Form
 from pydantic import BaseModel, NonNegativeFloat
 from typing import Optional
@@ -62,6 +64,7 @@ class AudioSpeechOutput(BaseModel):
     finished_time: str
     queue_length: int
     error: str = ""
+    stream: bool = False
 
 def _parse_args():
     parser = argparse.ArgumentParser(
@@ -109,6 +112,112 @@ en_ch_tone = {
     "Korean Female":'韩语女',
 }
 
+cv_examples_warmup = [
+    [
+        "是一部。",
+        'instruct',
+        None,
+        "./asset/zero_shot_prompt.wav",
+        "",
+        "用四川话说这句话",
+    ],
+    [
+        "是一部。",
+        'pretrain',
+        None,
+        None,
+        "",
+        "",
+    ],
+    [
+        "梯度是一个多变量微积分中的概念。",
+        'pretrain',
+        None,
+        None,
+        "",
+        "",
+    ],
+    [
+        "梯度是一个多变量微积分中的概念，用于描述一个标量场在某一点处的最大变化率，以及变化最快的方向。",
+        'pretrain',
+        None,
+        None,
+        "",
+        "",
+    ],
+    [
+        "梯度是一个多变量微积分中的概念，用于描述一个标量场在某一点处的最大变化率，以及变化最快的方向。在物理学中，梯度通常用来表示某个物理量的空间变化情况。",
+        'pretrain',
+        None,
+        None,
+        "",
+        "",
+    ],
+    [
+        "梯度是一个多变量微积分中的概念，用于描述一个标量场在某一点处的最大变化率，以及变化最快的方向。在物理学中，梯度通常用来表示某个物理量的空间变化情况，梯度是一个多变量微积分中的概念。",
+        'pretrain',
+        None,
+        None,
+        "",
+        "",
+    ],
+    [
+        "梯度是一个多变量微积分中的概念，用于描述一个标量场在某一点处的最大变化率，以及变化最快的方向。在物理学中，梯度通常用来表示某个物理量的空间变化情况，梯度是一个多变量微积分中的概念，用于描述一个标量场在某一点处的最大变化率。",
+        'pretrain',
+        None,
+        None,
+        "",
+        "",
+    ],
+    [
+        "梯度是一个多变量微积分中的概念，用于描述一个标量场在某一点处的最大变化率，以及变化最快的方向。在物理学中，梯度通常用来表示某个物理量的空间变化情况，梯度是一个多变量微积分中的概念，用于描述一个标量场在某一点处的最大变化率，梯度是一个多变量微积分中的概念。",
+        'pretrain',
+        None,
+        None,
+        "",
+        "",
+    ],
+    [
+        "梯度是一个多变量微积分中的概念，用于描述一个标量场在某一点处的最大变化率，以及变化最快的方向。在物理学中，梯度通常用来表示某个物理量的空间变化情况，梯度是一个多变量微积分中的概念，用于描述一个标量场在某一点处的最大变化率，梯度是一个多变量微积分中的概念，用于描述一个标量场在某一点处的最大变化率。",
+        'pretrain',
+        None,
+        None,
+        "",
+        "",
+    ],
+    [
+        "梯度是一个多变量微积分中的概念，用于描述一个标量场在某一点处的最大变化率，以及变化最快的方向。在物理学中，梯度通常用来表示某个物理量的空间变化情况，梯度是一个多变量微积分中的概念，用于描述一个标量场在某一点处的最大变化率，梯度是一个多变量微积分中的概念，用于描述一个标量场在某一点处的最大变化率，梯度是一个多变量微积分中的概念。",
+        'pretrain',
+        None,
+        None,
+        "",
+        "",
+    ],
+    [
+        "梯度是一个多变量微积分中的概念，用于描述一个标量场在某一点处的最大变化率，以及变化最快的方向。在物理学中，梯度通常用来表示某个物理量的空间变化情况，梯度是一个多变量微积分中的概念，用于描述一个标量场在某一点处的最大变化率，梯度是一个多变量微积分中的概念，用于描述一个标量场在某一点处的最大变化率，梯度是一个多变量微积分中的概念，用于描述一个标量场在某一点处的最大变化率。",
+        'pretrain',
+        None,
+        None,
+        "",
+        "",
+    ],
+    [
+        "梯度是一个多变量微积分中的概念，用于描述一个标量场在某一点处的最大变化率，以及变化最快的方向。在物理学中，梯度通常用来表示某个物理量的空间变化情况，梯度是一个多变量微积分中的概念，用于描述一个标量场在某一点处的最大变化率，梯度是一个多变量微积分中的概念，用于描述一个标量场在某一点处的最大变化率，梯度是一个多变量微积分中的概念，用于描述一个标量场在某一点处的最大变化率，梯度是一个多变量微积分中的概念，用于描述一个标量场在某一点处的最大变化率。",
+        'pretrain',
+        None,
+        None,
+        "",
+        "",
+    ],
+    [
+        "梯度是一个多变量微积分中的概念，用于描述一个标量场在某一点处的最大变化率，以及变化最快的方向。在物理学中，梯度通常用来表示某个物理量的空间变化情况，梯度是一个多变量微积分中的概念，用于描述一个标量场在某一点处的最大变化率，梯度是一个多变量微积分中的概念，用于描述一个标量场在某一点处的最大变化率，梯度是一个多变量微积分中的概念，用于描述一个标量场在某一点处的最大变化率，梯度是一个多变量微积分中的概念，用于描述一个标量场在某一点处的最大变化率。",
+        'instruct',
+        None,
+        "./asset/zero_shot_prompt.wav",
+        "",
+        "用四川话说这句话",
+    ],
+]
 
 def postprocess(speech, sample_rate, top_db=60, hop_length=220, win_length=440):
     speech, _ = librosa.effects.trim(
@@ -121,7 +230,7 @@ def postprocess(speech, sample_rate, top_db=60, hop_length=220, win_length=440):
     speech = torch.concat([speech, torch.zeros(1, int(sample_rate * 0.2))], dim=1)
     return speech
 
-def generate_audio(cosyvoice, request_args, output_path):
+def generate_audio(cosyvoice, request_args, output_path, stream=False, stream_buf=None, stream_dir=""):
     # tts_text, mode_checkbox_group, sft_dropdown, prompt_text, instruct_text,
     #                seed, stream, speed
     # audio_output from gr.Audio() works in streaming mode. Seems gr.Audion() in streaming mode
@@ -135,39 +244,52 @@ def generate_audio(cosyvoice, request_args, output_path):
     speed = request_args['speed']
     prompt_wav = request_args['prompt_audio']
 
+    def save_stream_file(i, data, sr):
+        stream_file = f"{stream_dir}/{i}.wav"
+        torchaudio.save(stream_file, data, sr)
+        with lock:
+            stream_buf.append(stream_file)
+
     audio_cat = None
     if mode_checkbox_group == 'pretrain':
         set_all_random_seed(seed)
-        for i, j in enumerate(cosyvoice.inference_zero_shot(tts_text, '', '', zero_shot_spk_id=sft_dropdown, stream=False, speed=speed)):
+        for i, j in enumerate(cosyvoice.inference_zero_shot(tts_text, '', '', zero_shot_spk_id=sft_dropdown, stream=stream, speed=speed)):
             if i == 0:
                 audio_cat = j['tts_speech']
             else:
                 audio_cat = torch.cat([audio_cat, j['tts_speech']], dim=1)
+            if stream:
+                save_stream_file(i, j['tts_speech'], cosyvoice.sample_rate)
     elif mode_checkbox_group == 'zero_shot':
         prompt_speech_16k = postprocess(load_wav(prompt_wav, prompt_sr), cosyvoice.sample_rate)
         set_all_random_seed(seed)
-        for i, j in enumerate(cosyvoice.inference_zero_shot(tts_text, prompt_text, prompt_speech_16k, stream=False, speed=speed)):
+        for i, j in enumerate(cosyvoice.inference_zero_shot(tts_text, prompt_text, prompt_speech_16k, stream=stream, speed=speed)):
             if i == 0:
                 audio_cat = j['tts_speech']
             else:
                 audio_cat = torch.cat([audio_cat, j['tts_speech']], dim=1)
+            if stream:
+                save_stream_file(i, j['tts_speech'], cosyvoice.sample_rate)
     elif mode_checkbox_group == 'cross_lingual':
         prompt_speech_16k = postprocess(load_wav(prompt_wav, prompt_sr), cosyvoice.sample_rate)
         set_all_random_seed(seed)
-        for i, j in enumerate(cosyvoice.inference_cross_lingual(tts_text, prompt_speech_16k, stream=False, speed=speed)):
+        for i, j in enumerate(cosyvoice.inference_cross_lingual(tts_text, prompt_speech_16k, stream=stream, speed=speed)):
             if i == 0:
                 audio_cat = j['tts_speech']
             else:
                 audio_cat = torch.cat([audio_cat, j['tts_speech']], dim=1)
+            if stream:
+                save_stream_file(i, j['tts_speech'], cosyvoice.sample_rate)
     else:
         set_all_random_seed(seed)
         prompt_speech_16k = load_wav(prompt_wav, 16000)
-        for i, j in enumerate(cosyvoice.inference_instruct2(tts_text, instruct_text, prompt_speech_16k, stream=False, speed=speed)):
+        for i, j in enumerate(cosyvoice.inference_instruct2(tts_text, instruct_text, prompt_speech_16k, stream=stream, speed=speed)):
             if i == 0:
                 audio_cat = j['tts_speech']
             else:
                 audio_cat = torch.cat([audio_cat, j['tts_speech']], dim=1)
-
+            if stream:
+                save_stream_file(i, j['tts_speech'], cosyvoice.sample_rate)
     if audio_cat is not None:
         torchaudio.save(output_path, audio_cat, cosyvoice.sample_rate)
         return None
@@ -198,19 +320,24 @@ def generate_thread():
     model = cosyvoice.model.llm.llm_decoder.bfloat16().eval().to(device)
     cosyvoice.model.llm.llm_decoder = wrap_in_hpu_graph(model)
 
-    cosyvoice.model.flow = cosyvoice.model.flow.bfloat16().eval()#.to(device)
+    cosyvoice.model.flow = cosyvoice.model.flow.bfloat16().eval().to(device)
+    cosyvoice.model.flow.decoder = wrap_in_hpu_graph(cosyvoice.model.flow.decoder)
 
-    #warmup
-    prompt_wav = "./asset/zero_shot_prompt.wav"
-    tts_text = "If one knows how to be grateful and content with small things, then he is a happy person."
-    prompt_text = "如果能对小事感到感激和满足，那他就是幸福的人。"
-    prompt_speech_16k = postprocess(load_wav(prompt_wav, 16000), cosyvoice.sample_rate)
     set_all_random_seed(0)
-    for _ in cosyvoice.inference_zero_shot(tts_text, prompt_text, prompt_speech_16k, stream=False, speed=1.0):
-        continue
+    #warmup
+    for e in cv_examples_warmup:
+        tts_text, mode, sft_spk_id, prompt_wav_path, prompt_text, instruct_text = e
+        if mode == 'pretrain':
+            sft_spk_id = sft_spk_id if sft_spk_id else (sft_spk[0] if sft_spk else '')
+            for _ in cosyvoice.inference_zero_shot(tts_text, '', '', zero_shot_spk_id=sft_spk_id, stream=True):
+                continue
+        elif mode == 'instruct':
+            prompt_speech_16k = postprocess(load_wav(prompt_wav_path, 16000), cosyvoice.sample_rate)
+            for _ in cosyvoice.inference_instruct2(tts_text, instruct_text, prompt_speech_16k, stream=True):
+                continue
 
     # loop
-    print("=============Application Server Ready to Process Requests.===============")
+    print("start pthread")
     while True:
         target_task=None
         with lock:
@@ -218,16 +345,19 @@ def generate_thread():
                 if task['status'] == 'queued':
                     task['status'] = 'processing'
                     task['started_time'] = (datetime.now(shanghai_timezone)).strftime("%Y-%m-%d %H:%M:%S")
-                    target_task = task.copy()
+                    target_task = task
                     break
         if target_task is None:
-            time.sleep(1)
+            time.sleep(0.1)
             continue
         print("process ", target_task)
         # output_path = './asset/zero_shot_prompt.wav'
-        task_id = task['task_id']
+        task_id = target_task['task_id']
         output_path = f'tmp/{task_id}/output.wav'
-        ret = generate_audio(cosyvoice, task['request_args'], output_path)
+        ret = generate_audio(cosyvoice, target_task['request_args'], output_path,
+                             target_task['stream'],
+                             target_task['stream_buf'],
+                             f"tmp/{task_id}")
         with lock:
             for task in request_queue:
                 if task['task_id'] == target_task['task_id']:
@@ -240,7 +370,6 @@ def generate_thread():
                         task['finished_time'] = (datetime.now(shanghai_timezone)).strftime("%Y-%m-%d %H:%M:%S")
                         task["progress"] = 100
                     break
-        time.sleep(5)
 
 
 async def resolve_request(request: Request):
@@ -271,6 +400,119 @@ async def resolve_request(request: Request):
 )
 @register_statistics(names=["opea_service@text2audio"])
 async def text2audio(input: AudioSpeechRequest = Depends(resolve_request)):
+    stream = False
+    prompt_audio = None
+    task_id = str(uuid.uuid1())[:17]
+    tmp_path = f"tmp/{task_id}"
+    os.makedirs(tmp_path, exist_ok=True)
+    print("prompt_audio ", input.prompt_audio)
+    error_message = None
+    if input.prompt_audio:
+        audio_path = os.path.join(tmp_path, input.prompt_audio.filename)
+        contents = await input.prompt_audio.read()
+        with open(audio_path, "wb") as af:
+            af.write(contents)
+        prompt_audio = audio_path
+        duration = librosa.get_duration(path=audio_path)
+        if duration >= 30:
+            error_message = "prompt_audio should be less than 30s"
+
+    if input.text is None or input.text == '':
+        error_message = "Please input text"
+    if input.mode is None or input.mode == '':
+        error_message = "Please input mode"
+    # if instruct mode, please make sure that model is iic/CosyVoice-300M-Instruct and not cross_lingual mode
+    if input.mode in ['instruct']:
+        if input.instruct_text is None or input.instruct_text == '':
+            error_message = "You are using instruct mode, please input instruct_text"
+        if prompt_audio is None:
+            error_message = "You are using instruct mode, please input prompt_audio"
+    # if in zero_shot cross_lingual, please make sure that prompt_text and prompt_wav meets requirements
+    if input.mode in ['zero_shot', 'cross_lingual']:
+        if prompt_audio is None:
+            error_message = f"You are using {input.mode} mode please input prompt_audio"
+        elif torchaudio.info(prompt_audio).sample_rate < prompt_sr:
+            error_message = f'prompt sample rate {torchaudio.info(prompt_audio).sample_rate} lower than {prompt_sr}'
+    # sft mode only use sft_dropdown
+    if input.mode in ['pretrain']:
+        if input.pretrained_tone is None or input.pretrained_tone == '':
+            error_message = "You are using pretrain mode please input pretrained_tone"
+        if input.pretrained_tone not in en_ch_tone and input.pretrained_tone not in ch_en_tone:
+            error_message = "invalid pretrained_tone"
+    # zero_shot mode only use prompt_wav prompt text
+    if input.mode in ['zero_shot']:
+        if input.prompt_text is None or input.prompt_text == '':
+            error_message = "Please input prompt_text"
+
+    if error_message is not None:
+        content = {
+            "error": {
+                "message": error_message,
+                "code": "400"
+            }
+        }
+        return JSONResponse(status_code=status.HTTP_400_BAD_REQUEST, content=content)
+
+    if input.pretrained_tone in en_ch_tone:
+        input.pretrained_tone = en_ch_tone[input.pretrained_tone]
+
+    request_args = {
+        "text": input.text,
+        "mode": input.mode,
+        "tone_id": input.pretrained_tone,
+        "prompt_text": input.prompt_text,
+        "prompt_audio": prompt_audio,
+        "instruct_text": input.instruct_text,
+        "speed": input.speed,
+        "seed": input.seed,
+    }
+    created_time = (datetime.now(shanghai_timezone)).strftime("%Y-%m-%d %H:%M:%S")
+    task = {
+        "task_id": task_id,
+        "model": input.model,
+        "request_args": request_args,
+        "status": "queued",
+        "created_time": created_time,
+        "started_time": '',
+        "finished_time": '',
+        "progress": 0,
+        "result_file": None,
+        "error_message": None,
+        "stream": stream,
+        "stream_buf": [],
+    }
+    with lock:
+        request_queue.append(task)
+        queue_length = 0
+        for task in request_queue:
+            if task["status"] in ["queued","processing"]:
+                queue_length += 1
+
+    return AudioSpeechOutput(
+        id=task_id,
+        model=input.model,
+        status="queued",
+        progress=0,
+        created_time=created_time,
+        started_time='',
+        finished_time='',
+        queue_length=queue_length,
+    )
+
+
+# generate
+@register_microservice(
+    name="opea_service@text2audio",
+    service_type=ServiceType.TTS,
+    endpoint="/v1/audio/speech/stream",
+    host="0.0.0.0",
+    port=cmd_args.server_port,
+    input_datatype=AudioSpeechRequest,
+    output_datatype=AudioSpeechOutput,
+)
+@register_statistics(names=["opea_service@text2audio"])
+async def text2audio_stream(input: AudioSpeechRequest = Depends(resolve_request)):
+    stream=True
     prompt_audio = None
     task_id = str(uuid.uuid1())[:17]
     tmp_path = f"tmp/{task_id}"
@@ -348,6 +590,8 @@ async def text2audio(input: AudioSpeechRequest = Depends(resolve_request)):
         "progress": 0,
         "result_file": None,
         "error_message": None,
+        "stream": stream,
+        "stream_buf": [],
     }
     with lock:
         request_queue.append(task)
@@ -365,7 +609,10 @@ async def text2audio(input: AudioSpeechRequest = Depends(resolve_request)):
         started_time='',
         finished_time='',
         queue_length=queue_length,
+        stream=stream,
     )
+
+
 
 
 #  query information
@@ -408,6 +655,7 @@ async def get_task_information(task_id: str):
         started_time=target_task['started_time'],
         finished_time=target_task['finished_time'],
         queue_length=queue_length,
+        stream=True if target_task['stream'] else False,
     )
 
 #  delete task
@@ -467,6 +715,7 @@ async def get_content(task_id: str):
         for task in request_queue:
             if task['task_id'] == task_id:
                 target_task = task.copy()
+                break
 
     error_message = None
     if target_task is None:
@@ -503,6 +752,60 @@ async def get_pretrained_tone():
         }
     } 
     return JSONResponse(status_code=status.HTTP_200_OK, content=content)
+
+
+# get content
+@register_microservice(
+    name="opea_service@text2audio",
+    service_type=ServiceType.TTS,
+    endpoint="/v1/audio/speech/{task_id}/content/stream",
+    host="0.0.0.0",
+    port=cmd_args.server_port,
+    methods=['GET']
+)
+@register_statistics(names=["opea_service@text2audio"])
+async def get_stream_content(task_id: str):
+    with lock:
+        target_task = None
+        for task in request_queue:
+            if task['task_id'] == task_id:
+                target_task = task
+                break
+
+    error_message = None
+    if target_task is None:
+        error_message = f"task {task_id} is not found."
+    elif not target_task['stream']:
+        error_message = f"task {task_id} is not a streaming task."
+    elif target_task['status'] not in ['completed', 'processing']:
+        error_message = f"task {task_id} is not started."
+    if error_message is not None:
+        content = {
+            "error": {
+                "message": error_message,
+                "code": "400"
+            }
+        }
+        return JSONResponse(status_code=status.HTTP_400_BAD_REQUEST, content=content)
+
+    result_file = ""
+    error_message = None
+    while True:
+        with lock:
+            if len(target_task['stream_buf']) > 0:
+                result_file = target_task['stream_buf'].pop(0)
+                break
+            if len(target_task['stream_buf']) == 0 and \
+                target_task['status'] in ['completed']:
+                error_message = f"task {task_id} has no more streaming content."
+                break
+        time.sleep(0.1)
+
+    if error_message is not None:
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    return FileResponse(result_file, media_type="audio/wav", filename=f"{task_id}.wav")
+
 
 
 if __name__ == "__main__":
