@@ -210,7 +210,7 @@ def _Zimage_tranformer_prepare_sequence_gaudi(
     # Attention mask
     attn_mask = torch.zeros((bsz, 1, bucket_total_len, bucket_total_len), dtype=torch.bool, device=device)
     for i, seq_len in enumerate(item_seqlens):
-        attn_mask[i, 0, :seq_len, :seq_len] = 1
+        attn_mask[i, :, :seq_len, :seq_len] = 1
 
     # Noise mask
     noise_mask_tensor = None
@@ -303,7 +303,7 @@ def _Zimage_transformer_build_unified_sequence_gaudi(
     # Attention mask
     attn_mask = torch.zeros((bsz, 1, bucket_total_len, bucket_total_len), dtype=torch.bool, device=device)
     for i, seq_len in enumerate(unified_seqlens):
-        attn_mask[i, 0, :seq_len, :seq_len] = 1
+        attn_mask[i, :, :seq_len, :seq_len] = 1
 
     # Noise mask
     noise_mask_tensor = None
@@ -396,7 +396,7 @@ def controlnet_forward_gaudi(
 
     x_attn_mask = torch.zeros((bsz, 1, bucket_total_len, bucket_total_len), dtype=torch.bool, device=device)
     for i, seq_len in enumerate(x_item_seqlens):
-        x_attn_mask[i, 0, :seq_len, :seq_len] = 1
+        x_attn_mask[i, :, :seq_len, :seq_len] = 1
 
     if self.add_control_noise_refiner is not None:
         if self.add_control_noise_refiner == "control_layers":
@@ -467,7 +467,7 @@ def controlnet_forward_gaudi(
 
     cap_attn_mask = torch.zeros((bsz, 1, bucket_total_len, bucket_total_len), dtype=torch.bool, device=device)
     for i, seq_len in enumerate(cap_item_seqlens):
-        cap_attn_mask[i, 0, :seq_len, :seq_len] = 1
+        cap_attn_mask[i, :, :seq_len, :seq_len] = 1
 
     if torch.is_grad_enabled() and self.gradient_checkpointing:
         for layer in self.context_refiner:
@@ -503,7 +503,7 @@ def controlnet_forward_gaudi(
 
     unified_attn_mask = torch.zeros((bsz, 1, bucket_total_len, bucket_total_len), dtype=torch.bool, device=device)
     for i, seq_len in enumerate(unified_item_seqlens):
-        unified_attn_mask[i, 0, :seq_len, :seq_len] = 1
+        unified_attn_mask[i, :, :seq_len, :seq_len] = 1
 
     ## ControlNet start
     if not self.add_control_noise_refiner:
@@ -722,7 +722,7 @@ def Zimage_transformer_forward_gaudi(
 setattr(transformer_z_image, "RopeEmbedder", RopeEmbedderGaudi)
 setattr(controlnet_z_image, "RopeEmbedder", RopeEmbedderGaudi)
 
-class GaudiStableDiffusionZImageControlNetInpaintPipeline(GaudiDiffusionPipeline, ZImageControlNetInpaintPipeline):
+class GaudiZImageControlNetInpaintPipeline(GaudiDiffusionPipeline, ZImageControlNetInpaintPipeline):
     def __init__(
         self,
         scheduler: FlowMatchEulerDiscreteScheduler,

@@ -9,7 +9,7 @@ from diffusers import ZImageControlNetModel
 from diffusers.utils import load_image
 
 from optimum.habana.transformers.gaudi_configuration import GaudiConfig
-from optimum.habana.diffusers import GaudiStableDiffusionZImageControlNetPipeline, GaudiStableDiffusionZImageControlNetInpaintPipeline
+from optimum.habana.diffusers import GaudiZImageControlNetPipeline, GaudiZImageControlNetInpaintPipeline
 
 
 def set_seed(seed):
@@ -130,7 +130,7 @@ def main():
     # Use bfloat16 for optimal performance on supported GPUs
     if args.pipeline_type == 'controlnet':
         control_image = load_image(args.pose_path)
-        pipe = GaudiStableDiffusionZImageControlNetPipeline.from_pretrained(
+        pipe = GaudiZImageControlNetPipeline.from_pretrained(
             model_name_path,
             controlnet=controlnet,
             torch_dtype=torch.bfloat16,
@@ -140,7 +140,7 @@ def main():
         image = load_image(args.image_path)
         mask_image = load_image(args.mask_path)
         control_image = load_image(args.pose_path)
-        pipe = GaudiStableDiffusionZImageControlNetInpaintPipeline.from_pretrained(
+        pipe = GaudiZImageControlNetInpaintPipeline.from_pretrained(
                 model_name_path, 
                 controlnet = controlnet,
                 torch_dtype=torch.bfloat16, 

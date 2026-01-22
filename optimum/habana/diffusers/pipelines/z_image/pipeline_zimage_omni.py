@@ -476,7 +476,7 @@ def Zimage_transformer_forward_gaudi(
 
 setattr(transformer_z_image, "RopeEmbedder", RopeEmbedderGaudi)
 
-class GaudiStableDiffusionZImageOmniPipeline(GaudiDiffusionPipeline, ZImageOmniPipeline):
+class GaudiZImageOmniPipeline(GaudiDiffusionPipeline, ZImageOmniPipeline):
     def __init__(
         self,
         scheduler: FlowMatchEulerDiscreteScheduler,

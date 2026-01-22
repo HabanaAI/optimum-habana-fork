@@ -38,10 +38,10 @@ from .pipelines.stable_video_diffusion.pipeline_stable_video_diffusion import Ga
 from .pipelines.text_to_video_synthesis.pipeline_text_to_video_synth import GaudiTextToVideoSDPipeline
 from .pipelines.wan.pipeline_wan import GaudiWanPipeline
 from .pipelines.wan.pipeline_wan_i2v import GaudiWanImageToVideoPipeline
-from .pipelines.z_image.pipeline_zimage import GaudiStableDiffusionZImagePipeline
-from .pipelines.z_image.pipeline_zimage_omni import GaudiStableDiffusionZImageOmniPipeline
-from .pipelines.z_image.pipeline_zimage_controlnet import GaudiStableDiffusionZImageControlNetPipeline
-from .pipelines.z_image.pipeline_zimage_controlnet_inpaint import GaudiStableDiffusionZImageControlNetInpaintPipeline
+from .pipelines.z_image.pipeline_zimage import GaudiZImagePipeline
+from .pipelines.z_image.pipeline_zimage_omni import GaudiZImageOmniPipeline
+from .pipelines.z_image.pipeline_zimage_controlnet import GaudiZImageControlNetPipeline
+from .pipelines.z_image.pipeline_zimage_controlnet_inpaint import GaudiZImageControlNetInpaintPipeline
 from .schedulers import (
     GaudiDDIMScheduler,
     GaudiEulerAncestralDiscreteScheduler,
