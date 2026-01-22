@@ -524,21 +524,18 @@ def run_generation_service(args):
                         logging.info(f"Job {job_id} completed successfully.")
 
                 except Exception as e:
-                    error_msg = f"{e}\n{traceback.format_exc()}"
+                    error_msg = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
                     logging.error(f"Error processing job {job_id}: {error_msg}")
 
-                    # Synchronize all ranks after error to prevent deadlock
-                    if dist.is_initialized():
-                        try:
-                            dist.barrier()
-                        except Exception as barrier_err:
-                            logging.error(f"Barrier failed after error: {barrier_err}")
-
+                    # Update job file FIRST, before attempting barrier sync.
+                    # This ensures error is recorded even if barrier hangs.
                     if rank == 0:
                         try:
                             generate_end_time = time.time()
-                            # Encode error message to handle special characters
-                            encoded_error = encode_error_msg(str(e))
+                            # Use user-friendly error message for client
+                            # If exception has no message, use generic server error
+                            user_error_msg = str(e) if str(e) else "Error occurred in server, check error log"
+                            encoded_error = encode_error_msg(user_error_msg)
                             job_processed = [
                                 job_id if job_id else "unknown",
                                 "error",
@@ -551,6 +548,14 @@ def run_generation_service(args):
                             logging.info(f"Job {job_id} marked as error in job file.")
                         except Exception as update_err:
                             logging.error(f"Failed to update job status to error: {update_err}\n{traceback.format_exc()}")
+
+                    # Synchronize all ranks after error to prevent deadlock
+                    # Note: This may hang if not all ranks hit the error, but the error is already recorded above.
+                    if dist.is_initialized():
+                        try:
+                            dist.barrier()
+                        except Exception as barrier_err:
+                            logging.error(f"Barrier failed after error: {barrier_err}")
 
         except Exception as e:
             logging.error(f"Generation service encountered an error: {e}\n{traceback.format_exc()}")

@@ -479,9 +479,9 @@
                         </div>
 
                         <div class="form-group">
-                            <label for="shift">噪声偏移参数</label>
-                            <input type="number" id="shift" value="5.0" min="0" max="20" step="0.1">
-                            <div class="hint">噪声调度偏移</div>
+                            <label for="shift">噪声偏移参数: <span id="shiftValue">3</span></label>
+                            <input type="range" id="shift" value="3" min="1" max="8" step="1" style="width: 100%;">
+                            <div class="hint">480P建议3.0，720P建议5.0</div>
                         </div>
                     </div>
                 </div>
@@ -547,6 +547,11 @@
         // 模式切换处理
         modeSelect.addEventListener('change', (e) => {
             modeDescription.textContent = modeDescriptions[e.target.value];
+        });
+
+        // Shift滑块值更新
+        shiftInput.addEventListener('input', (e) => {
+            document.getElementById('shiftValue').textContent = e.target.value;
         });
 
         // 图像文件选择处理

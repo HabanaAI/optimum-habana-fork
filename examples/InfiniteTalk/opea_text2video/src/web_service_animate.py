@@ -131,48 +131,42 @@ def estimate_queue_time(seconds: int, steps: int, mode: str = "animate", size: s
 
     # Benchmark data shows linear relationship between steps and time
     # For animate mode at 832*480 with 8 HPUs:
-    # - 2s: steps=10→71s, steps=15→83s, steps=20→96s, steps=25→113s
-    # - 4s: steps=10→140s, steps=15→179s, steps=20→216s, steps=25→254s
-    # - 6s: steps=20→360s
-    # - 8s: steps=20→536s
-    # - 10s: steps=20→774s
+    # - 3.54s: steps=20→131s (37.0s per second)
+    # - 8.58s: steps=20→230s (26.8s per second)
+    # - 10.24s: steps=20→281s (27.4s per second)
 
     if mode == "animate":
         # Base time per second of video (varies by duration due to clip overhead)
         if effective_seconds <= 2:
-            # ~48s per second at steps=20
-            base_time_per_sec = 2.4 * steps
+            # ~40s per second at steps=20 (extrapolated)
+            base_time_per_sec = 2.0 * steps
         elif effective_seconds <= 4:
-            # ~54s per second at steps=20
-            base_time_per_sec = 2.7 * steps
+            # ~37s per second at steps=20 (from 3.54s benchmark)
+            base_time_per_sec = 1.85 * steps
         elif effective_seconds <= 6:
-            # ~60s per second at steps=20
-            base_time_per_sec = 3.0 * steps
+            # ~32s per second at steps=20 (interpolated)
+            base_time_per_sec = 1.6 * steps
         else:
-            # ~67s per second at steps=20 for longer videos
-            base_time_per_sec = 3.35 * steps
+            # ~27s per second at steps=20 (from 8.58s, 10.24s benchmarks)
+            base_time_per_sec = 1.35 * steps
 
         total_time_sec = base_time_per_sec * effective_seconds
     else:
         # Replace mode: ~1.67-1.75x slower than animate mode
-        # For replace mode at 832*480 with 8 HPUs:
-        # - 2s: steps=10→136s, steps=15→153s, steps=20→167s, steps=25→182s
-        # - 4s: steps=10→276s, steps=15→319s, steps=20→355s, steps=25→394s
-        # - 6s: steps=20→571s
-        # - 8s: steps=20→817s
+        # Scaled from new animate benchmarks
 
         if effective_seconds <= 2:
-            # ~83.5s per second at steps=20
-            base_time_per_sec = 4.2 * steps
+            # ~67s per second at steps=20
+            base_time_per_sec = 3.35 * steps
         elif effective_seconds <= 4:
-            # ~88.75s per second at steps=20
-            base_time_per_sec = 4.4 * steps
+            # ~62s per second at steps=20
+            base_time_per_sec = 3.1 * steps
         elif effective_seconds <= 6:
-            # ~95s per second at steps=20
-            base_time_per_sec = 4.75 * steps
+            # ~54s per second at steps=20
+            base_time_per_sec = 2.7 * steps
         else:
-            # ~102s per second at steps=20 for longer videos
-            base_time_per_sec = 5.1 * steps
+            # ~45s per second at steps=20
+            base_time_per_sec = 2.25 * steps
 
         total_time_sec = base_time_per_sec * effective_seconds
 
@@ -189,7 +183,7 @@ def estimate_queue_time(seconds: int, steps: int, mode: str = "animate", size: s
         if mode == "animate":
             total_time_sec += 10  # ~10s preprocessing for animate mode
         else:
-            total_time_sec += 60  # ~60s preprocessing for replace mode
+            total_time_sec += 30  # ~30s preprocessing for replace mode
 
     # Convert to minutes and round up
     return max(1, math.ceil(total_time_sec / 60))
@@ -315,7 +309,7 @@ def generate_response(video_id: str) -> AnimateOutput:
             created_at = job_input_data.get("created_at", 0)
             # Use user-specified seconds first, fall back to effective_seconds (auto-detected)
             display_seconds = job_input_data.get("seconds") or job_input_data.get("effective_seconds")
-            seconds_str = str(display_seconds) if display_seconds is not None else ""
+            seconds_str = str(int(display_seconds)) if display_seconds is not None else ""
 
             if job_info[1] == "processing":
                 progress, left_time = calculate_progress(job_info, job_input_data)
@@ -505,7 +499,7 @@ async def delete_animate(video_id: str):
             created_at = deleted_input_data.get("created_at", 0)
             # Use user-specified seconds first, fall back to effective_seconds (auto-detected)
             display_seconds = deleted_input_data.get("seconds") or deleted_input_data.get("effective_seconds")
-            seconds_str = str(display_seconds) if display_seconds is not None else ""
+            seconds_str = str(int(display_seconds)) if display_seconds is not None else ""
 
             video_folder_path = os.path.join(os.getenv("VIDEO_DIR"), deleted_job_info[0])
             if os.path.isdir(video_folder_path):
