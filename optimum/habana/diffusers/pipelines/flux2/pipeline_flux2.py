@@ -530,7 +530,7 @@ class GaudiFlux2Pipeline(GaudiDiffusionPipeline, Flux2Pipeline):
                     encoder_hidden_states=prompt_embeds_batch,
                     txt_ids=text_ids,  # B, text_seq_len, 4
                     img_ids=latent_image_ids,  # B, image_seq_len, 4
-                    joint_attention_kwargs=self.attention_kwargs,
+                    joint_attention_kwargs=self._attention_kwargs,
                     return_dict=False,
                 )[0]
                 noise_pred = noise_pred[:, : latents_batch.size(1) :]
