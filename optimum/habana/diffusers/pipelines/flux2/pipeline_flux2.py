@@ -17,6 +17,8 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
+import habana_frameworks.torch as ht
+import habana_frameworks.torch.core as htcore
 import numpy as np
 import PIL.Image
 import torch
@@ -330,37 +332,6 @@ class GaudiFlux2Pipeline(GaudiDiffusionPipeline, Flux2Pipeline):
             `return_dict` is True, otherwise a `tuple`. When returning a tuple, the first element is a list with the
             generated images.
         """
-        import habana_frameworks.torch as ht
-        import habana_frameworks.torch.core as htcore
-
-        quant_mode = kwargs.get("quant_mode", None)
-
-        if quant_mode == "quantize-mixed":
-            import copy
-
-            transformer_bf16 = copy.deepcopy(self.transformer).to(self._execution_device)
-
-        if quant_mode in ("measure", "quantize", "quantize-mixed"):
-            import os
-
-            quant_config_path = os.getenv("QUANT_CONFIG")
-            if not quant_config_path:
-                raise ImportError(
-                    "Error: QUANT_CONFIG path is not defined. Please define path to quantization configuration JSON file."
-                )
-            elif not os.path.isfile(quant_config_path):
-                raise ImportError(f"Error: QUANT_CONFIG path '{quant_config_path}' is not valid")
-
-            htcore.hpu_set_env()
-
-            from neural_compressor.torch.quantization import FP8Config, convert, prepare
-
-            config = FP8Config.from_json_file(quant_config_path)
-            if config.measure:
-                self.transformer = prepare(self.transformer, config)
-            elif config.quantize:
-                self.transformer = convert(self.transformer, config)
-            htcore.hpu_initialize(self.transformer, mark_only_scales_as_const=True)
 
         # 1. Check inputs. Raise error if not correct
         self.check_inputs(
@@ -532,14 +503,6 @@ class GaudiFlux2Pipeline(GaudiDiffusionPipeline, Flux2Pipeline):
                 self.scheduler.timesteps = timesteps
                 self.scheduler._init_step_index(timesteps[0])
 
-            # Mixed quantization
-            quant_mixed_step = len(timesteps)
-            if quant_mode == "quantize-mixed":
-                # 10% of steps use higher precision in mixed quant mode
-                quant_mixed_step = quant_mixed_step - (quant_mixed_step // 10)
-                print(f"Use FP8  Transformer at steps 0 to {quant_mixed_step - 1}")
-                print(f"Use BF16 Transformer at steps {quant_mixed_step} to {len(timesteps) - 1}")
-
             for i in self.progress_bar(range(len(timesteps))):
                 if use_warmup_inference_steps and i == throughput_warmup_steps and j == num_batches - 1:
                     ht.hpu.synchronize()
@@ -560,29 +523,16 @@ class GaudiFlux2Pipeline(GaudiDiffusionPipeline, Flux2Pipeline):
                     latent_model_input = torch.cat([latents_batch, image_latents_batch], dim=1).to(self.transformer.dtype)
                     latent_image_ids = torch.cat([latent_ids, image_latent_ids], dim=1)
 
-                if quant_mode == "quantize-mixed" and i >= quant_mixed_step:
-                    # Mixed quantization
-                    noise_pred = transformer_bf16(
-                        hidden_states=latent_model_input,
-                        timestep=timestep / 1000,
-                        guidance=guidance_batch,
-                        encoder_hidden_states=prompt_embeds_batch,
-                        txt_ids=text_ids,
-                        img_ids=latent_image_ids,
-                        joint_attention_kwargs=self._attention_kwargs,
-                        return_dict=False,
-                    )[0]
-                else:
-                    noise_pred = self.transformer(
-                        hidden_states=latent_model_input,  # (B, image_seq_len, C)
-                        timestep=timestep / 1000,
-                        guidance=guidance_batch,
-                        encoder_hidden_states=prompt_embeds_batch,
-                        txt_ids=text_ids,  # B, text_seq_len, 4
-                        img_ids=latent_image_ids,  # B, image_seq_len, 4
-                        joint_attention_kwargs=self._attention_kwargs,
-                        return_dict=False,
-                    )[0]
+                noise_pred = self.transformer(
+                    hidden_states=latent_model_input,  # (B, image_seq_len, C)
+                    timestep=timestep / 1000,
+                    guidance=guidance_batch,
+                    encoder_hidden_states=prompt_embeds_batch,
+                    txt_ids=text_ids,  # B, text_seq_len, 4
+                    img_ids=latent_image_ids,  # B, image_seq_len, 4
+                    joint_attention_kwargs=self.attention_kwargs,
+                    return_dict=False,
+                )[0]
                 noise_pred = noise_pred[:, : latents_batch.size(1) :]
 
                 # compute the previous noisy sample x_t -> x_t-1
@@ -613,11 +563,6 @@ class GaudiFlux2Pipeline(GaudiDiffusionPipeline, Flux2Pipeline):
 
         # 7. Stage after denoising
         hb_profiler.stop()
-
-        if quant_mode == "measure":
-            from neural_compressor.torch.quantization import finalize_calibration
-
-            finalize_calibration(self.transformer)
 
         ht.hpu.synchronize()
         speed_metrics_prefix = "generation"
