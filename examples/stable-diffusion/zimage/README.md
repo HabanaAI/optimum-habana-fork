@@ -1,4 +1,5 @@
 # Z-image-Turbo 
+
 ## 测试样例
 
 单卡：
@@ -33,6 +34,7 @@ python examples/stable-diffusion/zimage/text_to_image_zimage.py \
 样例中包含：
 
 1）模型pipeline启动：
+
     gaudi_config_kwargs = {"use_fused_adam": True, "use_fused_clip_norm": True}
     gaudi_config_kwargs["use_torch_autocast"] = False
     gaudi_config = GaudiConfig(**gaudi_config_kwargs)
@@ -49,7 +51,8 @@ python examples/stable-diffusion/zimage/text_to_image_zimage.py \
         **kwargs,
     )
 
-3）调用pipeline生成图像
+2）调用pipeline生成图像
+
     image = pipe(
         prompt=args.prompts,
         height=args.height,
@@ -102,6 +105,7 @@ python examples/stable-diffusion/zimage/text_to_image_zimage.py \
 样例中包含：
 
 1）模型pipeline启动：
+
     gaudi_config_kwargs = {"use_fused_adam": True, "use_fused_clip_norm": True}
     gaudi_config_kwargs["use_torch_autocast"] = False
     gaudi_config = GaudiConfig(**gaudi_config_kwargs)
@@ -119,6 +123,7 @@ python examples/stable-diffusion/zimage/text_to_image_zimage.py \
     )
 
 3）调用pipeline生成图像
+
     image = pipe(
         prompt=args.prompts,
         height=args.height,
@@ -169,6 +174,7 @@ python examples/stable-diffusion/zimage/image_to_image_zimage.py \
     --num_inference_steps diffusion的采样步数，步数越高图像越精细，耗时越长。默认为9
 
 样例中包含：
+
 1）controlnet 启动：
 
     controlnet = ZImageControlNetModel.from_single_file(
@@ -258,6 +264,7 @@ python examples/stable-diffusion/zimage/image_to_image_zimage.py \
     --num_inference_steps diffusion的采样步数，步数越高图像越精细，耗时越长。默认为25
 
 样例中包含：
+
 1）controlnet 启动：
 
     controlnet = ZImageControlNetModel.from_single_file(
