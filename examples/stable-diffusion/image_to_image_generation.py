@@ -231,7 +231,9 @@ def main():
     sdxl = False
     flux_kontext_models = ["FLUX.1-Kontext"]
     flux_models = ["FLUX.1"]
+    flux2_models = ["FLUX.2"]
     flux = False
+    flux2 = False
 
     kwargs = {
         "use_habana": args.use_habana,
@@ -253,6 +255,22 @@ def main():
         from optimum.habana.diffusers import GaudiFluxImg2ImgPipeline as Img2ImgPipeline
 
         flux = True
+    elif any(model in args.model_name_or_path for model in flux2_models):
+        from optimum.habana.diffusers import GaudiFlux2Pipeline as Img2ImgPipeline
+        from transformers import PixtralProcessor, Mistral3ForConditionalGeneration
+
+        tokenizer = PixtralProcessor.from_pretrained(args.model_name_or_path, subfolder="tokenizer")
+        text_encoder = Mistral3ForConditionalGeneration.from_pretrained(
+            args.model_name_or_path, subfolder="text_encoder", torch_dtype=torch.float32, attn_implementation="eager",
+        ).to("cpu")
+
+        prompt_embeds_cpu = Img2ImgPipeline._get_mistral_3_small_prompt_embeds(
+            text_encoder=text_encoder, tokenizer=tokenizer, prompt=args.prompts, device=torch.device("cpu"), dtype=torch.float32,
+        )
+        prompt_embeds_hpu = prompt_embeds_cpu.to("hpu", dtype=torch.bfloat16)
+
+        kwargs["text_encoder"] = None
+        flux2 = True
     elif "instruct-pix2pix" in args.model_name_or_path:
         from optimum.habana.diffusers import GaudiStableDiffusionInstructPix2PixPipeline as Img2ImgPipeline
 
@@ -342,6 +360,19 @@ def main():
             batch_size=args.batch_size,
             num_inference_steps=args.num_inference_steps,
             strength=args.strength,
+            guidance_scale=args.guidance_scale,
+            output_type=args.output_type,
+            profiling_warmup_steps=args.profiling_warmup_steps,
+            profiling_steps=args.profiling_steps,
+            **kwargs_call,
+        )
+    elif flux2:
+        outputs = pipeline(
+            image=image,
+            prompt_embeds=prompt_embeds_hpu,
+            num_images_per_prompt=args.num_images_per_prompt,
+            batch_size=args.batch_size,
+            num_inference_steps=args.num_inference_steps,
             guidance_scale=args.guidance_scale,
             output_type=args.output_type,
             profiling_warmup_steps=args.profiling_warmup_steps,
