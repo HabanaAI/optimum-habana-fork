@@ -712,7 +712,8 @@ def main():
         else:
             if flux2:
                 outputs = pipeline(prompt_embeds=prompt_embeds_hpu, **kwargs_call)
-            outputs = pipeline(prompt=args.prompts, **kwargs_call)
+            else:
+                outputs = pipeline(prompt=args.prompts, **kwargs_call)
 
     if args.optimize and quant_config_path and config.measure:
         from neural_compressor.torch.quantization import finalize_calibration
