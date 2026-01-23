@@ -880,7 +880,7 @@ class GaudiFlux2ParallelSelfAttnProcessor:
         fsdpa_mode = "None" if self.is_training else "fast"
         hidden_states = self.fav3.forward(query, key, value, attention_mask=attention_mask, fsdpa_mode=fsdpa_mode)
 
-        hidden_states = hidden_states.transpose(1, 2).flatten(2, 3)
+        hidden_states = hidden_states.flatten(2, 3)
         hidden_states = hidden_states.to(query.dtype)
 
         # Handle the feedforward (FF) logic
