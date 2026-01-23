@@ -231,7 +231,7 @@ def main():
     sdxl = False
     flux_kontext_models = ["FLUX.1-Kontext"]
     flux_models = ["FLUX.1"]
-    flux2_models = ["FLUX.2", "flux2"]
+    flux2_models = ["FLUX.2"]
     flux = False
     flux2 = False
 
