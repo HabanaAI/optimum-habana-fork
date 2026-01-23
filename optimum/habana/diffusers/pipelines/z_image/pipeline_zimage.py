@@ -1,7 +1,6 @@
 import os
 import torch
 from diffusers import ZImagePipeline
-import types
 from typing import Any, Callable, Dict, List, Optional, Union
 
 import random
@@ -28,6 +27,8 @@ from optimum.habana.diffusers.models.unet_2d_condition import set_default_attn_p
 
 import habana_frameworks.torch as ht
 import habana_frameworks.torch.core as htcore
+import habana_frameworks.torch.gpu_migration
+from habana_frameworks.torch.hpex.kernels import FusedSDPA
 from habana_frameworks.torch.hpex.kernels import RotaryPosEmbeddingMode, apply_rotary_pos_emb
 
 logger = logging.get_logger(__name__)
@@ -82,7 +83,7 @@ class ZSingleStreamAttnProcessorGaudi:
 
                 return out.type_as(x_in)
             else:
-                with torch.amp.autocast("hpu", enabled=False):
+                with torch.amp.autocast("cuda", enabled=False):
                     x = torch.view_as_complex(x_in.float().reshape(*x_in.shape[:-1], -1, 2))
                     freqs_cis = freqs_cis.unsqueeze(2)
                     x_out = torch.view_as_real(x * freqs_cis).flatten(3)
@@ -164,317 +165,153 @@ class RopeEmbedderGaudi:
 
         return torch.cat(result, dim=-2)
 
+SEQ_MULTI_OF = 32
 BUCKET_SIZE = 256
-
-def _Zimage_tranformer_prepare_sequence_gaudi(
+def transformer_forward_gaudi(
     self,
-    feats: List[torch.Tensor],
-    pos_ids: List[torch.Tensor],
-    inner_pad_mask: List[torch.Tensor],
-    pad_token: torch.nn.Parameter,
-    noise_mask: Optional[List[List[int]]] = None,
-    device: torch.device = None,
+    x: List[torch.Tensor],
+    t,
+    cap_feats: List[torch.Tensor],
+    patch_size=2,
+    f_patch_size=1,
 ):
-    """Prepare sequence: apply pad token, RoPE embed, pad to batch, create attention mask."""
-    item_seqlens = [len(f) for f in feats]
-    max_seqlen = max(item_seqlens)
-    bsz = len(feats)
+    assert patch_size in self.all_patch_size
+    assert f_patch_size in self.all_f_patch_size
 
-    # Pad token
-    feats_cat = torch.cat(feats, dim=0)
-    feats_cat[torch.cat(inner_pad_mask)] = pad_token
-    feats = list(feats_cat.split(item_seqlens, dim=0))
+    bsz = len(x)
+    device = x[0].device
+    t = t * self.t_scale
+    t = self.t_embedder(t)
 
-    # RoPE
-    freqs_cis = list(self.rope_embedder(torch.cat(pos_ids, dim=0)).split([len(p) for p in pos_ids], dim=0))
+    (
+        x,
+        cap_feats,
+        x_size,
+        x_pos_ids,
+        cap_pos_ids,
+        x_inner_pad_mask,
+        cap_inner_pad_mask,
+    ) = self.patchify_and_embed(x, cap_feats, patch_size, f_patch_size)
 
-    # Pad to batch
-    feats = pad_sequence(feats, batch_first=True, padding_value=0.0)
-    freqs_cis = pad_sequence(freqs_cis, batch_first=True, padding_value=0.0)[:, : feats.shape[1]]
+    # x embed & refine
+    x_item_seqlens = [len(_) for _ in x]
+    assert all(_ % SEQ_MULTI_OF == 0 for _ in x_item_seqlens)
+    x_max_item_seqlen = max(x_item_seqlens)
+
+    x = torch.cat(x, dim=0)
+    x = self.all_x_embedder[f"{patch_size}-{f_patch_size}"](x)
+
+    # Match t_embedder output dtype to x for layerwise casting compatibility
+    adaln_input = t.type_as(x)
+    x[torch.cat(x_inner_pad_mask)] = self.x_pad_token
+    x = list(x.split(x_item_seqlens, dim=0))
+    x_freqs_cis = list(self.rope_embedder(torch.cat(x_pos_ids, dim=0)).split(x_item_seqlens, dim=0))
+
+    x = pad_sequence(x, batch_first=True, padding_value=0.0)
+    x_freqs_cis = pad_sequence(x_freqs_cis, batch_first=True, padding_value=0.0)
 
     use_bucket = "1" == os.getenv("USE_ZIMAGE_BUCKET", "0")
-    bucket_total_len = max_seqlen
-    if use_bucket and max_seqlen < 2048:
-        bucket_total_len = (max_seqlen // BUCKET_SIZE + 1)*BUCKET_SIZE
-        bucket_pad_len = bucket_total_len - max_seqlen
-        feats = torch.nn.functional.pad(feats, (0, 0, 0, bucket_pad_len), value=0.0)
-        freqs_cis = torch.nn.functional.pad(freqs_cis, (0, 0, 0, 0, 0, bucket_pad_len), value=0.0)
+    if use_bucket and x_max_item_seqlen < 2048:
+        bucket_total_len = (x_max_item_seqlen // BUCKET_SIZE + 1)*BUCKET_SIZE
+        bucket_pad_len = bucket_total_len - x_max_item_seqlen
 
-    # Attention mask
-    attn_mask = torch.zeros((bsz, bucket_total_len, bucket_total_len), dtype=torch.bool, device=device)
-    for i, seq_len in enumerate(item_seqlens):
-        attn_mask[i, :seq_len, :seq_len] = 1
-
-    # Noise mask
-    noise_mask_tensor = None
-    if noise_mask is not None:
-        noise_mask_tensor = pad_sequence(
-            [torch.tensor(m, dtype=torch.long, device=device) for m in noise_mask],
-            batch_first=True,
-            padding_value=0,
-        )[:, : feats.shape[1]]
-
-    return feats, freqs_cis, attn_mask, item_seqlens, noise_mask_tensor
-
-
-def _Zimage_transformer_build_unified_sequence_gaudi(
-    self,
-    x: torch.Tensor,
-    x_freqs: torch.Tensor,
-    x_seqlens: List[int],
-    x_noise_mask: Optional[List[List[int]]],
-    cap: torch.Tensor,
-    cap_freqs: torch.Tensor,
-    cap_seqlens: List[int],
-    cap_noise_mask: Optional[List[List[int]]],
-    siglip: Optional[torch.Tensor],
-    siglip_freqs: Optional[torch.Tensor],
-    siglip_seqlens: Optional[List[int]],
-    siglip_noise_mask: Optional[List[List[int]]],
-    omni_mode: bool,
-    device: torch.device,
-):
-    """Build unified sequence: x, cap, and optionally siglip.
-    Basic mode order: [x, cap]; Omni mode order: [cap, x, siglip]
-    """
-    bsz = len(x_seqlens)
-    unified = []
-    unified_freqs = []
-    unified_noise_mask = []
-
-    for i in range(bsz):
-        x_len, cap_len = x_seqlens[i], cap_seqlens[i]
-
-        if omni_mode:
-            # Omni: [cap, x, siglip]
-            if siglip is not None and siglip_seqlens is not None:
-                sig_len = siglip_seqlens[i]
-                unified.append(torch.cat([cap[i][:cap_len], x[i][:x_len], siglip[i][:sig_len]]))
-                unified_freqs.append(
-                    torch.cat([cap_freqs[i][:cap_len], x_freqs[i][:x_len], siglip_freqs[i][:sig_len]])
-                )
-                unified_noise_mask.append(
-                    torch.tensor(
-                        cap_noise_mask[i] + x_noise_mask[i] + siglip_noise_mask[i], dtype=torch.long, device=device
-                    )
-                )
-            else:
-                unified.append(torch.cat([cap[i][:cap_len], x[i][:x_len]]))
-                unified_freqs.append(torch.cat([cap_freqs[i][:cap_len], x_freqs[i][:x_len]]))
-                unified_noise_mask.append(
-                    torch.tensor(cap_noise_mask[i] + x_noise_mask[i], dtype=torch.long, device=device)
-                )
-        else:
-            # Basic: [x, cap]
-            unified.append(torch.cat([x[i][:x_len], cap[i][:cap_len]]))
-            unified_freqs.append(torch.cat([x_freqs[i][:x_len], cap_freqs[i][:cap_len]]))
-
-    # Compute unified seqlens
-    if omni_mode:
-        if siglip is not None and siglip_seqlens is not None:
-            unified_seqlens = [a + b + c for a, b, c in zip(cap_seqlens, x_seqlens, siglip_seqlens)]
-        else:
-            unified_seqlens = [a + b for a, b in zip(cap_seqlens, x_seqlens)]
+        x = torch.nn.functional.pad(x, (0, 0, 0, bucket_pad_len), value=0.0)
+        x_freqs_cis =  torch.nn.functional.pad(x_freqs_cis, (0, 0, 0, 0, 0, bucket_pad_len), value=0.0)
+        x_attn_mask = torch.zeros((bsz, 1, bucket_total_len, bucket_total_len), dtype=torch.bool, device=device)
+        for i, seq_len in enumerate(x_item_seqlens):
+            x_attn_mask[i, :, :seq_len, :seq_len] = 1
     else:
-        unified_seqlens = [a + b for a, b in zip(x_seqlens, cap_seqlens)]
+        x_attn_mask = None
 
-    max_seqlen = max(unified_seqlens)
+    if torch.is_grad_enabled() and self.gradient_checkpointing:
+        for layer in self.noise_refiner:
+            x = self._gradient_checkpointing_func(layer, x, x_attn_mask, x_freqs_cis, adaln_input)
+    else:
+        for layer in self.noise_refiner:
+            x = layer(x, x_attn_mask, x_freqs_cis, adaln_input)
+            htcore.mark_step()
+    x = x[:, :x_max_item_seqlen, ...]
 
-    # Pad to batch
+    # cap embed & refine
+    cap_item_seqlens = [len(_) for _ in cap_feats]
+    assert all(_ % SEQ_MULTI_OF == 0 for _ in cap_item_seqlens)
+    cap_max_item_seqlen = max(cap_item_seqlens)
+
+    cap_feats = torch.cat(cap_feats, dim=0)
+    cap_feats = self.cap_embedder(cap_feats)
+    cap_feats[torch.cat(cap_inner_pad_mask)] = self.cap_pad_token
+    cap_feats = list(cap_feats.split(cap_item_seqlens, dim=0))
+    cap_freqs_cis = list(self.rope_embedder(torch.cat(cap_pos_ids, dim=0)).split(cap_item_seqlens, dim=0))
+
+    cap_feats = pad_sequence(cap_feats, batch_first=True, padding_value=0.0)
+    cap_freqs_cis = pad_sequence(cap_freqs_cis, batch_first=True, padding_value=0.0)
+
+    if len(cap_feats) > 1 and cap_max_item_seqlen < 2048:
+        cap_attn_mask = torch.zeros((bsz,1, cap_max_item_seqlen, cap_max_item_seqlen), dtype=torch.bool, device=device)
+        for i, seq_len in enumerate(cap_item_seqlens):
+            cap_attn_mask[i, :, :seq_len, :seq_len] = 1
+    else:
+        cap_attn_mask = None
+
+    if torch.is_grad_enabled() and self.gradient_checkpointing:
+        for layer in self.context_refiner:
+            cap_feats = self._gradient_checkpointing_func(layer, cap_feats, cap_attn_mask, cap_freqs_cis)
+    else:
+        for layer in self.context_refiner:
+            cap_feats = layer(cap_feats, cap_attn_mask, cap_freqs_cis)
+            htcore.mark_step()
+
+    # unified
+    unified = []
+    unified_freqs_cis = []
+    for i in range(bsz):
+        x_len = x_item_seqlens[i]
+        cap_len = cap_item_seqlens[i]
+        unified.append(torch.cat([x[i][:x_len], cap_feats[i][:cap_len]]))
+        unified_freqs_cis.append(torch.cat([x_freqs_cis[i][:x_len], cap_freqs_cis[i][:cap_len]]))
+    unified_item_seqlens = [a + b for a, b in zip(cap_item_seqlens, x_item_seqlens)]
+    assert unified_item_seqlens == [len(_) for _ in unified]
+    unified_max_item_seqlen = max(unified_item_seqlens)
+
     unified = pad_sequence(unified, batch_first=True, padding_value=0.0)
-    unified_freqs = pad_sequence(unified_freqs, batch_first=True, padding_value=0.0)
+    unified_freqs_cis = pad_sequence(unified_freqs_cis, batch_first=True, padding_value=0.0)
 
-    bucket_total_len = max_seqlen
     use_bucket = "1" == os.getenv("USE_ZIMAGE_BUCKET", "0")
-    if use_bucket and max_seqlen < 2048:
-        bucket_total_len = (max_seqlen // BUCKET_SIZE + 1)*BUCKET_SIZE
-        bucket_pad_len = bucket_total_len - max_seqlen
+    if use_bucket and unified_max_item_seqlen < 2048:
+        bucket_total_len = (unified_max_item_seqlen // BUCKET_SIZE + 1)*BUCKET_SIZE
+        bucket_pad_len = bucket_total_len - unified_max_item_seqlen
 
         unified = torch.nn.functional.pad(unified, (0, 0, 0, bucket_pad_len), value=0.0)
-        unified_freqs =  torch.nn.functional.pad(unified_freqs, (0, 0, 0, 0, 0, bucket_pad_len), value=0.0)
-
-    # Attention mask
-    attn_mask = torch.zeros((bsz, bucket_total_len, bucket_total_len), dtype=torch.bool, device=device)
-    for i, seq_len in enumerate(unified_seqlens):
-        attn_mask[i, :seq_len, :seq_len] = 1
-
-    # Noise mask
-    noise_mask_tensor = None
-    if omni_mode:
-        noise_mask_tensor = pad_sequence(unified_noise_mask, batch_first=True, padding_value=0)[
-            :, : unified.shape[1]
-        ]
-
-    return unified, unified_freqs, attn_mask, noise_mask_tensor
-
-
-def Zimage_transformer_forward_gaudi(
-    self,
-    x: Union[List[torch.Tensor], List[List[torch.Tensor]]],
-    t,
-    cap_feats: Union[List[torch.Tensor], List[List[torch.Tensor]]],
-    return_dict: bool = True,
-    controlnet_block_samples: Optional[Dict[int, torch.Tensor]] = None,
-    siglip_feats: Optional[List[List[torch.Tensor]]] = None,
-    image_noise_mask: Optional[List[List[int]]] = None,
-    patch_size: int = 2,
-    f_patch_size: int = 1,
-):
-    """
-    Flow: patchify -> t_embed -> x_embed -> x_refine -> cap_embed -> cap_refine
-          -> [siglip_embed -> siglip_refine] -> build_unified -> main_layers -> final_layer -> unpatchify
-    """
-    assert patch_size in self.all_patch_size and f_patch_size in self.all_f_patch_size
-    omni_mode = isinstance(x[0], list)
-    device = x[0][-1].device if omni_mode else x[0].device
-
-    if omni_mode:
-        # Dual embeddings: noisy (t) and clean (t=1)
-        t_noisy = self.t_embedder(t * self.t_scale).type_as(x[0][-1])
-        t_clean = self.t_embedder(torch.ones_like(t) * self.t_scale).type_as(x[0][-1])
-        adaln_input = None
+        unified_freqs_cis =  torch.nn.functional.pad(unified_freqs_cis, (0, 0, 0, 0, 0, bucket_pad_len), value=0.0)
+        unified_attn_mask = torch.zeros((bsz, 1, bucket_total_len, bucket_total_len), dtype=torch.bool, device=device)
+        for i, seq_len in enumerate(unified_item_seqlens):
+            unified_attn_mask[i, :, :seq_len, :seq_len] = 1
     else:
-        # Single embedding for all tokens
-        adaln_input = self.t_embedder(t * self.t_scale).type_as(x[0])
-        t_noisy = t_clean = None
+        unified_attn_mask = None
 
-    # Patchify
-    if omni_mode:
-        (
-            x,
-            cap_feats,
-            siglip_feats,
-            x_size,
-            x_pos_ids,
-            cap_pos_ids,
-            siglip_pos_ids,
-            x_pad_mask,
-            cap_pad_mask,
-            siglip_pad_mask,
-            x_pos_offsets,
-            x_noise_mask,
-            cap_noise_mask,
-            siglip_noise_mask,
-        ) = self.patchify_and_embed_omni(x, cap_feats, siglip_feats, patch_size, f_patch_size, image_noise_mask)
+    if torch.is_grad_enabled() and self.gradient_checkpointing:
+        for layer in self.layers:
+            unified = self._gradient_checkpointing_func(
+                layer, unified, unified_attn_mask, unified_freqs_cis, adaln_input
+            )
     else:
-        (
-            x,
-            cap_feats,
-            x_size,
-            x_pos_ids,
-            cap_pos_ids,
-            x_pad_mask,
-            cap_pad_mask,
-        ) = self.patchify_and_embed(x, cap_feats, patch_size, f_patch_size)
-        x_pos_offsets = x_noise_mask = cap_noise_mask = siglip_noise_mask = None
+        for layer in self.layers:
+            unified = layer(unified, unified_attn_mask, unified_freqs_cis, adaln_input)
+            htcore.mark_step()
+    unified = unified[:, :unified_max_item_seqlen, ...]
 
-    # X embed & refine
-    x_seqlens = [len(xi) for xi in x]
-    x = self.all_x_embedder[f"{patch_size}-{f_patch_size}"](torch.cat(x, dim=0))  # embed
+    unified = self.all_final_layer[f"{patch_size}-{f_patch_size}"](unified, adaln_input)
+    unified = list(unified.unbind(dim=0))
+    x = self.unpatchify(unified, x_size, patch_size, f_patch_size)
 
-    org_size = x.shape[0]
-    x, x_freqs, x_mask, _, x_noise_tensor = self._prepare_sequence(
-        list(x.split(x_seqlens, dim=0)), x_pos_ids, x_pad_mask, self.x_pad_token, x_noise_mask, device
-    )
+    return x, {}
 
-    for layer in self.noise_refiner:
-        x = (
-            self._gradient_checkpointing_func(
-                layer, x, x_mask, x_freqs, adaln_input, x_noise_tensor, t_noisy, t_clean
-            )
-            if torch.is_grad_enabled() and self.gradient_checkpointing
-            else layer(x, x_mask, x_freqs, adaln_input, x_noise_tensor, t_noisy, t_clean)
-        )
-    x = x[:, :org_size, ...]
-    x_freqs = x_freqs[:, :org_size, ...]
-
-    # Cap embed & refine
-    cap_seqlens = [len(ci) for ci in cap_feats]
-    cap_feats = self.cap_embedder(torch.cat(cap_feats, dim=0))  # embed
-    org_size = cap_feats.shape[0]
-    cap_feats, cap_freqs, cap_mask, _, _ = self._prepare_sequence(
-        list(cap_feats.split(cap_seqlens, dim=0)), cap_pos_ids, cap_pad_mask, self.cap_pad_token, None, device
-    )
-
-    for layer in self.context_refiner:
-        cap_feats = (
-            self._gradient_checkpointing_func(layer, cap_feats, cap_mask, cap_freqs)
-            if torch.is_grad_enabled() and self.gradient_checkpointing
-            else layer(cap_feats, cap_mask, cap_freqs)
-        )
-    cap_feats = cap_feats[:, :org_size, :]
-    cap_freqs = cap_freqs[:, :org_size, :]
-
-    # Siglip embed & refine
-    siglip_seqlens = siglip_freqs = None
-    if omni_mode and siglip_feats[0] is not None and self.siglip_embedder is not None:
-        siglip_seqlens = [len(si) for si in siglip_feats]
-        siglip_feats = self.siglip_embedder(torch.cat(siglip_feats, dim=0))  # embed
-        siglip_feats, siglip_freqs, siglip_mask, _, _ = self._prepare_sequence(
-            list(siglip_feats.split(siglip_seqlens, dim=0)),
-            siglip_pos_ids,
-            siglip_pad_mask,
-            self.siglip_pad_token,
-            None,
-            device,
-        )
-
-        for layer in self.siglip_refiner:
-            siglip_feats = (
-                self._gradient_checkpointing_func(layer, siglip_feats, siglip_mask, siglip_freqs)
-                if torch.is_grad_enabled() and self.gradient_checkpointing
-                else layer(siglip_feats, siglip_mask, siglip_freqs)
-            )
-
-    org_size = x.shape[1] + cap_feats.shape[1]
-
-    # Unified sequence
-    unified, unified_freqs, unified_mask, unified_noise_tensor = self._build_unified_sequence(
-        x,
-        x_freqs,
-        x_seqlens,
-        x_noise_mask,
-        cap_feats,
-        cap_freqs,
-        cap_seqlens,
-        cap_noise_mask,
-        siglip_feats,
-        siglip_freqs,
-        siglip_seqlens,
-        siglip_noise_mask,
-        omni_mode,
-        device,
-    )
-
-    # Main transformer layers
-    for layer_idx, layer in enumerate(self.layers):
-        unified = (
-            self._gradient_checkpointing_func(
-                layer, unified, unified_mask, unified_freqs, adaln_input, unified_noise_tensor, t_noisy, t_clean
-            )
-            if torch.is_grad_enabled() and self.gradient_checkpointing
-            else layer(unified, unified_mask, unified_freqs, adaln_input, unified_noise_tensor, t_noisy, t_clean)
-        )
-        if controlnet_block_samples is not None and layer_idx in controlnet_block_samples:
-            unified = unified + controlnet_block_samples[layer_idx]
-
-    unified = (
-        self.all_final_layer[f"{patch_size}-{f_patch_size}"](
-            unified, noise_mask=unified_noise_tensor, c_noisy=t_noisy, c_clean=t_clean
-        )
-        if omni_mode
-        else self.all_final_layer[f"{patch_size}-{f_patch_size}"](unified, c=adaln_input)
-    )
-    unified = unified[:, :org_size, ...]
-
-    # Unpatchify
-    x = self.unpatchify(list(unified.unbind(dim=0)), x_size, patch_size, f_patch_size, x_pos_offsets)
-
-    return (x,) if not return_dict else Transformer2DModelOutput(sample=x)
 
 setattr(transformer_z_image, "RopeEmbedder", RopeEmbedderGaudi)
+setattr(transformer_z_image, "ZSingleStreamAttnProcessor", ZSingleStreamAttnProcessorGaudi)
+setattr(ZImageTransformer2DModel, "forward", transformer_forward_gaudi)
 
-class GaudiZImagePipeline(GaudiDiffusionPipeline, ZImagePipeline):
+class GaudiStableDiffusionZImagePipeline(GaudiDiffusionPipeline, ZImagePipeline):
     def __init__(
         self,
         scheduler: FlowMatchEulerDiscreteScheduler,
@@ -514,22 +351,6 @@ class GaudiZImagePipeline(GaudiDiffusionPipeline, ZImagePipeline):
 
             for i in range(len(self.transformer.layers)):
                 self.transformer.layers[i] = ht.hpu.wrap_in_hpu_graph(self.transformer.layers[i])
-
-        self.transformer.forward = types.MethodType(Zimage_transformer_forward_gaudi, self.transformer)
-        self.transformer._prepare_sequence = types.MethodType(_Zimage_tranformer_prepare_sequence_gaudi, self.transformer)
-        self.transformer._build_unified_sequence = types.MethodType(_Zimage_transformer_build_unified_sequence_gaudi, self.transformer)
-        for layer in self.transformer.noise_refiner:
-            layer.attention.set_processor(ZSingleStreamAttnProcessorGaudi())
-
-        for layer in self.transformer.context_refiner:
-            layer.attention.set_processor(ZSingleStreamAttnProcessorGaudi())
-        
-        if not self.transformer.siglip_refiner is None:
-            for layer in self.transformer.siglip_refiner:
-                layer.attention.set_processor(ZSingleStreamAttnProcessorGaudi())
-
-        for layer in self.transformer.layers:
-            layer.attention.set_processor(ZSingleStreamAttnProcessorGaudi())
 
         use_bucket = "1" == os.getenv("USE_ZIMAGE_BUCKET", "0")
         if use_bucket and self.use_hpu_graphs:
@@ -781,7 +602,6 @@ class GaudiZImagePipeline(GaudiDiffusionPipeline, ZImagePipeline):
                     latent_model_input_list,
                     timestep_model_input,
                     prompt_embeds_model_input,
-                    return_dict=False
                 )[0]
 
                 if apply_cfg:
