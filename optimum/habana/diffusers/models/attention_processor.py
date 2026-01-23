@@ -24,6 +24,7 @@ from diffusers.models.transformers.transformer_wan import WanAttention, _get_add
 from diffusers.utils import deprecate, logging
 from diffusers.utils.import_utils import is_xformers_available
 from habana_frameworks.torch.hpex.kernels import FusedSDPA
+from habana_frameworks.torch.hpex.normalization import FusedRMSNorm
 from torch import nn
 
 from ...distributed import parallel_state
@@ -649,16 +650,10 @@ class GaudiFluxAttnProcessor2_0:
         value = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
 
         # Apply RMSNorm to Q and K
-        from habana_frameworks.torch.hpex.normalization import FusedRMSNorm
-
-        use_stages = False
-        bwd_mode = 0
-        fast_math = True
-
         if attn.norm_q is not None:
-            query = FusedRMSNorm.apply(query, attn.norm_q.weight, attn.norm_q.eps, use_stages, bwd_mode, fast_math)
+            query = FusedRMSNorm.apply(query, attn.norm_q.weight, attn.norm_q.eps)
         if attn.norm_k is not None:
-            key = FusedRMSNorm.apply(key, attn.norm_k.weight, attn.norm_k.eps, use_stages, bwd_mode, fast_math)
+            key = FusedRMSNorm.apply(key, attn.norm_k.weight, attn.norm_k.eps)
 
         # Attention in FluxSingleTransformerBlock does not use `encoder_hidden_states`
         if encoder_hidden_states is not None:
@@ -682,18 +677,12 @@ class GaudiFluxAttnProcessor2_0:
                     encoder_hidden_states_query_proj,
                     attn.norm_added_q.weight,
                     attn.norm_added_q.eps,
-                    use_stages,
-                    bwd_mode,
-                    fast_math,
                 )
             if attn.norm_added_k is not None:
                 encoder_hidden_states_key_proj = FusedRMSNorm.apply(
                     encoder_hidden_states_key_proj,
                     attn.norm_added_k.weight,
                     attn.norm_added_k.eps,
-                    use_stages,
-                    bwd_mode,
-                    fast_math,
                 )
 
             # attention
@@ -764,14 +753,8 @@ class GaudiFlux2AttnProcessor:
         value = value.unflatten(-1, (attn.heads, -1))
 
         # Apply RMSNorm to Q and K
-        from habana_frameworks.torch.hpex.normalization import FusedRMSNorm
-
-        use_stages = False
-        bwd_mode = 0
-        fast_math = True
-
-        query = FusedRMSNorm.apply(query, attn.norm_q.weight, attn.norm_q.eps, use_stages, bwd_mode, fast_math)
-        key = FusedRMSNorm.apply(key, attn.norm_k.weight, attn.norm_k.eps, use_stages, bwd_mode, fast_math)
+        query = FusedRMSNorm.apply(query, attn.norm_q.weight, attn.norm_q.eps)
+        key = FusedRMSNorm.apply(key, attn.norm_k.weight, attn.norm_k.eps)
 
         if attn.added_kv_proj_dim is not None:
             encoder_query = encoder_query.unflatten(-1, (attn.heads, -1))
@@ -783,17 +766,11 @@ class GaudiFlux2AttnProcessor:
                 encoder_query,
                 attn.norm_added_q.weight,
                 attn.norm_added_q.eps,
-                use_stages,
-                bwd_mode,
-                fast_math,
             )
             encoder_key = FusedRMSNorm.apply(
                 encoder_key,
                 attn.norm_added_k.weight,
                 attn.norm_added_k.eps,
-                use_stages,
-                bwd_mode,
-                fast_math,
             )
 
             query = torch.cat([encoder_query, query], dim=1)
@@ -864,14 +841,8 @@ class GaudiFlux2ParallelSelfAttnProcessor:
         value = value.unflatten(-1, (attn.heads, -1))
 
         # Apply RMSNorm to Q and K
-        from habana_frameworks.torch.hpex.normalization import FusedRMSNorm
-
-        use_stages = False
-        bwd_mode = 0
-        fast_math = True
-
-        query = FusedRMSNorm.apply(query, attn.norm_q.weight, attn.norm_q.eps, use_stages, bwd_mode, fast_math)
-        key = FusedRMSNorm.apply(key, attn.norm_k.weight, attn.norm_k.eps, use_stages, bwd_mode, fast_math)
+        query = FusedRMSNorm.apply(query, attn.norm_q.weight, attn.norm_q.eps)
+        key = FusedRMSNorm.apply(key, attn.norm_k.weight, attn.norm_k.eps)
 
         if image_rotary_emb is not None:
             query, key = apply_rotary_emb_hpu(query, key, image_rotary_emb, sequence_dim=1)
