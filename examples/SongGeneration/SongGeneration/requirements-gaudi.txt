@@ -1,0 +1,17 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
+torchaudio==2.9.0+cpu
+omegaconf==2.2.0
+flashy==0.0.2
+optimum-habana==1.20.0
+peft==0.17.0
+julius==0.2.7
+lameenc==1.8.1
+librosa==0.10.2
+alias_free_torch==0.0.6
+descript-audio-codec==1.0.0
+k-diffusion==0.1.1
+vector-quantize-pytorch==1.27.15
+x_transformers==2.14.2
+einops_exts==0.0.4
+torchcodec==0.9.1
+openunmix==1.3.0
