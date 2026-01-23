@@ -808,10 +808,7 @@ class GaudiFlux2AttnProcessor:
 
         # Fast FSDPA is not supported in training mode
         fsdpa_mode = "None" if self.is_training else "fast"
-        # hidden_states = self.fav3.forward(query, key, value, attention_mask=attention_mask, fsdpa_mode=fsdpa_mode)
-        hidden_states = FusedSDPA.apply(
-            query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2), None, 0.0, False, None, fsdpa_mode, None
-        )
+        hidden_states = self.fav3.forward(query, key, value, attention_mask=attention_mask, fsdpa_mode=fsdpa_mode)
 
         hidden_states = hidden_states.transpose(1, 2).flatten(2, 3)
         hidden_states = hidden_states.to(query.dtype)
@@ -886,10 +883,7 @@ class GaudiFlux2ParallelSelfAttnProcessor:
 
         # Fast FSDPA is not supported in training mode
         fsdpa_mode = "None" if self.is_training else "fast"
-        # hidden_states = self.fav3.forward(query, key, value, attention_mask=attention_mask, fsdpa_mode=fsdpa_mode)
-        hidden_states = FusedSDPA.apply(
-            query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2), None, 0.0, False, None, fsdpa_mode, None
-        )
+        hidden_states = self.fav3.forward(query, key, value, attention_mask=attention_mask, fsdpa_mode=fsdpa_mode)
 
         hidden_states = hidden_states.transpose(1, 2).flatten(2, 3)
         hidden_states = hidden_states.to(query.dtype)
