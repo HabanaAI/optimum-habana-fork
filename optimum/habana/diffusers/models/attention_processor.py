@@ -705,7 +705,6 @@ class GaudiFluxAttnProcessor2_0:
             query, key = apply_rotary_emb_hpu(query, key, image_rotary_emb)
 
         # hidden_states = F.scaled_dot_product_attention(query, key, value, dropout_p=0.0, is_causal=False)
-        from habana_frameworks.torch.hpex.kernels import FusedSDPA
 
         # Fast FSDPA is not supported in training mode
         fsdpa_mode = "None" if self.is_training else "fast"
@@ -804,8 +803,6 @@ class GaudiFlux2AttnProcessor:
         if image_rotary_emb is not None:
             query, key = apply_rotary_emb_hpu(query, key, image_rotary_emb, sequence_dim=1)
 
-        from habana_frameworks.torch.hpex.kernels import FusedSDPA
-
         # Fast FSDPA is not supported in training mode
         fsdpa_mode = "None" if self.is_training else "fast"
         hidden_states = self.fav3.forward(query, key, value, attention_mask=attention_mask, fsdpa_mode=fsdpa_mode)
@@ -878,8 +875,6 @@ class GaudiFlux2ParallelSelfAttnProcessor:
 
         if image_rotary_emb is not None:
             query, key = apply_rotary_emb_hpu(query, key, image_rotary_emb, sequence_dim=1)
-
-        from habana_frameworks.torch.hpex.kernels import FusedSDPA
 
         # Fast FSDPA is not supported in training mode
         fsdpa_mode = "None" if self.is_training else "fast"
