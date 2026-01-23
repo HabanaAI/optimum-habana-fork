@@ -164,6 +164,26 @@ PT_HPU_LAZY_MODE=1 python text_to_image_generation.py \
     --bf16
 ```
 
+FLUX.2 was introduced by Black Forest Labs [here](https://bfl.ai/blog/flux-2).
+
+Here is how to run FLUX.2-dev model:
+
+```bash
+PT_HPU_LAZY_MODE=1 python text_to_image_generation.py \
+    --model_name_or_path black-forest-labs/FLUX.2-dev \
+    --prompts "A cat holding a sign that says hello world" \
+    --num_images_per_prompt 5 \
+    --batch_size 1 \
+    --num_inference_steps 50 \
+    --image_save_dir /tmp/flux_2_images \
+    --scheduler flow_match_euler_discrete \
+    --use_habana \
+    --use_hpu_graphs \
+    --gaudi_config Habana/stable-diffusion \
+    --sdp_on_bf16 \
+    --bf16
+```
+
 > [!NOTE]
 > The access to FLUX.1-dev model requires agreeing to its terms and conditions at [HuggingFace model page](https://huggingface.co/black-forest-labs/FLUX.1-dev),
 > and then authenticating using your HF token via `huggingface-cli login`.
@@ -177,6 +197,10 @@ FLUX in quantization mode by setting runtime variable `QUANT_CONFIG=quantization
 > Running quantization mode multiple times on the same pipeline object may cause errors.
 
 To run with FLUX.1-schnell model, a distilled version of FLUX.1 (which is not gated), use `--model_name_or_path black-forest-labs/FLUX.1-schnell`.
+
+> [!NOTE]
+> The access to FLUX.2-dev model requires agreeing to its terms and conditions at [HuggingFace model page](https://huggingface.co/black-forest-labs/FLUX.2-dev),
+> and then authenticating using your HF token via `huggingface-cli login`.
 
 ## ControlNet
 
@@ -341,6 +365,25 @@ PT_HPU_LAZY_MODE=1 python image_to_image_generation.py \
     --guidance_scale 3.5 \
     --num_inference_steps 30 \
     --image_save_dir /tmp/flux_images \
+    --use_habana \
+    --use_hpu_graphs \
+    --gaudi_config Habana/stable-diffusion \
+    --sdp_on_bf16 \
+    --bf16
+```
+
+Here is how to generate a FLUX.2 image using a single input image and prompt:
+
+```bash
+PT_HPU_LAZY_MODE=1 python image_to_image_generation.py \
+    --model_name_or_path "black-forest-labs/FLUX.2-dev" \
+    --src_image_path "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/diffusers/cat.png" \
+    --prompts "cat wizard, gandalf, lord of the rings, detailed, fantasy, cute, adorable, Pixar, Disney, 8k" \
+    --num_images_per_prompt 5 \
+    --batch_size 1 \
+    --guidance_scale 3.5 \
+    --num_inference_steps 50 \
+    --image_save_dir /tmp/flux2_images \
     --use_habana \
     --use_hpu_graphs \
     --gaudi_config Habana/stable-diffusion \
