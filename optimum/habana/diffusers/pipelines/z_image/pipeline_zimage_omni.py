@@ -1,8 +1,8 @@
 import os
 import torch
-from diffusers import ZImagePipeline
 import types
 from typing import Any, Callable, Dict, List, Optional, Union
+import PIL
 
 import random
 import numpy as np
@@ -10,15 +10,16 @@ import time as tm_perf
 from einops import rearrange
 from torch.nn.utils.rnn import pad_sequence
 
-from transformers import AutoTokenizer, PreTrainedModel
+from transformers import AutoTokenizer, PreTrainedModel, Siglip2ImageProcessorFast, Siglip2VisionModel
 
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 from diffusers.models.autoencoders import AutoencoderKL
 from diffusers.models.transformers import ZImageTransformer2DModel
 from diffusers.pipelines.z_image.pipeline_output import ZImagePipelineOutput
-from diffusers.pipelines.z_image.pipeline_z_image import calculate_shift,retrieve_timesteps
+from diffusers.pipelines.z_image.pipeline_z_image_omni import calculate_shift, retrieve_timesteps
 from diffusers.models.attention_processor import Attention
 from diffusers.models.transformers import transformer_z_image
+from diffusers import ZImageOmniPipeline
 
 from optimum.utils import logging
 from optimum.habana.diffusers.pipelines.pipeline_utils import GaudiDiffusionPipeline
@@ -410,6 +411,7 @@ def Zimage_transformer_forward_gaudi(
     if omni_mode and siglip_feats[0] is not None and self.siglip_embedder is not None:
         siglip_seqlens = [len(si) for si in siglip_feats]
         siglip_feats = self.siglip_embedder(torch.cat(siglip_feats, dim=0))  # embed
+        #!!!need to get org_size to be continued!
         siglip_feats, siglip_freqs, siglip_mask, _, _ = self._prepare_sequence(
             list(siglip_feats.split(siglip_seqlens, dim=0)),
             siglip_pos_ids,
@@ -474,7 +476,7 @@ def Zimage_transformer_forward_gaudi(
 
 setattr(transformer_z_image, "RopeEmbedder", RopeEmbedderGaudi)
 
-class GaudiZImagePipeline(GaudiDiffusionPipeline, ZImagePipeline):
+class GaudiZImageOmniPipeline(GaudiDiffusionPipeline, ZImageOmniPipeline):
     def __init__(
         self,
         scheduler: FlowMatchEulerDiscreteScheduler,
@@ -482,6 +484,8 @@ class GaudiZImagePipeline(GaudiDiffusionPipeline, ZImagePipeline):
         text_encoder: PreTrainedModel,
         tokenizer: AutoTokenizer,
         transformer: ZImageTransformer2DModel,
+        siglip: Siglip2VisionModel,
+        siglip_processor: Siglip2ImageProcessorFast,
         use_habana: bool = False,
         use_hpu_graphs: bool = False,
         gaudi_config: Union[str, GaudiConfig] = None,
@@ -496,13 +500,15 @@ class GaudiZImagePipeline(GaudiDiffusionPipeline, ZImagePipeline):
             bf16_full_eval,
             sdp_on_bf16,
         )
-        ZImagePipeline.__init__(
+        ZImageOmniPipeline.__init__(
             self,
             scheduler,
             vae,
             text_encoder,
             tokenizer,
             transformer,
+            siglip,
+            siglip_processor
         )
         n_refiner_layers =len(self.transformer.noise_refiner)
         if self.use_hpu_graphs:
@@ -518,6 +524,7 @@ class GaudiZImagePipeline(GaudiDiffusionPipeline, ZImagePipeline):
         self.transformer.forward = types.MethodType(Zimage_transformer_forward_gaudi, self.transformer)
         self.transformer._prepare_sequence = types.MethodType(_Zimage_tranformer_prepare_sequence_gaudi, self.transformer)
         self.transformer._build_unified_sequence = types.MethodType(_Zimage_transformer_build_unified_sequence_gaudi, self.transformer)
+
         for layer in self.transformer.noise_refiner:
             layer.attention.set_processor(ZSingleStreamAttnProcessorGaudi())
 
@@ -531,22 +538,22 @@ class GaudiZImagePipeline(GaudiDiffusionPipeline, ZImagePipeline):
         for layer in self.transformer.layers:
             layer.attention.set_processor(ZSingleStreamAttnProcessorGaudi())
 
-        use_bucket = "1" == os.getenv("USE_ZIMAGE_BUCKET", "0")
-        if use_bucket and self.use_hpu_graphs:
-            self.vae.forward = self.vae.decode
-            self.vae = ht.hpu.wrap_in_hpu_graph(self.vae)
+        #use_bucket = "1" == os.getenv("USE_ZIMAGE_BUCKET", "0")
+        #if use_bucket and self.use_hpu_graphs:
+        #    self.vae.forward = self.vae.decode
+        #    self.vae = ht.hpu.wrap_in_hpu_graph(self.vae)
         self.to(self._device)
 
     @torch.no_grad()
     def __call__(
         self,
+        image: Optional[Union[List[PIL.Image.Image], PIL.Image.Image]] = None,
         prompt: Union[str, List[str]] = None,
         height: Optional[int] = None,
         width: Optional[int] = None,
         num_inference_steps: int = 50,
         sigmas: Optional[List[float]] = None,
         guidance_scale: float = 5.0,
-        true_cfg_scale: float = 0.0,
         cfg_normalization: bool = False,
         cfg_truncation: float = 1.0,
         negative_prompt: Optional[Union[str, List[str]]] = None,
@@ -564,7 +571,14 @@ class GaudiZImagePipeline(GaudiDiffusionPipeline, ZImagePipeline):
     ):
         r"""
         Function invoked when calling the pipeline for generation.
+
         Args:
+            image (`torch.Tensor`, `PIL.Image.Image`, `np.ndarray`, `List[torch.Tensor]`, `List[PIL.Image.Image]`, or `List[np.ndarray]`):
+                `Image`, numpy array or tensor representing an image batch to be used as the starting point. For both
+                numpy array and pytorch tensor, the expected value range is between `[0, 1]` If it's a tensor or a list
+                or tensors, the expected shape should be `(B, C, H, W)` or `(C, H, W)`. If it is a numpy array or a
+                list of arrays, the expected shape should be `(B, H, W, C)` or `(H, W, C)` It can also accept image
+                latents as `image`, but if passing latents directly it is not encoded again.
             prompt (`str` or `List[str]`, *optional*):
                 The prompt or prompts to guide the image generation. If not defined, one has to pass `prompt_embeds`.
                 instead.
@@ -630,30 +644,18 @@ class GaudiZImagePipeline(GaudiDiffusionPipeline, ZImagePipeline):
                 `._callback_tensor_inputs` attribute of your pipeline class.
             max_sequence_length (`int`, *optional*, defaults to 512):
                 Maximum sequence length to use with the `prompt`.
+
         Examples:
+
         Returns:
             [`~pipelines.z_image.ZImagePipelineOutput`] or `tuple`: [`~pipelines.z_image.ZImagePipelineOutput`] if
             `return_dict` is True, otherwise a `tuple`. When returning a tuple, the first element is a list with the
             generated images.
         """
-        height = height or 1024
-        width = width or 1024
 
-        vae_scale = self.vae_scale_factor * 2
-        if height % vae_scale != 0:
-            height = (height // vae_scale + 1) * vae_scale
-            logger.warning(f'pad height to {height}')
-        if width % vae_scale != 0:
-            width = (width // vae_scale + 1) * vae_scale
-            logger.warning(f'pad width to {width}')
-
-        if height > 2048:
-            height = 2048
-            logger.warning(f'resize height to {height}')
-        if width > 2048:
-            width = 2048
-            logger.warning(f'resize width to {width}')
-        
+        if image is not None and not isinstance(image, list):
+            image = [image]
+        num_condition_images = len(image) if image is not None else 0
 
         device = self._execution_device
 
@@ -662,12 +664,12 @@ class GaudiZImagePipeline(GaudiDiffusionPipeline, ZImagePipeline):
         self._interrupt = False
         self._cfg_normalization = cfg_normalization
         self._cfg_truncation = cfg_truncation
+
         # 2. Define call parameters
         if prompt is not None and isinstance(prompt, str):
             batch_size = 1
         elif prompt is not None and isinstance(prompt, list):
             batch_size = len(prompt)
-            prompt = prompt.copy()
         else:
             batch_size = len(prompt_embeds)
 
@@ -690,6 +692,49 @@ class GaudiZImagePipeline(GaudiDiffusionPipeline, ZImagePipeline):
                 negative_prompt_embeds=negative_prompt_embeds,
                 device=device,
                 max_sequence_length=max_sequence_length,
+                num_condition_images=num_condition_images,
+            )
+
+        # 3. Process condition images. Copied from diffusers.pipelines.flux2.pipeline_flux2
+        condition_images = []
+        resized_images = []
+        if image is not None:
+            for img in image:
+                self.image_processor.check_image_input(img)
+            for img in image:
+                image_width, image_height = img.size
+                if image_width * image_height > 1024 * 1024:
+                    if height is not None and width is not None:
+                        img = self.image_processor._resize_to_target_area(img, height * width)
+                    else:
+                        img = self.image_processor._resize_to_target_area(img, 1024 * 1024)
+                    image_width, image_height = img.size
+                resized_images.append(img)
+
+                multiple_of = self.vae_scale_factor * 2
+                image_width = (image_width // multiple_of) * multiple_of
+                image_height = (image_height // multiple_of) * multiple_of
+                img = self.image_processor.preprocess(img, height=image_height, width=image_width, resize_mode="crop")
+                condition_images.append(img)
+
+            if len(condition_images) > 0:
+                height = height or image_height
+                width = width or image_width
+
+        else:
+            height = height or 1024
+            width = width or 1024
+
+        vae_scale = self.vae_scale_factor * 2
+        if height % vae_scale != 0:
+            raise ValueError(
+                f"Height must be divisible by {vae_scale} (got {height}). "
+                f"Please adjust the height to a multiple of {vae_scale}."
+            )
+        if width % vae_scale != 0:
+            raise ValueError(
+                f"Width must be divisible by {vae_scale} (got {width}). "
+                f"Please adjust the width to a multiple of {vae_scale}."
             )
 
         # 4. Prepare latent variables
@@ -706,11 +751,36 @@ class GaudiZImagePipeline(GaudiDiffusionPipeline, ZImagePipeline):
             latents,
         )
 
+        condition_latents = self.prepare_image_latents(
+            images=condition_images,
+            batch_size=batch_size * num_images_per_prompt,
+            device=device,
+            dtype=torch.float32,
+        )
+        condition_latents = [[lat.to(self.transformer.dtype) for lat in lats] for lats in condition_latents]
+        if self.do_classifier_free_guidance:
+            negative_condition_latents = [[lat.clone() for lat in batch] for batch in condition_latents]
+
+        condition_siglip_embeds = self.prepare_siglip_embeds(
+            images=resized_images,
+            batch_size=batch_size * num_images_per_prompt,
+            device=device,
+            dtype=torch.float32,
+        )
+        condition_siglip_embeds = [[se.to(self.transformer.dtype) for se in sels] for sels in condition_siglip_embeds]
+        if self.do_classifier_free_guidance:
+            negative_condition_siglip_embeds = [[se.clone() for se in batch] for batch in condition_siglip_embeds]
+
         # Repeat prompt_embeds for num_images_per_prompt
         if num_images_per_prompt > 1:
             prompt_embeds = [pe for pe in prompt_embeds for _ in range(num_images_per_prompt)]
             if self.do_classifier_free_guidance and negative_prompt_embeds:
                 negative_prompt_embeds = [npe for npe in negative_prompt_embeds for _ in range(num_images_per_prompt)]
+
+        condition_siglip_embeds = [None if sels == [] else sels + [None] for sels in condition_siglip_embeds]
+        negative_condition_siglip_embeds = [
+            None if sels == [] else sels + [None] for sels in negative_condition_siglip_embeds
+        ]
 
         actual_batch_size = batch_size * num_images_per_prompt
         image_seq_len = (latents.shape[2] // 2) * (latents.shape[3] // 2)
@@ -768,20 +838,36 @@ class GaudiZImagePipeline(GaudiDiffusionPipeline, ZImagePipeline):
                     latents_typed = latents.to(self.transformer.dtype)
                     latent_model_input = latents_typed.repeat(2, 1, 1, 1)
                     prompt_embeds_model_input = prompt_embeds + negative_prompt_embeds
+                    condition_latents_model_input = condition_latents + negative_condition_latents
+                    condition_siglip_embeds_model_input = condition_siglip_embeds + negative_condition_siglip_embeds
                     timestep_model_input = timestep.repeat(2)
                 else:
                     latent_model_input = latents.to(self.transformer.dtype)
                     prompt_embeds_model_input = prompt_embeds
+                    condition_latents_model_input = condition_latents
+                    condition_siglip_embeds_model_input = condition_siglip_embeds
                     timestep_model_input = timestep
 
                 latent_model_input = latent_model_input.unsqueeze(2)
                 latent_model_input_list = list(latent_model_input.unbind(dim=0))
 
+                # Combine condition latents with target latent
+                current_batch_size = len(latent_model_input_list)
+                x_combined = [
+                    condition_latents_model_input[i] + [latent_model_input_list[i]] for i in range(current_batch_size)
+                ]
+                # Create noise mask: 0 for condition images (clean), 1 for target image (noisy)
+                image_noise_mask = [
+                    [0] * len(condition_latents_model_input[i]) + [1] for i in range(current_batch_size)
+                ]
+
                 model_out_list = self.transformer(
-                    latent_model_input_list,
-                    timestep_model_input,
-                    prompt_embeds_model_input,
-                    return_dict=False
+                    x=x_combined,
+                    t=timestep_model_input,
+                    cap_feats=prompt_embeds_model_input,
+                    siglip_feats=condition_siglip_embeds_model_input,
+                    image_noise_mask=image_noise_mask,
+                    return_dict=False,
                 )[0]
 
                 if apply_cfg:
@@ -830,7 +916,7 @@ class GaudiZImagePipeline(GaudiDiffusionPipeline, ZImagePipeline):
                 # call the callback, if provided
                 if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
                     progress_bar.update()
-        htcore.mark_step()
+                htcore.mark_step()
 
         if output_type == "latent":
             image = latents
@@ -839,18 +925,7 @@ class GaudiZImagePipeline(GaudiDiffusionPipeline, ZImagePipeline):
             latents = latents.to(self.vae.dtype)
             latents = (latents / self.vae.config.scaling_factor) + self.vae.config.shift_factor
 
-            use_bucket = "1" == os.getenv("USE_ZIMAGE_BUCKET", "0")
-            if use_bucket and self.use_hpu_graphs:
-                width_total_len = (latents.shape[-1] // 16 + 1) *16 
-                width_pad_len = width_total_len - latents.shape[-1]
-                height_total_len = (latents.shape[-2] // 16 + 1) *16 
-                height_pad_len = height_total_len - latents.shape[-2]
-                latents = torch.nn.functional.pad(latents, (0, width_pad_len, 0, height_pad_len), value=0.0)
-                image = self.vae(latents, return_dict=False)[0]
-                image = image[..., :height, :width]
-            else:
-                image = self.vae.decode(latents, return_dict=False)[0]
-
+            image = self.vae.decode(latents, return_dict=False)[0]
             image = self.image_processor.postprocess(image, output_type=output_type)
 
         # Offload all models

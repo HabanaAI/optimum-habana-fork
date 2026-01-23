@@ -1,15 +1,5 @@
 # Qwen/Qwen-Image-2512, Qwen/Qwen-Image支持文生图
 
-## Diffusers版本更新
-
-由于Qwen发布了新版模型如`Qwen-Image-Layered`、`Qwen-Image-2512`、`Qwen-Image-Edit-2511`等，且仅能运行在Diffusers开发分支上，因此需要安装Diffusers开发版本:
-
-```bash
-    pip uninstall diffusers
-    pip install -r requirements-diffusers.txt
-```
-需要注意的是，对于其它非Qwen-Image系列的模型，请恢复diffusers到0.36.0版本。
-
 ## 测试样例
 
 单卡：
@@ -323,3 +313,4 @@ deepspeed --num_nodes 1 \
     --num_inference_steps diffusion的采样步数，步数越高图像越精细，耗时越长。默认为50
 
     --loop 性能测试循环数
+
