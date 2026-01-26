@@ -744,11 +744,21 @@
 
             switch (status.status) {
                 case 'queued':
-                case 'preprocessing':
-                case 'preprocessed':
-                    // All waiting statuses show as queued with queue length
                     statusIndicator.classList.add('queued');
-                    statusIndicator.textContent = `排队中 (队列位置: ${status.queue_length || 0})`;
+                    statusIndicator.textContent = `预处理排队中`;
+                    break;
+                case 'preprocessing':
+                    statusIndicator.classList.add('processing');
+                    statusIndicator.textContent = '预处理中';
+                    break;
+                case 'preprocessed':
+                    if (status.queue_length > 0) {
+                        statusIndicator.classList.add('queued');
+                        statusIndicator.textContent = `生成排队中 (队列位置: ${status.queue_length})`;
+                    } else {
+                        statusIndicator.classList.add('processing');
+                        statusIndicator.textContent = '视频生成中';
+                    }
                     break;
                 case 'processing':
                     statusIndicator.classList.add('processing');
