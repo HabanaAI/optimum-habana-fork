@@ -378,6 +378,7 @@ def Zimage_transformer_forward_gaudi(
     )
 
     for layer in self.noise_refiner:
+        htcore.mark_step()
         x = (
             self._gradient_checkpointing_func(
                 layer, x, x_mask, x_freqs, adaln_input, x_noise_tensor, t_noisy, t_clean
@@ -397,6 +398,7 @@ def Zimage_transformer_forward_gaudi(
     )
 
     for layer in self.context_refiner:
+        htcore.mark_step()
         cap_feats = (
             self._gradient_checkpointing_func(layer, cap_feats, cap_mask, cap_freqs)
             if torch.is_grad_enabled() and self.gradient_checkpointing
@@ -420,6 +422,7 @@ def Zimage_transformer_forward_gaudi(
         )
 
         for layer in self.siglip_refiner:
+            htcore.mark_step()
             siglip_feats = (
                 self._gradient_checkpointing_func(layer, siglip_feats, siglip_mask, siglip_freqs)
                 if torch.is_grad_enabled() and self.gradient_checkpointing
@@ -448,6 +451,7 @@ def Zimage_transformer_forward_gaudi(
 
     # Main transformer layers
     for layer_idx, layer in enumerate(self.layers):
+        htcore.mark_step()
         unified = (
             self._gradient_checkpointing_func(
                 layer, unified, unified_mask, unified_freqs, adaln_input, unified_noise_tensor, t_noisy, t_clean
