@@ -7,7 +7,7 @@ import time
 import habana_frameworks.torch as ht
 
 from optimum.habana.transformers.gaudi_configuration import GaudiConfig
-from optimum.habana.diffusers import GaudiStableDiffusionZImagePipeline
+from optimum.habana.diffusers import GaudiZImagePipeline, GaudiZImageOmniPipeline
 
 def set_seed(seed):
     random.seed(seed)
@@ -28,6 +28,12 @@ def main():
         nargs="*",
         default="An image of a squirrel in Picasso style",
         help="The prompt or prompts to guide the image generation.",
+    )
+    parser.add_argument(
+        "--pipeline_type",
+        type=str,
+        default="zimage",
+        help="zimage pipeline type",
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed for initialization.")
     parser.add_argument(
@@ -81,12 +87,22 @@ def main():
     model_name_path = args.model_name_or_path
     # 1. Load the pipeline
     # Use bfloat16 for optimal performance on supported GPUs
-    pipe = GaudiStableDiffusionZImagePipeline.from_pretrained(
-        model_name_path,
-        torch_dtype=torch.bfloat16,
-        low_cpu_mem_usage=False,
-        **kwargs,
-    )
+    if args.pipeline_type == "zimage":
+        pipe = GaudiZImagePipeline.from_pretrained(
+            model_name_path,
+            torch_dtype=torch.bfloat16,
+            low_cpu_mem_usage=False,
+            **kwargs,
+        )
+    elif args.pipeline_type == "zimage_omni":
+        pipe = GaudiZImageOmniPipeline.from_pretrained(
+                model_name_or_path, 
+                torch_dtype=torch.bfloat16, 
+                **kwargs
+        )
+    else:
+        print(f'ERROR unsupported pipline type:{args.pipeline_type}')
+        exit()
     pipe.to("hpu")
 
     for i in range(args.loop):
@@ -105,7 +121,7 @@ def main():
         duration = t1 - t0
         print("Z-Image Pipeline Latency in Loop #{:d}: {:.1f} sec".format(i, duration))
 
-    file_name = f"z_image_output_{args.width}x{args.height}.png"
+    file_name = f"{args.pipeline_type}_output_{args.width}x{args.height}.png"
     image.save(file_name)
     print(f'Completed saving {file_name}!')
 
