@@ -96,9 +96,9 @@ def main():
         )
     elif args.pipeline_type == "zimage_omni":
         pipe = GaudiZImageOmniPipeline.from_pretrained(
-                model_name_or_path, 
-                torch_dtype=torch.bfloat16, 
-                **kwargs
+            model_name_path, 
+            torch_dtype=torch.bfloat16, 
+            **kwargs
         )
     else:
         print(f'ERROR unsupported pipline type:{args.pipeline_type}')

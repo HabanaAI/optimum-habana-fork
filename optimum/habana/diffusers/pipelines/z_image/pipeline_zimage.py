@@ -200,10 +200,12 @@ def _Zimage_tranformer_prepare_sequence_gaudi(
         feats = torch.nn.functional.pad(feats, (0, 0, 0, bucket_pad_len), value=0.0)
         freqs_cis = torch.nn.functional.pad(freqs_cis, (0, 0, 0, 0, 0, bucket_pad_len), value=0.0)
 
-    # Attention mask
-    attn_mask = torch.zeros((bsz, 1, bucket_total_len, bucket_total_len), dtype=torch.bool, device=device)
-    for i, seq_len in enumerate(item_seqlens):
-        attn_mask[i, :, :seq_len, :seq_len] = 1
+        # Attention mask
+        attn_mask = torch.zeros((bsz, 1, bucket_total_len, bucket_total_len), dtype=torch.bool, device=device)
+        for i, seq_len in enumerate(item_seqlens):
+            attn_mask[i, :, :seq_len, :seq_len] = 1
+    else:
+        attn_mask = None
 
     # Noise mask
     noise_mask_tensor = None
@@ -293,10 +295,12 @@ def _Zimage_transformer_build_unified_sequence_gaudi(
         unified = torch.nn.functional.pad(unified, (0, 0, 0, bucket_pad_len), value=0.0)
         unified_freqs =  torch.nn.functional.pad(unified_freqs, (0, 0, 0, 0, 0, bucket_pad_len), value=0.0)
 
-    # Attention mask
-    attn_mask = torch.zeros((bsz, 1, bucket_total_len, bucket_total_len), dtype=torch.bool, device=device)
-    for i, seq_len in enumerate(unified_seqlens):
-        attn_mask[i, :, :seq_len, :seq_len] = 1
+        # Attention mask
+        attn_mask = torch.zeros((bsz, 1, bucket_total_len, bucket_total_len), dtype=torch.bool, device=device)
+        for i, seq_len in enumerate(unified_seqlens):
+            attn_mask[i, :, :seq_len, :seq_len] = 1
+    else:
+        attn_mask = None
 
     # Noise mask
     noise_mask_tensor = None
