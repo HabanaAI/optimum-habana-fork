@@ -10,16 +10,21 @@ import time as tm_perf
 from einops import rearrange
 from torch.nn.utils.rnn import pad_sequence
 
-from transformers import AutoTokenizer, PreTrainedModel, Siglip2ImageProcessorFast, Siglip2VisionModel
+from transformers import AutoTokenizer, PreTrainedModel
 
+from diffusers.image_processor import PipelineImageInput
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
+from diffusers.models.modeling_outputs import Transformer2DModelOutput
 from diffusers.models.autoencoders import AutoencoderKL
 from diffusers.models.transformers import ZImageTransformer2DModel
+from diffusers.models.controlnets import ZImageControlNetModel
 from diffusers.pipelines.z_image.pipeline_output import ZImagePipelineOutput
-from diffusers.pipelines.z_image.pipeline_z_image_omni import calculate_shift, retrieve_timesteps
+from diffusers.pipelines.z_image.pipeline_z_image_controlnet import calculate_shift, retrieve_timesteps, retrieve_latents
 from diffusers.models.attention_processor import Attention
 from diffusers.models.transformers import transformer_z_image
-from diffusers import ZImageOmniPipeline
+from diffusers.models.controlnets import controlnet_z_image
+from diffusers import ZImageControlNetInpaintPipeline
+
 
 from optimum.utils import logging
 from optimum.habana.diffusers.pipelines.pipeline_utils import GaudiDiffusionPipeline
@@ -201,12 +206,11 @@ def _Zimage_tranformer_prepare_sequence_gaudi(
         feats = torch.nn.functional.pad(feats, (0, 0, 0, bucket_pad_len), value=0.0)
         freqs_cis = torch.nn.functional.pad(freqs_cis, (0, 0, 0, 0, 0, bucket_pad_len), value=0.0)
 
-        # Attention mask
-        attn_mask = torch.zeros((bsz, 1, bucket_total_len, bucket_total_len), dtype=torch.bool, device=device)
-        for i, seq_len in enumerate(item_seqlens):
-            attn_mask[i, :, :seq_len, :seq_len] = 1
-    else:
-        attn_mask = None
+    # Attention mask
+    attn_mask = torch.zeros((bsz, 1, bucket_total_len, bucket_total_len), dtype=torch.bool, device=device)
+    for i, seq_len in enumerate(item_seqlens):
+        attn_mask[i, :, :seq_len, :seq_len] = 1
+
     # Noise mask
     noise_mask_tensor = None
     if noise_mask is not None:
@@ -295,12 +299,10 @@ def _Zimage_transformer_build_unified_sequence_gaudi(
         unified = torch.nn.functional.pad(unified, (0, 0, 0, bucket_pad_len), value=0.0)
         unified_freqs =  torch.nn.functional.pad(unified_freqs, (0, 0, 0, 0, 0, bucket_pad_len), value=0.0)
 
-        # Attention mask
-        attn_mask = torch.zeros((bsz, 1, bucket_total_len, bucket_total_len), dtype=torch.bool, device=device)
-        for i, seq_len in enumerate(unified_seqlens):
-            attn_mask[i, :, :seq_len, :seq_len] = 1
-    else:
-        attn_mask = None
+    # Attention mask
+    attn_mask = torch.zeros((bsz, 1, bucket_total_len, bucket_total_len), dtype=torch.bool, device=device)
+    for i, seq_len in enumerate(unified_seqlens):
+        attn_mask[i, :, :seq_len, :seq_len] = 1
 
     # Noise mask
     noise_mask_tensor = None
@@ -311,6 +313,238 @@ def _Zimage_transformer_build_unified_sequence_gaudi(
 
     return unified, unified_freqs, attn_mask, noise_mask_tensor
 
+SEQ_MULTI_OF = 32
+def controlnet_forward_gaudi(
+    self,
+    x: List[torch.Tensor],
+    t,
+    cap_feats: List[torch.Tensor],
+    control_context: List[torch.Tensor],
+    conditioning_scale: float = 1.0,
+    patch_size=2,
+    f_patch_size=1,
+):
+    if (
+        self.t_scale is None
+        or self.t_embedder is None
+        or self.all_x_embedder is None
+        or self.cap_embedder is None
+        or self.rope_embedder is None
+        or self.noise_refiner is None
+        or self.context_refiner is None
+        or self.x_pad_token is None
+        or self.cap_pad_token is None
+    ):
+        raise ValueError(
+            "Required modules are `None`, use `from_transformer` to share required modules from `transformer`."
+        )
+
+    assert patch_size in self.config.all_patch_size
+    assert f_patch_size in self.config.all_f_patch_size
+
+    bsz = len(x)
+    device = x[0].device
+    t = t * self.t_scale
+    t = self.t_embedder(t)
+
+    (
+        x,
+        cap_feats,
+        x_size,
+        x_pos_ids,
+        cap_pos_ids,
+        x_inner_pad_mask,
+        cap_inner_pad_mask,
+    ) = self.patchify_and_embed(x, cap_feats, patch_size, f_patch_size)
+
+    x_item_seqlens = [len(_) for _ in x]
+    assert all(_ % SEQ_MULTI_OF == 0 for _ in x_item_seqlens)
+    x_max_item_seqlen = max(x_item_seqlens)
+
+    control_context = self.patchify(control_context, patch_size, f_patch_size)
+    control_context = torch.cat(control_context, dim=0)
+    control_context = self.control_all_x_embedder[f"{patch_size}-{f_patch_size}"](control_context)
+
+    control_context[torch.cat(x_inner_pad_mask)] = self.x_pad_token
+    control_context = list(control_context.split(x_item_seqlens, dim=0))
+
+    control_context = pad_sequence(control_context, batch_first=True, padding_value=0.0)
+
+    # x embed & refine
+    x = torch.cat(x, dim=0)
+    x = self.all_x_embedder[f"{patch_size}-{f_patch_size}"](x)
+
+    # Match t_embedder output dtype to x for layerwise casting compatibility
+    adaln_input = t.type_as(x)
+    x[torch.cat(x_inner_pad_mask)] = self.x_pad_token
+    x = list(x.split(x_item_seqlens, dim=0))
+    x_freqs_cis = list(self.rope_embedder(torch.cat(x_pos_ids, dim=0)).split([len(_) for _ in x_pos_ids], dim=0))
+
+    x = pad_sequence(x, batch_first=True, padding_value=0.0)
+    x_freqs_cis = pad_sequence(x_freqs_cis, batch_first=True, padding_value=0.0)
+    # Clarify the length matches to satisfy Dynamo due to "Symbolic Shape Inference" to avoid compilation errors
+    x_freqs_cis = x_freqs_cis[:, : x.shape[1]]
+    use_bucket = "1" == os.getenv("USE_ZIMAGE_BUCKET", "0")
+    bucket_total_len = x_max_item_seqlen
+    if use_bucket:
+        bucket_total_len = (x_max_item_seqlen // BUCKET_SIZE + 1)*BUCKET_SIZE
+        bucket_pad_len = bucket_total_len - x_max_item_seqlen
+        x = torch.nn.functional.pad(x, (0, 0, 0, bucket_pad_len), value=0.0)
+        control_context = torch.nn.functional.pad(control_context, (0, 0, 0, bucket_pad_len), value=0.0)
+        x_freqs_cis = torch.nn.functional.pad(x_freqs_cis, (0, 0, 0, 0, 0, bucket_pad_len), value=0.0)
+
+    x_attn_mask = torch.zeros((bsz, 1, bucket_total_len, bucket_total_len), dtype=torch.bool, device=device)
+    for i, seq_len in enumerate(x_item_seqlens):
+        x_attn_mask[i, :, :seq_len, :seq_len] = 1
+
+    if self.add_control_noise_refiner is not None:
+        if self.add_control_noise_refiner == "control_layers":
+            layers = self.control_layers
+        elif self.add_control_noise_refiner == "control_noise_refiner":
+            layers = self.control_noise_refiner
+        else:
+            raise ValueError(f"Unsupported `add_control_noise_refiner` type: {self.add_control_noise_refiner}.")
+        for layer in layers:
+            if torch.is_grad_enabled() and self.gradient_checkpointing:
+                control_context = self._gradient_checkpointing_func(
+                    layer, control_context, x, x_attn_mask, x_freqs_cis, adaln_input
+                )
+            else:
+                control_context = layer(control_context, x, x_attn_mask, x_freqs_cis, adaln_input)
+            htcore.mark_step()
+
+        hints = torch.unbind(control_context)[:-1]
+        control_context = torch.unbind(control_context)[-1]
+        noise_refiner_block_samples = {
+            layer_idx: hints[idx] * conditioning_scale
+            for idx, layer_idx in enumerate(self.control_refiner_layers_places)
+        }
+    else:
+        noise_refiner_block_samples = None
+
+    if torch.is_grad_enabled() and self.gradient_checkpointing:
+        for layer_idx, layer in enumerate(self.noise_refiner):
+            x = self._gradient_checkpointing_func(layer, x, x_attn_mask, x_freqs_cis, adaln_input)
+            if noise_refiner_block_samples is not None:
+                if layer_idx in noise_refiner_block_samples:
+                    x = x + noise_refiner_block_samples[layer_idx]
+    else:
+        for layer_idx, layer in enumerate(self.noise_refiner):
+            x = layer(x, x_attn_mask, x_freqs_cis, adaln_input)
+            if noise_refiner_block_samples is not None:
+                if layer_idx in noise_refiner_block_samples:
+                    x = x + noise_refiner_block_samples[layer_idx]
+            htcore.mark_step()
+    x = x[:, :x_max_item_seqlen, :]
+    control_context = control_context[:, :x_max_item_seqlen, :]
+
+    # cap embed & refine
+    cap_item_seqlens = [len(_) for _ in cap_feats]
+    cap_max_item_seqlen = max(cap_item_seqlens)
+
+    cap_feats = torch.cat(cap_feats, dim=0)
+    cap_feats = self.cap_embedder(cap_feats)
+    cap_feats[torch.cat(cap_inner_pad_mask)] = self.cap_pad_token
+
+    cap_feats = list(cap_feats.split(cap_item_seqlens, dim=0))
+    cap_freqs_cis = list(
+        self.rope_embedder(torch.cat(cap_pos_ids, dim=0)).split([len(_) for _ in cap_pos_ids], dim=0)
+    )
+
+    cap_feats = pad_sequence(cap_feats, batch_first=True, padding_value=0.0)
+    cap_freqs_cis = pad_sequence(cap_freqs_cis, batch_first=True, padding_value=0.0)
+    # Clarify the length matches to satisfy Dynamo due to "Symbolic Shape Inference" to avoid compilation errors
+    cap_freqs_cis = cap_freqs_cis[:, : cap_feats.shape[1]]
+
+    use_bucket = "1" == os.getenv("USE_ZIMAGE_BUCKET", "0")
+    bucket_total_len = cap_max_item_seqlen
+    if use_bucket:
+        bucket_total_len = (cap_max_item_seqlen // BUCKET_SIZE + 1)*BUCKET_SIZE
+        bucket_pad_len = bucket_total_len - cap_max_item_seqlen
+        cap_feats = torch.nn.functional.pad(cap_feats, (0, 0, 0, bucket_pad_len), value=0.0)
+        cap_freqs_cis = torch.nn.functional.pad(cap_freqs_cis, (0, 0, 0, 0, 0, bucket_pad_len), value=0.0)
+
+    cap_attn_mask = torch.zeros((bsz, 1, bucket_total_len, bucket_total_len), dtype=torch.bool, device=device)
+    for i, seq_len in enumerate(cap_item_seqlens):
+        cap_attn_mask[i, :, :seq_len, :seq_len] = 1
+
+    if torch.is_grad_enabled() and self.gradient_checkpointing:
+        for layer in self.context_refiner:
+            cap_feats = self._gradient_checkpointing_func(layer, cap_feats, cap_attn_mask, cap_freqs_cis)
+    else:
+        for layer in self.context_refiner:
+            cap_feats = layer(cap_feats, cap_attn_mask, cap_freqs_cis)
+            htcore.mark_step()
+    cap_feats = cap_feats[:, :cap_max_item_seqlen, :]
+
+    # unified
+    unified = []
+    unified_freqs_cis = []
+    for i in range(bsz):
+        x_len = x_item_seqlens[i]
+        cap_len = cap_item_seqlens[i]
+        unified.append(torch.cat([x[i][:x_len], cap_feats[i][:cap_len]]))
+        unified_freqs_cis.append(torch.cat([x_freqs_cis[i][:x_len], cap_freqs_cis[i][:cap_len]]))
+    unified_item_seqlens = [a + b for a, b in zip(cap_item_seqlens, x_item_seqlens)]
+    assert unified_item_seqlens == [len(_) for _ in unified]
+    unified_max_item_seqlen = max(unified_item_seqlens)
+
+    unified = pad_sequence(unified, batch_first=True, padding_value=0.0)
+    unified_freqs_cis = pad_sequence(unified_freqs_cis, batch_first=True, padding_value=0.0)
+
+    use_bucket = "1" == os.getenv("USE_ZIMAGE_BUCKET", "0")
+    bucket_total_len = unified_max_item_seqlen
+    if use_bucket:
+        bucket_total_len = (unified_max_item_seqlen // BUCKET_SIZE + 1)*BUCKET_SIZE
+        bucket_pad_len = bucket_total_len - unified_max_item_seqlen
+        unified = torch.nn.functional.pad(unified, (0, 0, 0, bucket_pad_len), value=0.0)
+        unified_freqs_cis = torch.nn.functional.pad(unified_freqs_cis, (0, 0, 0, 0, 0, bucket_pad_len), value=0.0)
+
+    unified_attn_mask = torch.zeros((bsz, 1, bucket_total_len, bucket_total_len), dtype=torch.bool, device=device)
+    for i, seq_len in enumerate(unified_item_seqlens):
+        unified_attn_mask[i, :, :seq_len, :seq_len] = 1
+
+    ## ControlNet start
+    if not self.add_control_noise_refiner:
+        if torch.is_grad_enabled() and self.gradient_checkpointing:
+            for layer in self.control_noise_refiner:
+                control_context = self._gradient_checkpointing_func(
+                    layer, control_context, x_attn_mask, x_freqs_cis, adaln_input
+                )
+        else:
+            for layer in self.control_noise_refiner:
+                control_context = layer(control_context, x_attn_mask, x_freqs_cis, adaln_input)
+                htcore.mark_step()
+
+    # unified
+    control_context_unified = []
+    for i in range(bsz):
+        x_len = x_item_seqlens[i]
+        cap_len = cap_item_seqlens[i]
+        control_context_unified.append(torch.cat([control_context[i][:x_len], cap_feats[i][:cap_len]]))
+    control_context_unified = pad_sequence(control_context_unified, batch_first=True, padding_value=0.0)
+    use_bucket = "1" == os.getenv("USE_ZIMAGE_BUCKET", "0")
+    if use_bucket:
+        control_context_unified = torch.nn.functional.pad(control_context_unified, (0, 0, 0, bucket_pad_len), value=0.0)
+
+    for layer in self.control_layers:
+        if torch.is_grad_enabled() and self.gradient_checkpointing:
+            control_context_unified = self._gradient_checkpointing_func(
+                layer, control_context_unified, unified, unified_attn_mask, unified_freqs_cis, adaln_input
+            )
+        else:
+            control_context_unified = layer(
+                control_context_unified, unified, unified_attn_mask, unified_freqs_cis, adaln_input
+            )
+            htcore.mark_step()
+    control_context_unified = control_context_unified[:, :, :unified_max_item_seqlen, :]
+
+    hints = torch.unbind(control_context_unified)[:-1]
+
+    controlnet_block_samples = {
+        layer_idx: hints[idx] * conditioning_scale for idx, layer_idx in enumerate(self.control_layers_places)
+    }
+    return controlnet_block_samples
 
 def Zimage_transformer_forward_gaudi(
     self,
@@ -376,13 +610,13 @@ def Zimage_transformer_forward_gaudi(
     x_seqlens = [len(xi) for xi in x]
     x = self.all_x_embedder[f"{patch_size}-{f_patch_size}"](torch.cat(x, dim=0))  # embed
 
+    htcore.mark_step()
     org_size = x.shape[0]
     x, x_freqs, x_mask, _, x_noise_tensor = self._prepare_sequence(
         list(x.split(x_seqlens, dim=0)), x_pos_ids, x_pad_mask, self.x_pad_token, x_noise_mask, device
     )
 
     for layer in self.noise_refiner:
-        htcore.mark_step()
         x = (
             self._gradient_checkpointing_func(
                 layer, x, x_mask, x_freqs, adaln_input, x_noise_tensor, t_noisy, t_clean
@@ -390,6 +624,7 @@ def Zimage_transformer_forward_gaudi(
             if torch.is_grad_enabled() and self.gradient_checkpointing
             else layer(x, x_mask, x_freqs, adaln_input, x_noise_tensor, t_noisy, t_clean)
         )
+        htcore.mark_step()
     x = x[:, :org_size, ...]
     x_freqs = x_freqs[:, :org_size, ...]
 
@@ -397,17 +632,18 @@ def Zimage_transformer_forward_gaudi(
     cap_seqlens = [len(ci) for ci in cap_feats]
     cap_feats = self.cap_embedder(torch.cat(cap_feats, dim=0))  # embed
     org_size = cap_feats.shape[0]
+    htcore.mark_step()
     cap_feats, cap_freqs, cap_mask, _, _ = self._prepare_sequence(
         list(cap_feats.split(cap_seqlens, dim=0)), cap_pos_ids, cap_pad_mask, self.cap_pad_token, None, device
     )
 
     for layer in self.context_refiner:
-        htcore.mark_step()
         cap_feats = (
             self._gradient_checkpointing_func(layer, cap_feats, cap_mask, cap_freqs)
             if torch.is_grad_enabled() and self.gradient_checkpointing
             else layer(cap_feats, cap_mask, cap_freqs)
         )
+        htcore.mark_step()
     cap_feats = cap_feats[:, :org_size, :]
     cap_freqs = cap_freqs[:, :org_size, :]
 
@@ -427,12 +663,12 @@ def Zimage_transformer_forward_gaudi(
         )
 
         for layer in self.siglip_refiner:
-            htcore.mark_step()
             siglip_feats = (
                 self._gradient_checkpointing_func(layer, siglip_feats, siglip_mask, siglip_freqs)
                 if torch.is_grad_enabled() and self.gradient_checkpointing
                 else layer(siglip_feats, siglip_mask, siglip_freqs)
             )
+            htcore.mark_step()
 
     org_size = x.shape[1] + cap_feats.shape[1]
 
@@ -456,7 +692,6 @@ def Zimage_transformer_forward_gaudi(
 
     # Main transformer layers
     for layer_idx, layer in enumerate(self.layers):
-        htcore.mark_step()
         unified = (
             self._gradient_checkpointing_func(
                 layer, unified, unified_mask, unified_freqs, adaln_input, unified_noise_tensor, t_noisy, t_clean
@@ -464,8 +699,10 @@ def Zimage_transformer_forward_gaudi(
             if torch.is_grad_enabled() and self.gradient_checkpointing
             else layer(unified, unified_mask, unified_freqs, adaln_input, unified_noise_tensor, t_noisy, t_clean)
         )
+        htcore.mark_step()
         if controlnet_block_samples is not None and layer_idx in controlnet_block_samples:
             unified = unified + controlnet_block_samples[layer_idx]
+        htcore.mark_step()
 
     unified = (
         self.all_final_layer[f"{patch_size}-{f_patch_size}"](
@@ -482,8 +719,9 @@ def Zimage_transformer_forward_gaudi(
     return (x,) if not return_dict else Transformer2DModelOutput(sample=x)
 
 setattr(transformer_z_image, "RopeEmbedder", RopeEmbedderGaudi)
+setattr(controlnet_z_image, "RopeEmbedder", RopeEmbedderGaudi)
 
-class GaudiZImageOmniPipeline(GaudiDiffusionPipeline, ZImageOmniPipeline):
+class GaudiZImageControlNetPipeline(GaudiDiffusionPipeline, ZImageControlNetInpaintPipeline):
     def __init__(
         self,
         scheduler: FlowMatchEulerDiscreteScheduler,
@@ -491,8 +729,7 @@ class GaudiZImageOmniPipeline(GaudiDiffusionPipeline, ZImageOmniPipeline):
         text_encoder: PreTrainedModel,
         tokenizer: AutoTokenizer,
         transformer: ZImageTransformer2DModel,
-        siglip: Siglip2VisionModel,
-        siglip_processor: Siglip2ImageProcessorFast,
+        controlnet: ZImageControlNetModel,
         use_habana: bool = False,
         use_hpu_graphs: bool = False,
         gaudi_config: Union[str, GaudiConfig] = None,
@@ -507,15 +744,14 @@ class GaudiZImageOmniPipeline(GaudiDiffusionPipeline, ZImageOmniPipeline):
             bf16_full_eval,
             sdp_on_bf16,
         )
-        ZImageOmniPipeline.__init__(
+        ZImageControlNetInpaintPipeline.__init__(
             self,
             scheduler,
             vae,
             text_encoder,
             tokenizer,
             transformer,
-            siglip,
-            siglip_processor
+            controlnet
         )
         n_refiner_layers =len(self.transformer.noise_refiner)
         if self.use_hpu_graphs:
@@ -529,6 +765,8 @@ class GaudiZImageOmniPipeline(GaudiDiffusionPipeline, ZImageOmniPipeline):
                 self.transformer.layers[i] = ht.hpu.wrap_in_hpu_graph(self.transformer.layers[i])
 
         self.transformer.forward = types.MethodType(Zimage_transformer_forward_gaudi, self.transformer)
+        self.controlnet.forward = types.MethodType(controlnet_forward_gaudi, self.controlnet)
+
         self.transformer._prepare_sequence = types.MethodType(_Zimage_tranformer_prepare_sequence_gaudi, self.transformer)
         self.transformer._build_unified_sequence = types.MethodType(_Zimage_transformer_build_unified_sequence_gaudi, self.transformer)
 
@@ -545,22 +783,25 @@ class GaudiZImageOmniPipeline(GaudiDiffusionPipeline, ZImageOmniPipeline):
         for layer in self.transformer.layers:
             layer.attention.set_processor(ZSingleStreamAttnProcessorGaudi())
 
-        #use_bucket = "1" == os.getenv("USE_ZIMAGE_BUCKET", "0")
-        #if use_bucket and self.use_hpu_graphs:
-        #    self.vae.forward = self.vae.decode
-        #    self.vae = ht.hpu.wrap_in_hpu_graph(self.vae)
+        for layer in self.controlnet.control_layers:
+            layer.attention.set_processor(ZSingleStreamAttnProcessorGaudi())
+
+        for layer in self.controlnet.control_noise_refiner:
+            layer.attention.set_processor(ZSingleStreamAttnProcessorGaudi())
+
         self.to(self._device)
 
     @torch.no_grad()
     def __call__(
         self,
-        image: Optional[Union[List[PIL.Image.Image], PIL.Image.Image]] = None,
         prompt: Union[str, List[str]] = None,
         height: Optional[int] = None,
         width: Optional[int] = None,
         num_inference_steps: int = 50,
         sigmas: Optional[List[float]] = None,
         guidance_scale: float = 5.0,
+        control_image: PipelineImageInput = None,
+        controlnet_conditioning_scale: Union[float, List[float]] = 0.75,
         cfg_normalization: bool = False,
         cfg_truncation: float = 1.0,
         negative_prompt: Optional[Union[str, List[str]]] = None,
@@ -580,12 +821,6 @@ class GaudiZImageOmniPipeline(GaudiDiffusionPipeline, ZImageOmniPipeline):
         Function invoked when calling the pipeline for generation.
 
         Args:
-            image (`torch.Tensor`, `PIL.Image.Image`, `np.ndarray`, `List[torch.Tensor]`, `List[PIL.Image.Image]`, or `List[np.ndarray]`):
-                `Image`, numpy array or tensor representing an image batch to be used as the starting point. For both
-                numpy array and pytorch tensor, the expected value range is between `[0, 1]` If it's a tensor or a list
-                or tensors, the expected shape should be `(B, C, H, W)` or `(C, H, W)`. If it is a numpy array or a
-                list of arrays, the expected shape should be `(B, H, W, C)` or `(H, W, C)` It can also accept image
-                latents as `image`, but if passing latents directly it is not encoded again.
             prompt (`str` or `List[str]`, *optional*):
                 The prompt or prompts to guide the image generation. If not defined, one has to pass `prompt_embeds`.
                 instead.
@@ -659,10 +894,23 @@ class GaudiZImageOmniPipeline(GaudiDiffusionPipeline, ZImageOmniPipeline):
             `return_dict` is True, otherwise a `tuple`. When returning a tuple, the first element is a list with the
             generated images.
         """
+        height = height or 1024
+        width = width or 1024
 
-        if image is not None and not isinstance(image, list):
-            image = [image]
-        num_condition_images = len(image) if image is not None else 0
+        vae_scale = self.vae_scale_factor * 2
+        if height % vae_scale != 0:
+            height = (height // vae_scale + 1) * vae_scale
+            logger.warning(f'pad height to {height}')
+        if width % vae_scale != 0:
+            width = (width // vae_scale + 1) * vae_scale
+            logger.warning(f'pad width to {width}')
+
+        if height > 2048:
+            height = 2048
+            logger.warning(f'resize height to {height}')
+        if width > 2048:
+            width = 2048
+            logger.warning(f'resize width to {width}')
 
         device = self._execution_device
 
@@ -671,7 +919,6 @@ class GaudiZImageOmniPipeline(GaudiDiffusionPipeline, ZImageOmniPipeline):
         self._interrupt = False
         self._cfg_normalization = cfg_normalization
         self._cfg_truncation = cfg_truncation
-
         # 2. Define call parameters
         if prompt is not None and isinstance(prompt, str):
             batch_size = 1
@@ -699,53 +946,38 @@ class GaudiZImageOmniPipeline(GaudiDiffusionPipeline, ZImageOmniPipeline):
                 negative_prompt_embeds=negative_prompt_embeds,
                 device=device,
                 max_sequence_length=max_sequence_length,
-                num_condition_images=num_condition_images,
-            )
-
-        # 3. Process condition images. Copied from diffusers.pipelines.flux2.pipeline_flux2
-        condition_images = []
-        resized_images = []
-        if image is not None:
-            for img in image:
-                self.image_processor.check_image_input(img)
-            for img in image:
-                image_width, image_height = img.size
-                if image_width * image_height > 1024 * 1024:
-                    if height is not None and width is not None:
-                        img = self.image_processor._resize_to_target_area(img, height * width)
-                    else:
-                        img = self.image_processor._resize_to_target_area(img, 1024 * 1024)
-                    image_width, image_height = img.size
-                resized_images.append(img)
-
-                multiple_of = self.vae_scale_factor * 2
-                image_width = (image_width // multiple_of) * multiple_of
-                image_height = (image_height // multiple_of) * multiple_of
-                img = self.image_processor.preprocess(img, height=image_height, width=image_width, resize_mode="crop")
-                condition_images.append(img)
-
-            if len(condition_images) > 0:
-                height = height or image_height
-                width = width or image_width
-
-        else:
-            height = height or 1024
-            width = width or 1024
-
-        vae_scale = self.vae_scale_factor * 2
-        if height % vae_scale != 0:
-            raise ValueError(
-                f"Height must be divisible by {vae_scale} (got {height}). "
-                f"Please adjust the height to a multiple of {vae_scale}."
-            )
-        if width % vae_scale != 0:
-            raise ValueError(
-                f"Width must be divisible by {vae_scale} (got {width}). "
-                f"Please adjust the width to a multiple of {vae_scale}."
             )
 
         # 4. Prepare latent variables
         num_channels_latents = self.transformer.in_channels
+
+        control_image = self.prepare_image(
+            image=control_image,
+            width=width,
+            height=height,
+            batch_size=batch_size * num_images_per_prompt,
+            num_images_per_prompt=num_images_per_prompt,
+            device=device,
+            dtype=self.vae.dtype,
+        )
+        height, width = control_image.shape[-2:]
+        control_image = retrieve_latents(self.vae.encode(control_image), generator=generator, sample_mode="argmax")
+        control_image = (control_image - self.vae.config.shift_factor) * self.vae.config.scaling_factor
+        control_image = control_image.unsqueeze(2)
+
+        if num_channels_latents != self.controlnet.config.control_in_dim:
+            # For model version 2.0
+            control_image = torch.cat(
+                [
+                    control_image,
+                    torch.zeros(
+                        control_image.shape[0],
+                        self.controlnet.config.control_in_dim - num_channels_latents,
+                        *control_image.shape[2:],
+                    ).to(device=control_image.device, dtype=control_image.dtype),
+                ],
+                dim=1,
+            )
 
         latents = self.prepare_latents(
             batch_size * num_images_per_prompt,
@@ -758,36 +990,11 @@ class GaudiZImageOmniPipeline(GaudiDiffusionPipeline, ZImageOmniPipeline):
             latents,
         )
 
-        condition_latents = self.prepare_image_latents(
-            images=condition_images,
-            batch_size=batch_size * num_images_per_prompt,
-            device=device,
-            dtype=torch.float32,
-        )
-        condition_latents = [[lat.to(self.transformer.dtype) for lat in lats] for lats in condition_latents]
-        if self.do_classifier_free_guidance:
-            negative_condition_latents = [[lat.clone() for lat in batch] for batch in condition_latents]
-
-        condition_siglip_embeds = self.prepare_siglip_embeds(
-            images=resized_images,
-            batch_size=batch_size * num_images_per_prompt,
-            device=device,
-            dtype=torch.float32,
-        )
-        condition_siglip_embeds = [[se.to(self.transformer.dtype) for se in sels] for sels in condition_siglip_embeds]
-        if self.do_classifier_free_guidance:
-            negative_condition_siglip_embeds = [[se.clone() for se in batch] for batch in condition_siglip_embeds]
-
         # Repeat prompt_embeds for num_images_per_prompt
         if num_images_per_prompt > 1:
             prompt_embeds = [pe for pe in prompt_embeds for _ in range(num_images_per_prompt)]
             if self.do_classifier_free_guidance and negative_prompt_embeds:
                 negative_prompt_embeds = [npe for npe in negative_prompt_embeds for _ in range(num_images_per_prompt)]
-
-        condition_siglip_embeds = [None if sels == [] else sels + [None] for sels in condition_siglip_embeds]
-        negative_condition_siglip_embeds = [
-            None if sels == [] else sels + [None] for sels in negative_condition_siglip_embeds
-        ]
 
         actual_batch_size = batch_size * num_images_per_prompt
         image_seq_len = (latents.shape[2] // 2) * (latents.shape[3] // 2)
@@ -812,7 +1019,6 @@ class GaudiZImageOmniPipeline(GaudiDiffusionPipeline, ZImageOmniPipeline):
         num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
         self._num_timesteps = len(timesteps)
 
-        htcore.mark_step()
         # 6. Denoising loop
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i in range(len(timesteps)):
@@ -845,37 +1051,31 @@ class GaudiZImageOmniPipeline(GaudiDiffusionPipeline, ZImageOmniPipeline):
                     latents_typed = latents.to(self.transformer.dtype)
                     latent_model_input = latents_typed.repeat(2, 1, 1, 1)
                     prompt_embeds_model_input = prompt_embeds + negative_prompt_embeds
-                    condition_latents_model_input = condition_latents + negative_condition_latents
-                    condition_siglip_embeds_model_input = condition_siglip_embeds + negative_condition_siglip_embeds
                     timestep_model_input = timestep.repeat(2)
                 else:
                     latent_model_input = latents.to(self.transformer.dtype)
                     prompt_embeds_model_input = prompt_embeds
-                    condition_latents_model_input = condition_latents
-                    condition_siglip_embeds_model_input = condition_siglip_embeds
                     timestep_model_input = timestep
 
                 latent_model_input = latent_model_input.unsqueeze(2)
                 latent_model_input_list = list(latent_model_input.unbind(dim=0))
 
-                # Combine condition latents with target latent
-                current_batch_size = len(latent_model_input_list)
-                x_combined = [
-                    condition_latents_model_input[i] + [latent_model_input_list[i]] for i in range(current_batch_size)
-                ]
-                # Create noise mask: 0 for condition images (clean), 1 for target image (noisy)
-                image_noise_mask = [
-                    [0] * len(condition_latents_model_input[i]) + [1] for i in range(current_batch_size)
-                ]
+                controlnet_block_samples = self.controlnet(
+                    latent_model_input_list,
+                    timestep_model_input,
+                    prompt_embeds_model_input,
+                    control_image,
+                    conditioning_scale=controlnet_conditioning_scale,
+                )
+                htcore.mark_step()
 
                 model_out_list = self.transformer(
-                    x=x_combined,
-                    t=timestep_model_input,
-                    cap_feats=prompt_embeds_model_input,
-                    siglip_feats=condition_siglip_embeds_model_input,
-                    image_noise_mask=image_noise_mask,
-                    return_dict=False,
+                    latent_model_input_list,
+                    timestep_model_input,
+                    prompt_embeds_model_input,
+                    controlnet_block_samples=controlnet_block_samples,
                 )[0]
+                htcore.mark_step()
 
                 if apply_cfg:
                     # Perform CFG
@@ -906,6 +1106,7 @@ class GaudiZImageOmniPipeline(GaudiDiffusionPipeline, ZImageOmniPipeline):
                 noise_pred = noise_pred.squeeze(2)
                 noise_pred = -noise_pred
 
+                htcore.mark_step()
                 # compute the previous noisy sample x_t -> x_t-1
                 latents = self.scheduler.step(noise_pred.to(torch.float32), t, latents, return_dict=False)[0]
                 assert latents.dtype == torch.float32
@@ -923,7 +1124,7 @@ class GaudiZImageOmniPipeline(GaudiDiffusionPipeline, ZImageOmniPipeline):
                 # call the callback, if provided
                 if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
                     progress_bar.update()
-                htcore.mark_step()
+        htcore.mark_step()
 
         if output_type == "latent":
             image = latents
