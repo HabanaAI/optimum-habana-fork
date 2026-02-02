@@ -45,6 +45,8 @@ from .configuration_qwen3_tts_tokenizer_v2 import (
     Qwen3TTSTokenizerV2Config,
     Qwen3TTSTokenizerV2DecoderConfig,
 )
+import habana_frameworks.torch.core as htcore
+from habana_frameworks.torch.hpu import wrap_in_hpu_graph
 
 logger = logging.get_logger(__name__)
 
@@ -495,7 +497,7 @@ class Qwen3TTSTokenizerV2DecoderTransformerModel(Qwen3TTSTokenizerV2DecoderPreTr
         # Initialize weights and apply final processing
         self.post_init()
 
-    @check_model_inputs()
+    @check_model_inputs
     @auto_docstring
     def forward(
         self,
@@ -877,14 +879,19 @@ class Qwen3TTSTokenizerV2Decoder(Qwen3TTSTokenizerV2DecoderPreTrainedModel):
         for blocks in self.upsample:
             for block in blocks:
                 hidden = block(hidden)
+                htcore.mark_step()
         wav = hidden
         for block in self.decoder:
             wav = block(wav)
+            htcore.mark_step()
         return wav.clamp(min=-1, max=1)
 
     def chunked_decode(self, codes, chunk_size=300, left_context_size=25):
         wavs = []
         start_index = 0
+        codes_len = codes.shape[-1]
+        padded_len = math.ceil(codes_len / chunk_size) * chunk_size - codes_len
+        codes = F.pad(codes, (0, padded_len), mode="constant", value=0)
         while start_index < codes.shape[-1]:
             end_index = min(start_index + chunk_size, codes.shape[-1])
             context_size = left_context_size if start_index - left_context_size > 0 else start_index
@@ -892,7 +899,7 @@ class Qwen3TTSTokenizerV2Decoder(Qwen3TTSTokenizerV2DecoderPreTrainedModel):
             wav_chunk = self(codes_chunk)
             wavs.append(wav_chunk[..., context_size * self.total_upsample :])
             start_index = end_index
-        return torch.cat(wavs, dim=-1)
+        return torch.cat(wavs, dim=-1)[..., : -padded_len * self.total_upsample]
 
 
 class Qwen3TTSTokenizerV2Encoder(MimiModel):
@@ -939,6 +946,7 @@ class Qwen3TTSTokenizerV2Model(Qwen3TTSTokenizerV2PreTrainedModel):
 
         self.encoder = Qwen3TTSTokenizerV2Encoder._from_config(self.config.encoder_config)
         self.decoder = Qwen3TTSTokenizerV2Decoder._from_config(self.config.decoder_config)
+        self.decoder = wrap_in_hpu_graph(self.decoder)
 
         self.post_init()
     

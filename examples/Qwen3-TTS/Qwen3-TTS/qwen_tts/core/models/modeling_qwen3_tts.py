@@ -49,6 +49,18 @@ from .configuration_qwen3_tts import (Qwen3TTSConfig,
                                       Qwen3TTSTalkerCodePredictorConfig,
                                       Qwen3TTSTalkerConfig)
 
+import math
+from habana_frameworks.torch.hpu import wrap_in_hpu_graph
+from optimum.habana.transformers.modeling_attn_mask_utils import (
+  _gaudi_prepare_4d_causal_attention_mask)
+
+import habana_frameworks.torch.core as htcore
+try:
+    from habana_frameworks.torch.hpex.kernels import FusedSDPA
+except ImportError:
+    print("Not using HPU fused scaled dot-product attention kernel.")
+    FusedSDPA = None
+
 logger = logging.get_logger(__name__)
 
 
@@ -723,6 +735,84 @@ def apply_multimodal_rotary_pos_emb(q, k, cos, sin, mrope_section, mrope_interle
     k_embed = (k * cos) + (rotate_half(k) * sin)
     return q_embed, k_embed
 
+class KVCache(torch.nn.Module):
+    def __init__(self):
+        super(KVCache, self).__init__()
+        self.cache = None
+        self.inp_seq_len = -1
+
+    def allocate(self, inp_seq_len, dtype, device, shape):
+        if self.cache is None or self.cache.shape != shape:
+            self.inp_seq_len = inp_seq_len
+            self.cache = torch.zeros(shape, dtype=dtype, device=device)
+        else:
+            assert self.inp_seq_len == inp_seq_len, (
+                f"inp_seq_len must be the same. self.inp_seq_len:{self.inp_seq_len} inp_seq_len:{inp_seq_len}"
+            )
+            self.cache.fill_(0)
+
+    @staticmethod
+    def update(prev, cur, dim, idx, inp_seq_len):
+        orig_cur = cur
+        if prev.shape == cur.shape:
+            prev.copy_(cur)
+            return orig_cur
+        if cur.shape[2] > 1 and cur.shape[2] <= prev.shape[2]:
+            # Initialize
+            prev[:, :, :inp_seq_len, :].copy_(cur)
+            return orig_cur
+        assert cur.shape[2] == 1, f"Cannot update kv-cache. Unsupported shapes. prev:{prev.shape} cur:{cur.shape}"
+        if idx is not None:
+            prev.index_copy_(dim, idx - 1, cur)
+            return prev
+        else:
+            return torch.cat((prev, cur), dim=dim)
+
+    def get_shape(self):
+        if self.cache is None:
+            return None
+        return self.cache.shape
+
+    def forward(self, cur, dim, idx):
+        return self.update(self.cache, cur, dim, idx, self.inp_seq_len)
+
+
+class ModuleFusedSDPA(torch.nn.Module):
+    def __init__(self, fusedSDPA, scale, attention_dropout, enable_recompute, flash_attention_fp8):
+        super().__init__()
+        self._hpu_kernel_fsdpa = fusedSDPA
+        self.scale = scale
+        self.attention_dropout = attention_dropout
+        self.enable_recompute = enable_recompute
+        self.flash_attention_fp8 = flash_attention_fp8
+
+    def forward(
+        self,
+        query,
+        key,
+        value,
+        attn_mask,
+        dropout_p,
+        is_casual,
+        scale,
+        softmax_mode,
+        recompute_mode,
+        valid_sequence_lengths,
+        padding_side="left",
+    ):
+        return self._hpu_kernel_fsdpa.apply(
+            query,
+            key,
+            value,
+            attn_mask,
+            dropout_p,
+            is_casual,
+            scale,
+            softmax_mode,
+            recompute_mode,
+            valid_sequence_lengths,
+            padding_side,
+        )
 
 class Qwen3TTSTalkerAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
@@ -758,51 +848,161 @@ class Qwen3TTSTalkerAttention(nn.Module):
         self.sliding_window = getattr(config, "sliding_window", None)
         self.rope_scaling = config.rope_scaling
 
+        self.k_cache = KVCache()
+        self.v_cache = KVCache()
+        self.inp_seq_len = -1
+
+        self.fused_scaled_dot_product_attention = (
+            ModuleFusedSDPA(
+                FusedSDPA,
+                scale=self.scaling,
+                attention_dropout=self.attention_dropout,
+                enable_recompute=False,
+                flash_attention_fp8=getattr(config, "flash_attention_fp8", False),
+            )
+            if FusedSDPA
+            else None
+        )
+
+    def get_k_proj_weight(self):
+        """4bit quantization in GPTQ replaces the k_proj.weight with qweight."""
+        if hasattr(self.k_proj, "qweight"):
+            return self.k_proj.qweight
+        return self.k_proj.weight
+
+    def get_k_proj_weight_dtype(self):
+        """4bit quantization in GPTQ replaces the k_proj.weight with qweight.
+        Scales tensor gets the weight dtype."""
+        if hasattr(self.k_proj, "qweight"):
+            return self.k_proj.scales.dtype
+        return self.k_proj.weight.dtype
+
     def forward(
         self,
         hidden_states: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         attention_mask: Optional[torch.Tensor],
-        past_key_values: Optional[Cache] = None,
+        past_key_value: Optional[Cache] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        use_cache: bool = False,
+        reuse_cache: Optional[bool] = False,
+        token_idx: Optional[torch.Tensor] = None,
+        num_virtual_tokens: int = None,
+        cache_idx: int = None,
+        use_flash_attention: Optional[bool] = False,
+        flash_attention_recompute: Optional[bool] = False,
+        flash_attention_causal_mask: Optional[bool] = False,
+        flash_attention_fast_softmax: Optional[bool] = False,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[tuple[torch.Tensor]]]:
         input_shape = hidden_states.shape[:-1]
+        q_len = input_shape[1]
         hidden_shape = (*input_shape, -1, self.head_dim)
 
         query_states = self.q_norm(self.q_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
         key_states = self.k_norm(self.k_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
         value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-
         cos, sin = position_embeddings
         query_states, key_states = apply_multimodal_rotary_pos_emb(
             query_states, key_states, cos, sin, self.rope_scaling["mrope_section"], self.rope_scaling["interleaved"]
         )
+        if use_cache:
+            # reuse k, v, self_attention
+            if reuse_cache:
+                if past_key_value is not None and isinstance(past_key_value[0], torch.Tensor):
+                    # prefix tuning case. attach past_key_value to generate first token.
+                    key_states = torch.cat((past_key_value[0], key_states), -2)
+                    value_states = torch.cat((past_key_value[1], value_states), -2)
+                key_states = self.k_cache(key_states, 2, token_idx)
+                value_states = self.v_cache(value_states, 2, token_idx)
+                past_key_value = (self.k_cache.get_shape(), self.v_cache.get_shape())
+            else:
+                if past_key_value is None:
+                    past_key = torch.zeros(
+                        key_states.shape, dtype=self.get_k_proj_weight_dtype(), device=key_states.device
+                    )
+                    past_value = torch.zeros(
+                        key_states.shape, dtype=self.get_k_proj_weight_dtype(), device=key_states.device
+                    )
+                    # Return list instead of tuple
+                    past_key_value = [past_key, past_value]
+                if (
+                    token_idx is not None
+                    and num_virtual_tokens is not None
+                    and num_virtual_tokens == past_key_value[0].shape[-2]
+                ):
+                    # prefix tuning case. attach past_key_value to generate first token.
+                    key_states = torch.cat((past_key_value[0], key_states), -2)
+                    value_states = torch.cat((past_key_value[1], value_states), -2)
+                    past_key_value = (key_states, value_states)
+                else:
+                    key_states = self.k_cache.update(past_key_value[0], key_states, 2, token_idx, self.inp_seq_len)
+                    value_states = self.v_cache.update(past_key_value[1], value_states, 2, token_idx, self.inp_seq_len)
 
-        if past_key_values is not None:
-            # sin and cos are specific to RoPE models; cache_position needed for the static cache
-            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
+                if token_idx is None:
+                    past_key_value = (key_states, value_states)
 
-        attention_interface: Callable = eager_attention_forward
-        if self.config._attn_implementation != "eager":
-            attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+            if cache_idx is not None and q_len == 1:
+                key_states = key_states[:, :, :cache_idx, :]
+                value_states = value_states[:, :, :cache_idx, :]
+                if attention_mask is not None:
+                    attention_mask = attention_mask[:, :, :, :cache_idx]
+                kv_seq_len = key_states.shape[-2]
+        else:
+            past_key_value = None
 
-        attn_output, attn_weights = attention_interface(
-            self,
-            query_states,
-            key_states,
-            value_states,
-            attention_mask,
-            dropout=0.0 if not self.training else self.attention_dropout,
-            scaling=self.scaling,
-            sliding_window=self.sliding_window,  # diff with Llama
-            **kwargs,
-        )
-
+        if use_flash_attention and FusedSDPA is not None:
+            attn_weights = None
+            if q_len == 1:
+                # next token
+                attn_output = self.fused_scaled_dot_product_attention(
+                    query_states,
+                    key_states,
+                    value_states,
+                    attention_mask,
+                    0.0,
+                    False,
+                    None,
+                    "None",
+                    False,
+                    None,
+                    "None",
+                )
+            else:
+                # first token
+                softmax_mode = "None"
+                if flash_attention_causal_mask:
+                    attn_output = self.fused_scaled_dot_product_attention(
+                        query_states,
+                        key_states,
+                        value_states,
+                        None,
+                        0.0,
+                        True,
+                        None,
+                        softmax_mode,
+                        flash_attention_recompute,
+                        None,
+                        "left",
+                    )
+                else:
+                    attn_output = self.fused_scaled_dot_product_attention(
+                        query_states,
+                        key_states,
+                        value_states,
+                        attention_mask,
+                        0.0,
+                        False,
+                        self.scaling,
+                        softmax_mode,
+                        flash_attention_recompute,
+                        None,
+                        "None",
+                    )
+        attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
-        return attn_output, attn_weights
+        return attn_output, attn_weights, past_key_value
 
 
 class Qwen3TTSTalkerResizeMLP(nn.Module):
@@ -912,17 +1112,54 @@ class Qwen3TTSAttention(nn.Module):
             self.head_dim, eps=config.rms_norm_eps
         )  # thus post q_norm does not need reshape
         self.sliding_window = config.sliding_window if config.layer_types[layer_idx] == "sliding_attention" else None
+        self.k_cache = KVCache()
+        self.v_cache = KVCache()
+        self.inp_seq_len = -1
+        self.fused_scaled_dot_product_attention = (
+            ModuleFusedSDPA(
+                FusedSDPA,
+                scale=self.scaling,
+                attention_dropout=self.attention_dropout,
+                enable_recompute=False,
+                flash_attention_fp8=getattr(config, "flash_attention_fp8", False),
+            )
+            if FusedSDPA
+            else None
+        )
+
+    def get_k_proj_weight(self):
+        """4bit quantization in GPTQ replaces the k_proj.weight with qweight."""
+        if hasattr(self.k_proj, "qweight"):
+            return self.k_proj.qweight
+        return self.k_proj.weight
+
+    def get_k_proj_weight_dtype(self):
+        """4bit quantization in GPTQ replaces the k_proj.weight with qweight.
+        Scales tensor gets the weight dtype."""
+        if hasattr(self.k_proj, "qweight"):
+            return self.k_proj.scales.dtype
+        return self.k_proj.weight.dtype
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         attention_mask: Optional[torch.Tensor],
-        past_key_values: Optional[Cache] = None,
+        past_key_value: Optional[Cache] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        token_idx: Optional[torch.Tensor] = None,
+        use_cache: bool = False,
+        reuse_cache: Optional[bool] = False,
+        use_flash_attention: Optional[bool] = False,
+        flash_attention_recompute: Optional[bool] = False,
+        flash_attention_causal_mask: Optional[bool] = False,
+        flash_attention_fast_softmax: Optional[bool] = False,
+        cache_idx: int = None,
+        num_virtual_tokens: int = None,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[tuple[torch.Tensor]]]:
         input_shape = hidden_states.shape[:-1]
+        q_len = input_shape[1]
         hidden_shape = (*input_shape, -1, self.head_dim)
 
         query_states = self.q_norm(self.q_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
@@ -932,30 +1169,117 @@ class Qwen3TTSAttention(nn.Module):
         cos, sin = position_embeddings
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
-        if past_key_values is not None:
-            # sin and cos are specific to RoPE models; cache_position needed for the static cache
-            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
+        if use_cache:
+              # reuse k, v, self_attention
+              if reuse_cache:
+                  if past_key_value is not None and isinstance(past_key_value[0], torch.Tensor):
+                      # prefix tuning case. attach past_key_value to generate first token.
+                      key_states = torch.cat((past_key_value[0], key_states), -2)
+                      value_states = torch.cat((past_key_value[1], value_states), -2)
+                  key_states = self.k_cache(key_states, 2, token_idx)
+                  value_states = self.v_cache(value_states, 2, token_idx)
+                  past_key_value = (self.k_cache.get_shape(), self.v_cache.get_shape())
+              else:
+                  if past_key_value is None:
+                      past_key = torch.zeros(
+                          key_states.shape,
+                          dtype=self.get_k_proj_weight_dtype()
+                          if self.get_k_proj_weight_dtype() != torch.uint8
+                          else key_states.dtype,
+                          device=key_states.device,
+                      )
+                      past_value = torch.zeros(
+                          key_states.shape,
+                          dtype=self.get_k_proj_weight_dtype()
+                          if self.get_k_proj_weight_dtype() != torch.uint8
+                          else key_states.dtype,
+                          device=key_states.device,
+                      )
+                      # Return list instead of tuple
+                      past_key_value = [past_key, past_value]
+                      key_states = self.k_cache.update(past_key_value[0], key_states, 2, token_idx, key_states.shape[-2])
+                      value_states = self.v_cache.update(
+                          past_key_value[1], value_states, 2, token_idx, value_states.shape[-2]
+                      )
 
-        attention_interface: Callable = eager_attention_forward
-        if self.config._attn_implementation != "eager":
-            attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+                  elif (
+                      token_idx is not None
+                      and num_virtual_tokens is not None
+                      and num_virtual_tokens == past_key_value[0].shape[-2]
+                  ):
+                      # prefix tuning case. attach past_key_value to generate first token.
+                      key_states = self.k_cache.update(past_key_value[0], key_states, 2, None, -1)
+                      value_states = self.v_cache.update(past_key_value[1], value_states, 2, None, -1)
+                      past_key_value = (key_states, value_states)
+                  else:
+                      key_states = self.k_cache.update(past_key_value[0], key_states, 2, token_idx, self.inp_seq_len)
+                      value_states = self.v_cache.update(past_key_value[1], value_states, 2, token_idx, self.inp_seq_len)
 
-        attn_output, attn_weights = attention_interface(
-            self,
-            query_states,
-            key_states,
-            value_states,
-            attention_mask,
-            dropout=0.0 if not self.training else self.attention_dropout,
-            scaling=self.scaling,
-            sliding_window=self.sliding_window,  # diff with Llama
-            **kwargs,
-        )
+                  if token_idx is None:
+                      past_key_value = (key_states, value_states)
 
+              if cache_idx is not None and q_len == 1:
+                  key_states = key_states[:, :, :cache_idx, :]
+                  value_states = value_states[:, :, :cache_idx, :]
+                  if attention_mask is not None:
+                      attention_mask = attention_mask[:, :, :, :cache_idx]
+                  kv_seq_len = key_states.shape[-2]
+        else:
+            past_key_value = None
+
+        attn_weights = None
+        if q_len == 1:
+            # next token
+            attn_output = self.fused_scaled_dot_product_attention(
+                query_states,
+                key_states,
+                value_states,
+                attention_mask,
+                0.0,
+                False,
+                None,
+                "None",
+                False,
+                None,
+                "None",
+            )
+        else:
+            # first token
+            softmax_mode = "fast" if flash_attention_fast_softmax else "None"
+            if flash_attention_causal_mask:
+                # causal masking on first token requires inputs to be of the same length
+                attn_output = self.fused_scaled_dot_product_attention(
+                    query_states,
+                    key_states,
+                    value_states,
+                    None,
+                    0.0,
+                    True,
+                    None,
+                    softmax_mode,
+                    flash_attention_recompute,
+                    None,
+                    "left",
+                )
+            else:
+                attn_output = self.fused_scaled_dot_product_attention(
+                    query_states,
+                    key_states,
+                    value_states,
+                    attention_mask,
+                    0.0,
+                    False,
+                    None,
+                    softmax_mode,
+                    flash_attention_recompute,
+                    None,
+                    "None",
+                )
+
+        attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
-        return attn_output, attn_weights
+        return attn_output, attn_weights, past_key_value
 
 
 class Qwen3TTSDecoderLayer(GradientCheckpointingLayer):
@@ -975,7 +1299,7 @@ class Qwen3TTSDecoderLayer(GradientCheckpointingLayer):
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Cache] = None,
+        past_key_value: Optional[Cache] = None,
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
         cache_position: Optional[torch.LongTensor] = None,
@@ -986,11 +1310,11 @@ class Qwen3TTSDecoderLayer(GradientCheckpointingLayer):
         hidden_states = self.input_layernorm(hidden_states)
 
         # Self Attention
-        hidden_states, self_attn_weights = self.self_attn(
+        hidden_states, self_attn_weights, present_key_value = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             position_ids=position_ids,
-            past_key_values=past_key_values,
+            past_key_value=past_key_value,
             output_attentions=output_attentions,
             use_cache=use_cache,
             cache_position=cache_position,
@@ -1008,6 +1332,8 @@ class Qwen3TTSDecoderLayer(GradientCheckpointingLayer):
         outputs = (hidden_states,)
         if output_attentions:
             outputs += (self_attn_weights,)
+        if use_cache:
+            outputs += (present_key_value,)
 
         return outputs
 
@@ -1057,6 +1383,11 @@ class Qwen3TTSTalkerCodePredictorModel(Qwen3TTSPreTrainedModel):
     ) -> BaseModelOutputWithPast:
         if input_ids is not None:
             raise ValueError("`input_ids` is expected to be `None`")
+        elif input_ids is not None:
+            batch_size, seq_length = input_ids.shape
+        elif inputs_embeds is not None:
+            batch_size, seq_length, _ = inputs_embeds.shape
+
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -1072,42 +1403,66 @@ class Qwen3TTSTalkerCodePredictorModel(Qwen3TTSPreTrainedModel):
             )
             use_cache = False
 
-        # TODO (joao): remove this exception in v4.56 -- it exists for users that try to pass a legacy cache
-        if not isinstance(past_key_values, (type(None), Cache)):
-            raise ValueError("The `past_key_values` should be either a `Cache` object or `None`.")
 
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
 
-        if use_cache and past_key_values is None:
-            past_key_values = DynamicCache()
+        ignore_cache_position = True  # Ignoring cache position for HPU
 
-        if cache_position is None:
-            past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
-            cache_position = torch.arange(
-                past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
+        past_seen_tokens = 0
+
+        if past_key_values is not None and use_cache:  # kept for BC (cache positions)
+            if flash_attn_kwargs.get("reuse_cache", False):
+                if isinstance(past_key_values[0][0], torch.Tensor):
+                    past_seen_tokens = past_key_values[0][0].shape[2]
+                else:
+                    past_seen_tokens = past_key_values[0][0][2]
+            else:
+                past_seen_tokens = past_key_values[0][0].shape[2]
+
+        if ignore_cache_position is False:
+            if cache_position is None:
+                past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
+                cache_position = torch.arange(
+                    past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
+                )
+            if position_ids is None and cache_position:
+                position_ids = cache_position.unsqueeze(0)
+        else:
+            if position_ids is None:
+                position_ids = torch.arange(
+                    past_seen_tokens, seq_length + past_seen_tokens, dtype=torch.long, device=inputs_embeds.device
+                )
+                position_ids = position_ids.unsqueeze(0)
+            cache_position = None
+
+        # HPU specific mask generation
+        if ignore_cache_position:
+            causal_mask = _gaudi_prepare_4d_causal_attention_mask(
+                attention_mask,
+                input_ids.shape if input_ids is not None else (batch_size, seq_length),
+                inputs_embeds,
+                past_seen_tokens,
             )
-
-        if position_ids is None:
-            position_ids = cache_position.unsqueeze(0)
-
-        # It may already have been prepared by e.g. `generate`
-        if not isinstance(causal_mask_mapping := attention_mask, dict):
-            # Prepare mask arguments
-            mask_kwargs = {
-                "config": self.config,
-                "input_embeds": inputs_embeds,
-                "attention_mask": attention_mask,
-                "cache_position": cache_position,
-                "past_key_values": past_key_values,
-            }
-            # Create the masks
-            causal_mask_mapping = {
-                "full_attention": create_causal_mask(**mask_kwargs),
-            }
-            # The sliding window alternating layers are not always activated depending on the config
-            if self.has_sliding_layers:
-                causal_mask_mapping["sliding_attention"] = create_sliding_window_causal_mask(**mask_kwargs)
+        else:
+            causal_mask = self._update_causal_mask(attention_mask, inputs_embeds, cache_position, past_seen_tokens)
+            # It may already have been prepared by e.g. `generate`
+            if not isinstance(causal_mask_mapping := attention_mask, dict):
+                # Prepare mask arguments
+                mask_kwargs = {
+                    "config": self.config,
+                    "input_embeds": inputs_embeds,
+                    "attention_mask": attention_mask,
+                    "cache_position": cache_position,
+                    "past_key_values": past_key_values,
+                }
+                # Create the masks
+                causal_mask_mapping = {
+                    "full_attention": create_causal_mask(**mask_kwargs),
+                }
+                # The sliding window alternating layers are not always activated depending on the config
+                if self.has_sliding_layers:
+                    causal_mask_mapping["sliding_attention"] = create_sliding_window_causal_mask(**mask_kwargs)
 
         hidden_states = inputs_embeds
 
@@ -1117,16 +1472,17 @@ class Qwen3TTSTalkerCodePredictorModel(Qwen3TTSPreTrainedModel):
         # decoder layers
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
-
-        for decoder_layer in self.layers[: self.config.num_hidden_layers]:
+        next_decoder_cache = ()
+        for layer_idx, decoder_layer in enumerate(self.layers[: self.config.num_hidden_layers]):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
-
+            past_key_value = None if past_key_values is None else past_key_values[layer_idx]
+            htcore.mark_step()
             layer_outputs = decoder_layer(
                 hidden_states,
-                attention_mask=causal_mask_mapping[decoder_layer.attention_type],
+                attention_mask=causal_mask,
                 position_ids=position_ids,
-                past_key_values=past_key_values,
+                past_key_value=past_key_value,
                 output_attentions=output_attentions,
                 use_cache=use_cache,
                 cache_position=cache_position,
@@ -1138,6 +1494,8 @@ class Qwen3TTSTalkerCodePredictorModel(Qwen3TTSPreTrainedModel):
 
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
+            if use_cache:
+                next_decoder_cache += (layer_outputs[-1],)
 
         hidden_states = self.norm(hidden_states)
 
@@ -1145,9 +1503,11 @@ class Qwen3TTSTalkerCodePredictorModel(Qwen3TTSPreTrainedModel):
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
 
+        next_cache = next_decoder_cache if use_cache else None
+
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
-            past_key_values=past_key_values if use_cache else None,
+            past_key_values=next_cache,
             hidden_states=all_hidden_states,
             attentions=all_self_attns,
         )
@@ -1163,6 +1523,7 @@ class Qwen3TTSTalkerCodePredictorModelForConditionalGeneration(Qwen3TTSPreTraine
     def __init__(self, config: Qwen3TTSTalkerCodePredictorConfig, talker_config: Qwen3TTSTalkerConfig):
         super().__init__(config)
         self.model = Qwen3TTSTalkerCodePredictorModel(config, talker_config.hidden_size)
+        self.model = wrap_in_hpu_graph(self.model)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.ModuleList(
             [nn.Linear(config.hidden_size, config.vocab_size, bias=False) for _ in range(config.num_code_groups - 1)]
@@ -1275,12 +1636,11 @@ class Qwen3TTSTalkerCodePredictorModelForConditionalGeneration(Qwen3TTSPreTraine
 
         # Prefill stage
         if inputs_embeds is not None and inputs_embeds.shape[1] > 1:
-            generation_steps = inputs_embeds.shape[1] - 2  # hidden & layer 0
+            generation_steps = kwargs.get("token_idx", 0) - 2  # hidden & layer 0
         # Generation stage
         else:
             inputs_embeds = self.model.get_input_embeddings()[generation_steps - 1](input_ids)
         inputs_embeds = self.small_to_mtp_projection(inputs_embeds)
-
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs: BaseModelOutputWithPast = self.model(
             input_ids=None,
@@ -1294,7 +1654,6 @@ class Qwen3TTSTalkerCodePredictorModelForConditionalGeneration(Qwen3TTSPreTraine
             cache_position=cache_position,
             **kwargs,
         )
-
         hidden_states = outputs.last_hidden_state
         logits = self.lm_head[generation_steps](hidden_states)
 
@@ -1317,6 +1676,92 @@ class Qwen3TTSTalkerCodePredictorModelForConditionalGeneration(Qwen3TTSPreTraine
         )
         model_kwargs["generation_steps"] = outputs.generation_steps
         return model_kwargs
+
+    def prepare_inputs_for_generation(
+        self,
+        input_ids,
+        past_key_values=None,
+        attention_mask=None,
+        inputs_embeds=None,
+        cache_position=None,
+        position_ids=None,
+        use_cache=True,
+        num_logits_to_keep=None,
+        token_idx=None,
+        **kwargs,
+    ):
+        reuse_cache = kwargs.get("reuse_cache")
+        bucket_internal = kwargs.get("bucket_internal")
+        if past_key_values is not None:
+            if token_idx is not None:
+                idx = token_idx + kwargs.get("inputs_embeds_offset", 0) - 1
+                input_ids = torch.index_select(input_ids, 1, idx)
+            else:
+                if inputs_embeds is not None:  # Exception 1
+                    input_ids = input_ids[:, -cache_position.shape[0] :]
+                elif (
+                    input_ids.shape[1] != cache_position.shape[0]
+                ):  # Default case (the "else", a no op, is Exception 2)
+                    input_ids = input_ids[:, cache_position]
+        elif (reuse_cache or bucket_internal) and token_idx is not None:
+            # KV cache is pre allocated with reuse cache or will be padded with bucket internal
+            # hence for the 1st token we can slice the inputs till token idx for the fwd pass.
+            input_ids = input_ids[:, :token_idx]
+            attention_mask = attention_mask[:, :token_idx]
+
+        if attention_mask is not None and position_ids is None:
+            # create position_ids on the fly for batch generation
+            position_ids = attention_mask.long().cumsum(-1) - 1
+            position_ids.masked_fill_(attention_mask == 0, 1)
+            if past_key_values:
+                if token_idx is not None:
+                    position_ids = torch.index_select(position_ids, 1, token_idx - 1)
+                else:
+                    position_ids = position_ids[:, -input_ids.shape[1] :]
+                # This `clone` call is needed to avoid recapturing cuda graphs with `torch.compile`'s  `mode="reduce-overhead`, as otherwise the input `position_ids` would have various stride during the decoding. Here, simply using `.contiguous()` is not sufficient as in the batch size = 1 case, `position_ids` is already contiguous but with varying stride which retriggers a capture.
+                position_ids = position_ids.clone(memory_format=torch.contiguous_format)
+
+        # keep cache_position implementation as None for HPU
+        cache_position = None
+
+        # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
+        if inputs_embeds is not None and past_key_values is None:
+            model_inputs = {"inputs_embeds": inputs_embeds}
+        else:
+            model_inputs = {"input_ids": input_ids.clone(memory_format=torch.contiguous_format)}
+
+        if num_logits_to_keep is not None:
+            model_inputs["num_logits_to_keep"] = num_logits_to_keep
+
+        if bucket_internal and reuse_cache is not True:
+            # update input with kv cache len to capture padding changes during internal bucketing without cache reuse
+            model_inputs["kv_cache_len"] = kwargs.get("kv_cache_len")
+
+        model_inputs.update(
+            {
+                "position_ids": position_ids,
+                "cache_position": cache_position,
+                "past_key_values": past_key_values,
+                "use_cache": use_cache,
+                "attention_mask": attention_mask,
+                "token_idx": token_idx,
+                "trim_logits": kwargs.get("trim_logits"),
+                "attn_softmax_bf16": kwargs.get("attn_softmax_bf16"),
+                "reuse_cache": reuse_cache,
+                "use_flex_attention": kwargs.get("use_flex_attention"),
+                "use_flash_attention": kwargs.get("use_flash_attention"),
+                "flash_attention_recompute": kwargs.get("flash_attention_recompute"),
+                "flash_attention_causal_mask": kwargs.get("flash_attention_causal_mask"),
+                "flash_attention_fast_softmax": kwargs.get("flash_attention_fast_softmax"),
+                "valid_sequence_lengths": kwargs.get("valid_sequence_lengths"),
+                "cache_idx": kwargs.get("cache_idx"),
+                "lazy_mode": kwargs.get("lazy_mode"),
+                "num_virtual_tokens": kwargs.get("num_virtual_tokens"),
+                "attn_batch_split": kwargs.get("attn_batch_split"),
+                "generation_steps": kwargs.get("generation_steps"),
+            }
+        )
+        return model_inputs
 
 
 @dataclass
@@ -1361,7 +1806,7 @@ class Qwen3TTSTalkerDecoderLayer(GradientCheckpointingLayer):
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[tuple[torch.Tensor]] = None,
+        past_key_value: Optional[tuple[torch.Tensor]] = None,
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
         cache_position: Optional[torch.LongTensor] = None,
@@ -1395,11 +1840,11 @@ class Qwen3TTSTalkerDecoderLayer(GradientCheckpointingLayer):
         hidden_states = self.input_layernorm(hidden_states)
 
         # Self Attention
-        hidden_states, self_attn_weights = self.self_attn(
+        hidden_states, self_attn_weights, present_key_value = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             position_ids=position_ids,
-            past_key_values=past_key_values,
+            past_key_value=past_key_value,
             output_attentions=output_attentions,
             use_cache=use_cache,
             cache_position=cache_position,
@@ -1420,6 +1865,9 @@ class Qwen3TTSTalkerDecoderLayer(GradientCheckpointingLayer):
 
         if output_attentions:
             outputs += (self_attn_weights,)
+
+        if use_cache:
+            outputs += (present_key_value,)
 
         return outputs
 
@@ -1475,6 +1923,10 @@ class Qwen3TTSTalkerModel(Qwen3TTSTalkerTextPreTrainedModel):
 
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
+        elif input_ids is not None:
+            batch_size, seq_length = input_ids.shape
+        elif inputs_embeds is not None:
+            batch_size, seq_length, _ = inputs_embeds.shape
 
         if self.gradient_checkpointing and self.training:
             if use_cache:
@@ -1483,17 +1935,18 @@ class Qwen3TTSTalkerModel(Qwen3TTSTalkerTextPreTrainedModel):
                 )
                 use_cache = False
 
-        if use_cache and past_key_values is None:
-            past_key_values = DynamicCache()
-
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
 
-        if cache_position is None:
-            past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
-            cache_position = torch.arange(
-                past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
-            )
+        past_seen_tokens = 0
+        if past_key_values is not None and use_cache:  # kept for BC (cache positions)
+            if flash_attn_kwargs.get("resue_cache", False):
+                if isinstance(past_key_values[0][0], torch.Tensor):
+                    past_seen_tokens = past_key_values[0][0].shape[2]
+                else:
+                    past_seen_tokens = past_key_values[0][0][2]
+            else:
+                past_seen_tokens = past_key_values[0][0].shape[2]
 
         # the hard coded `3` is for temporal, height and width.
         if position_ids is None:
@@ -1507,15 +1960,12 @@ class Qwen3TTSTalkerModel(Qwen3TTSTalkerTextPreTrainedModel):
         else:
             text_position_ids = position_ids[0]
         
-        mask_function = create_causal_mask if self.config.sliding_window is None else create_sliding_window_causal_mask
-        causal_mask = mask_function(
-            config=self.config,
-            input_embeds=inputs_embeds,
-            attention_mask=attention_mask,
-            cache_position=cache_position,
-            past_key_values=past_key_values,
-            position_ids=text_position_ids,
-        )
+        causal_mask = _gaudi_prepare_4d_causal_attention_mask(
+                attention_mask,
+                input_ids.shape if input_ids is not None else (batch_size, seq_length),
+                inputs_embeds,
+                past_seen_tokens,
+            )
 
         hidden_states = inputs_embeds
 
@@ -1525,29 +1975,39 @@ class Qwen3TTSTalkerModel(Qwen3TTSTalkerTextPreTrainedModel):
         # decoder layers
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
+        next_decoder_cache = ()
 
-        for decoder_layer in self.layers:
+        htcore.mark_step()
+
+        for layer_idx, decoder_layer in enumerate(self.layers):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
-
             layer_outputs = decoder_layer(
                 hidden_states,
                 attention_mask=causal_mask,
-                position_ids=text_position_ids,
-                past_key_values=past_key_values,
+                position_ids=position_ids,
+                past_key_value=None if past_key_values is None else past_key_values[layer_idx],
                 output_attentions=output_attentions,
                 use_cache=use_cache,
                 cache_position=cache_position,
                 position_embeddings=position_embeddings,
                 **flash_attn_kwargs,
             )
-
             hidden_states = layer_outputs[0]
-
+            htcore.mark_step()
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
 
+            if use_cache:
+                next_decoder_cache += (layer_outputs[-1],)
+
         hidden_states = self.norm(hidden_states)
+
+        next_cache = None
+        if use_cache:
+            next_cache = (
+                next_decoder_cache.to_legacy_cache() if isinstance(next_decoder_cache, Cache) else next_decoder_cache
+            )
 
         # add hidden states from the last decoder layer
         if output_hidden_states:
@@ -1555,9 +2015,9 @@ class Qwen3TTSTalkerModel(Qwen3TTSTalkerTextPreTrainedModel):
 
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
-            past_key_values=past_key_values,
             hidden_states=all_hidden_states,
             attentions=all_self_attns,
+            past_key_values=next_cache,
         )
 
 
@@ -1571,6 +2031,7 @@ class Qwen3TTSTalkerForConditionalGeneration(Qwen3TTSTalkerTextPreTrainedModel, 
     def __init__(self, config: Qwen3TTSTalkerConfig):
         super().__init__(config)
         self.model = Qwen3TTSTalkerModel(config)
+        self.model = wrap_in_hpu_graph(self.model)
         self.vocab_size = config.vocab_size
         self.text_projection = Qwen3TTSTalkerResizeMLP(
             config.text_hidden_size, config.text_hidden_size, config.hidden_size, config.hidden_act, bias=True
@@ -1668,6 +2129,7 @@ class Qwen3TTSTalkerForConditionalGeneration(Qwen3TTSTalkerTextPreTrainedModel, 
         # Generate
         else:
             last_id_hidden = self.get_input_embeddings()(input_ids)
+            self.code_predictor.generation_config.use_flash_attention = True
             predictor_result = self.code_predictor.generate(
                 inputs_embeds=torch.cat((past_hidden, last_id_hidden), dim=1),
                 max_new_tokens=self.config.num_code_groups - 1,
@@ -1677,6 +2139,8 @@ class Qwen3TTSTalkerForConditionalGeneration(Qwen3TTSTalkerTextPreTrainedModel, 
                 temperature=subtalker_temperature,
                 output_hidden_states=True,
                 return_dict_in_generate=True,
+                static_shapes=True,
+                lazy_mode=True,
             )
             codec_ids = torch.cat((input_ids, predictor_result.sequences), dim=-1)
             codec_hiddens = torch.cat(
@@ -1685,12 +2149,90 @@ class Qwen3TTSTalkerForConditionalGeneration(Qwen3TTSTalkerTextPreTrainedModel, 
                 dim=1,
             )
             inputs_embeds = codec_hiddens.sum(1, keepdim=True)
-
             if generation_step < trailing_text_hidden.shape[1]:
                 inputs_embeds = inputs_embeds + trailing_text_hidden[:, generation_step].unsqueeze(1)
             else:
                 inputs_embeds = inputs_embeds + tts_pad_embed
-        if attention_mask is not None:
+        outputs: BaseModelOutputWithPast = self.model(
+            input_ids=None,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            cache_position=cache_position,
+            **kwargs,
+        )
+        hidden_states = outputs.last_hidden_state
+        logits = self.codec_head(hidden_states)
+
+        loss = None
+        if labels is not None:
+            loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
+        htcore.mark_step()
+        if hidden_states.shape[1] == 1:
+            past_hidden = hidden_states
+        else:
+            token_idx = kwargs.get("token_idx", 1)
+            past_hidden = hidden_states[:, token_idx-1:token_idx, :]
+        return Qwen3TTSTalkerOutputWithPast(
+            loss=loss,
+            logits=logits,
+            past_key_values=outputs.past_key_values,
+            hidden_states=(outputs.hidden_states, codec_ids),
+            attentions=outputs.attentions,
+            past_hidden=past_hidden,
+            generation_step=generation_step + 1,
+            trailing_text_hidden=trailing_text_hidden,
+            tts_pad_embed=tts_pad_embed,
+        )
+
+    def pad_cache(self, past_key_values, target_length):
+        # pad the kv cache to target length
+        new_cache = []
+        for layer_cache in past_key_values:
+            key_cache, value_cache = layer_cache
+            pad_length = target_length - key_cache.shape[2]
+            if pad_length > 0:
+                key_cache = torch.nn.functional.pad(key_cache, (0, 0, 0, pad_length), value=0)
+                value_cache = torch.nn.functional.pad(value_cache, (0, 0, 0, pad_length), value=0)
+            new_cache.append((key_cache, value_cache))
+        return tuple(new_cache)
+
+    def prepare_inputs_for_generation(
+        self,
+        input_ids,
+        past_key_values=None,
+        attention_mask=None,
+        inputs_embeds=None,
+        cache_position=None,
+        position_ids=None,
+        use_cache=True,
+        num_logits_to_keep=None,
+        token_idx=None,
+        **kwargs,
+    ):
+        reuse_cache = kwargs.get("reuse_cache")
+        bucket_internal = kwargs.get("bucket_internal")
+        cache_idx = None
+        if past_key_values is not None:
+            if past_key_values[0][0].shape[2] != inputs_embeds.shape[1]:
+                past_key_values = self.pad_cache(past_key_values, inputs_embeds.shape[1])
+            if token_idx is not None:
+                idx = token_idx + kwargs.get("inputs_embeds_offset", 0) - 1
+                input_ids = torch.index_select(input_ids, 1, idx)
+                cache_idx = math.ceil(token_idx / 512) * 512
+            else:
+                if inputs_embeds is not None:  # Exception 1
+                    input_ids = input_ids[:, -cache_position.shape[0] :]
+                elif (
+                    input_ids.shape[1] != cache_position.shape[0]
+                ):  # Default case (the "else", a no op, is Exception 2)
+                    input_ids = input_ids[:, cache_position]
+
+        if attention_mask is not None and position_ids is None:
             if (
                 cache_position is None
                 or (cache_position is not None and cache_position[0] == 0)
@@ -1710,38 +2252,54 @@ class Qwen3TTSTalkerForConditionalGeneration(Qwen3TTSTalkerTextPreTrainedModel, 
                 position_ids = position_ids.add(delta)
                 position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
 
-        outputs: BaseModelOutputWithPast = self.model(
-            input_ids=None,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            past_key_values=past_key_values,
-            inputs_embeds=inputs_embeds,
-            use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            cache_position=cache_position,
-            **kwargs,
+        if past_key_values is None:
+            padded_idx = math.ceil(token_idx / 512) * 512
+            input_ids = input_ids[:, :padded_idx]
+            attention_mask = attention_mask[:, :padded_idx]
+            inputs_embeds = inputs_embeds[:,:padded_idx,:]
+            position_ids = position_ids[:,:,:padded_idx]
+        cache_position = None
+
+        # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
+        if inputs_embeds is not None and past_key_values is None:
+            model_inputs = {"inputs_embeds": inputs_embeds}
+        else:
+            model_inputs = {
+                "input_ids": input_ids.clone(memory_format=torch.contiguous_format)
+            }  # `contiguous()` needed for compilation use cases
+
+        if num_logits_to_keep is not None:
+            model_inputs["num_logits_to_keep"] = num_logits_to_keep
+
+        model_inputs.update(
+            {
+                "position_ids": position_ids.contiguous(),
+                "cache_position": cache_position,
+                "past_key_values": past_key_values,
+                "use_cache": use_cache,
+                "attention_mask": attention_mask,
+                "token_idx": token_idx,
+                "trim_logits": kwargs.get("trim_logits"),
+                "attn_softmax_bf16": kwargs.get("attn_softmax_bf16"),
+                "reuse_cache": reuse_cache,
+                "use_flash_attention": kwargs.get("use_flash_attention"),
+                "flash_attention_recompute": kwargs.get("flash_attention_recompute"),
+                "flash_attention_causal_mask": kwargs.get("flash_attention_causal_mask"),
+                "flash_attention_fast_softmax": kwargs.get("flash_attention_fast_softmax"),
+                "valid_sequence_lengths": kwargs.get("valid_sequence_lengths"),
+                "cache_idx": cache_idx, #kwargs.get("cache_idx"),
+                "lazy_mode": kwargs.get("lazy_mode"),
+                'trailing_text_hidden': kwargs.get("trailing_text_hidden"),
+                'tts_pad_embed': kwargs.get("tts_pad_embed"),
+                'subtalker_dosample': kwargs.get("subtalker_dosample"),
+                'subtalker_top_k': kwargs.get("subtalker_top_k"),
+                'subtalker_top_p': kwargs.get("subtalker_top_p"),
+                'subtalker_temperature': kwargs.get("subtalker_temperature"),
+                "past_hidden": kwargs.get("past_hidden"),
+                "generation_step": kwargs.get("generation_step"),
+            }
         )
-
-        hidden_states = outputs.last_hidden_state
-        logits = self.codec_head(hidden_states)
-
-        loss = None
-        if labels is not None:
-            loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
-
-
-        return Qwen3TTSTalkerOutputWithPast(
-            loss=loss,
-            logits=logits,
-            past_key_values=outputs.past_key_values,
-            hidden_states=(outputs.hidden_states, codec_ids),
-            attentions=outputs.attentions,
-            past_hidden=hidden_states[:, -1:, :],
-            generation_step=generation_step + 1,
-            trailing_text_hidden=trailing_text_hidden,
-            tts_pad_embed=tts_pad_embed,
-        )
+        return model_inputs
 
     def get_rope_index(
         self,
@@ -1813,7 +2371,7 @@ class Qwen3TTSTalkerForConditionalGeneration(Qwen3TTSTalkerTextPreTrainedModel, 
 class Qwen3TTSForConditionalGeneration(Qwen3TTSPreTrainedModel, GenerationMixin):
     config_class = Qwen3TTSConfig
 
-    def __init__(self, config: Qwen3TTSConfig):
+    def __init__(self, config: Qwen3TTSConfig, dtype="bfloat16"):
         super().__init__(config)
         self.config = config
 
@@ -2043,7 +2601,7 @@ class Qwen3TTSForConditionalGeneration(Qwen3TTSPreTrainedModel, GenerationMixin)
     ):
         talker_kwargs = {
             "max_new_tokens": max_new_tokens,
-            "min_new_tokens": 2,
+            # "min_new_tokens": 2,
             "do_sample": do_sample,
             "top_k": top_k,
             "top_p": top_p,
@@ -2064,7 +2622,6 @@ class Qwen3TTSForConditionalGeneration(Qwen3TTSPreTrainedModel, GenerationMixin)
             "output_hidden_states": getattr(kwargs, "output_hidden_states", True),
             "return_dict_in_generate": getattr(kwargs, "return_dict_in_generate", True)
         }
-        
         talker_input_embeds = [[] for _ in range(len(input_ids))]
 
         voice_clone_spk_embeds = None
@@ -2267,16 +2824,24 @@ class Qwen3TTSForConditionalGeneration(Qwen3TTSPreTrainedModel, GenerationMixin)
         padding_mask = arange_tensor >= lengths_tensor
         padded_hiddens[padding_mask] = pad_embedding_vector
         trailing_text_hiddens = padded_hiddens
-
+        htcore.mark_step()
         # forward
+        self.talker.generation_config.use_flash_attention = True
+        input_seq = talker_input_embeds.shape[1]
+        max_total_token = math.ceil((input_seq + talker_kwargs.get("max_new_tokens", 0)) / 512) * 512
+        talker_kwargs["max_new_tokens"] = max_total_token - input_seq
+        input_ids = torch.ones((batch_size, input_seq), device=talker_input_embeds.device, dtype=torch.long)
         talker_result = self.talker.generate(
+            input_ids=input_ids,
             inputs_embeds=talker_input_embeds,
             attention_mask=talker_attention_mask,
             trailing_text_hidden=trailing_text_hiddens,
             tts_pad_embed=tts_pad_embed,
+            static_shapes=True,
+            lazy_mode=True,
             **talker_kwargs,
         )
-
+        htcore.mark_step()
         talker_codes = torch.stack([hid[-1] for hid in talker_result.hidden_states if hid[-1] is not None], dim=1)
         talker_hidden_states = torch.cat([hid[0][-1][:, -1:] for hid in talker_result.hidden_states], dim=1)[:, :-1]
         
@@ -2288,7 +2853,6 @@ class Qwen3TTSForConditionalGeneration(Qwen3TTSPreTrainedModel, GenerationMixin)
         
         talker_codes_list = [talker_codes[i, :length, ] for i, length in enumerate(effective_lengths)]
         talker_hidden_states_list = [talker_hidden_states[i, :length, :] for i, length in enumerate(effective_lengths)]
-        
         return talker_codes_list, talker_hidden_states_list
 
 __all__ = [

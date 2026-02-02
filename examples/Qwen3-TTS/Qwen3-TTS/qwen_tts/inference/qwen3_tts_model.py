@@ -24,6 +24,33 @@ import librosa
 import numpy as np
 import soundfile as sf
 import torch
+import transformers
+import habana_frameworks.torch.gpu_migration
+from optimum.habana.transformers.modeling_utils import adapt_transformers_to_gaudi
+
+def needs_tensor_output(ignore_eos, eos_token_id) -> bool:
+    return not ignore_eos and eos_token_id is not None
+
+def gaudi_StoppingCriteriaList_call(
+    self, input_ids: torch.LongTensor, scores: torch.FloatTensor, **kwargs
+) -> Union[torch.BoolTensor, bool]:
+    kwargs["needs_tensor_output"] = needs_tensor_output(
+        kwargs.get("ignore_eos", True), kwargs.get("eos_token_id", None)
+    )
+    if kwargs["eos_token_id"] is not None:
+        input_ids = input_ids.cpu()
+    is_done = (
+        torch.full((input_ids.shape[0],), 0, device=input_ids.device, dtype=torch.int8)
+        if kwargs["needs_tensor_output"]
+        else False
+    )
+    for criteria in self:
+        is_done = is_done | criteria(input_ids, scores, **kwargs)
+    return is_done
+
+adapt_transformers_to_gaudi()
+transformers.generation.StoppingCriteriaList.__call__ = gaudi_StoppingCriteriaList_call
+
 from transformers import AutoConfig, AutoModel, AutoProcessor
 
 from ..core.models import Qwen3TTSConfig, Qwen3TTSForConditionalGeneration, Qwen3TTSProcessor
@@ -825,7 +852,6 @@ class Qwen3TTSModel:
                 instruct_ids.append(self._tokenize_texts([self._build_instruct_text(ins)])[0])
 
         gen_kwargs = self._merge_generate_kwargs(**kwargs)
-
         talker_codes_list, _ = self.model.generate(
             input_ids=input_ids,
             instruct_ids=instruct_ids,
@@ -834,7 +860,6 @@ class Qwen3TTSModel:
             non_streaming_mode=non_streaming_mode,
             **gen_kwargs,
         )
-
         wavs, fs = self.model.speech_tokenizer.decode([{"audio_codes": c} for c in talker_codes_list])
         return wavs, fs
 
