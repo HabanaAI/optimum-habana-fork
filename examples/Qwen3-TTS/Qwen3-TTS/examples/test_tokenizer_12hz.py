@@ -24,7 +24,7 @@ audio_2 = "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen3-TTS-Repo/tokeni
 
 # -------- Single input: wav path --------
 tokenizer_12hz = Qwen3TTSTokenizer.from_pretrained(
-    "Qwen/Qwen3-TTS-Tokenizer-12Hz",
+    "../Qwen3-TTS-Tokenizer-12Hz",
     device_map="cuda:0",
 )
 

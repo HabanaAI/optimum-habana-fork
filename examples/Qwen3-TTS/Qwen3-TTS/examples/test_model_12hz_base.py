@@ -33,7 +33,10 @@ def run_case(tts: Qwen3TTSModel, out_dir: str, case_name: str, call_fn):
 
     torch.cuda.synchronize()
     t1 = time.time()
-    print(f"[{case_name}] time: {t1 - t0:.3f}s, n_wavs={len(wavs)}, sr={sr}")
+    total_sample = 0
+    for w in wavs:
+        total_sample += len(w)
+    print(f"[{case_name}] time: {t1 - t0:.3f}s, n_wavs={len(wavs)}, sr={sr}, output:{total_sample/(t1-t0):.3f}sample/sec")
 
     for i, w in enumerate(wavs):
         sf.write(os.path.join(out_dir, f"{case_name}_{i}.wav"), w, sr)
@@ -41,20 +44,20 @@ def run_case(tts: Qwen3TTSModel, out_dir: str, case_name: str, call_fn):
 
 def main():
     device = "cuda:0"
-    MODEL_PATH = "Qwen/Qwen3-TTS-12Hz-1.7B-Base/"
+    MODEL_PATH = "../Qwen3-TTS-12Hz-1.7B-Base/"
     OUT_DIR = "qwen3_tts_test_voice_clone_output_wav"
     ensure_dir(OUT_DIR)
 
     tts = Qwen3TTSModel.from_pretrained(
         MODEL_PATH,
         device_map=device,
-        dtype=torch.bfloat16,
-        attn_implementation="flash_attention_2",
+        torch_dtype=torch.bfloat16,
+        attn_implementation="eager",
     )
 
     # Reference audio(s)
-    ref_audio_path_1 = "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen3-TTS-Repo/clone_2.wav"
-    ref_audio_path_2 = "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen3-TTS-Repo/clone_1.wav"
+    ref_audio_path_1 = "./clone_2.wav"
+    ref_audio_path_2 = "./clone_1.wav"
 
     ref_audio_single = ref_audio_path_1
     ref_audio_batch = [ref_audio_path_1, ref_audio_path_2]
@@ -91,6 +94,18 @@ def main():
     for xvec_only in [False, True]:
         mode_tag = "xvec_only" if xvec_only else "icl"
 
+        run_case(
+            tts, OUT_DIR, f"warmup_single",
+            lambda: tts.generate_voice_clone(
+                text=syn_text_single,
+                language=syn_lang_single,
+                ref_audio=ref_audio_single,
+                ref_text=ref_text_single,
+                x_vector_only_mode=xvec_only,
+                **common_gen_kwargs,
+            ),
+        )
+
         # Case 1: prompt single + synth single, direct
         run_case(
             tts, OUT_DIR, f"case1_promptSingle_synSingle_direct_{mode_tag}",
@@ -121,6 +136,18 @@ def main():
         run_case(
             tts, OUT_DIR, f"case1_promptSingle_synSingle_promptThenGen_{mode_tag}",
             _case1b,
+        )
+
+        run_case(
+            tts, OUT_DIR, f"warm_batch",
+            lambda: tts.generate_voice_clone(
+                text=syn_text_batch,
+                language=syn_lang_batch,
+                ref_audio=ref_audio_single,
+                ref_text=ref_text_single,
+                x_vector_only_mode=xvec_only,
+                **common_gen_kwargs,
+            ),
         )
 
         # Case 2: prompt single + synth batch, direct
