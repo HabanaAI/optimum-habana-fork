@@ -1,0 +1,66 @@
+version: '3.8'
+
+services:
+  songgeneration-api:
+    build:
+      context: ./SongGeneration
+      dockerfile: Dockerfile
+    image: songgeneration-api:latest
+    container_name: songgeneration-api
+    runtime: habana
+    command: /bin/bash /app/api_server.sh -p ${SERVER_PORT:-8485} -m /app/models/${MODEL_DIR:-songgeneration_base_new} -l /app/logs
+
+    environment:
+      - SERVER_PORT=${SERVER_PORT:-8485}
+      - MODEL_DIR=${MODEL_DIR:-songgeneration_base_new}
+      - LOG_DIR=/app/logs
+      - USE_FLASH_ATTN=${USE_FLASH_ATTN:-false}
+      - PT_HPU_LAZY_MODE=1
+      - HABANA_VISIBLE_DEVICES=${HABANA_VISIBLE_DEVICES:-all}
+      - OMPI_MCA_btl_vader_single_copy_mechanism=none
+      - MODELS_HOST_PATH=${MODELS_HOST_PATH:-./models}
+      - DATA_HOST_PATH=${DATA_HOST_PATH:-./data}
+      - CONTAINER_PORT=${SERVER_PORT:-8485}
+      - HOST_PORT=${SERVER_PORT:-8485}
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+
+    ports:
+      - "${SERVER_PORT:-8485}:${SERVER_PORT:-8485}"
+
+    volumes:
+      - ${MODELS_HOST_PATH:-./models}:/app/models:ro
+      - ${LOGS_HOST_PATH:-./logs}:/app/logs
+      - ${TOOLS_HOST_PATH:-./tools}:/app/tools:ro
+      - ${DATA_HOST_PATH:-./data}:/app/data
+      - /dev:/dev
+
+    devices:
+      - /dev:/dev
+
+    cap_add:
+      - SYS_NICE
+      - IPC_LOCK
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${SERVER_PORT:-8485}/v1/audio/song/query/auto_prompt_audio_type"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 180s
+      start_interval: 10s
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "3"
+
+    restart: unless-stopped
+
+    networks:
+      - songgeneration-network
+
+networks:
+  songgeneration-network:
+    driver: bridge

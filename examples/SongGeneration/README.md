@@ -4,7 +4,8 @@ cd SongGeneration
 wget https://media.githubusercontent.com/media/tencent-ailab/SongGeneration/refs/heads/main/tools/new_prompt.pt
 mv new_prompt.pt tools/
 pip install -r requirements-gaudi.txt
-pip install opea-comps==1.3
+# Note, if any conflict issue ,please try to use opea-comps==1.5
+pip install opea-comps==1.3 
 huggingface-cli download lglg666/SongGeneration-Runtime --local-dir ./runtime
 mv runtime/ckpt ckpt
 mv runtime/third_party third_party

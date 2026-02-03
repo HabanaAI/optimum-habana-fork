@@ -86,7 +86,7 @@ def generate_thread():
     OmegaConf.register_new_resolver("load_yaml", lambda x: list(OmegaConf.load(x)))
 
     # 解析命令行参数
-    ckpt_path="songgeneration_base_full"
+    ckpt_path="songgeneration_base_new"
     api_model = API_Model(ckpt_path=ckpt_path, use_flash_attn=False)
     # loop
     print("start pthread")
