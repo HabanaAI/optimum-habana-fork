@@ -1,0 +1,10 @@
+decord
+peft==0.17.0
+onnxruntime
+pandas
+matplotlib
+loguru
+sentencepiece
+moviepy
+hydra-core
+pytest

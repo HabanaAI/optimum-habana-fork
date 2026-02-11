@@ -1,0 +1,1428 @@
+From 0f596cfed57906b94397ff5acfb9d3bf9aa37718 Mon Sep 17 00:00:00 2001
+From: Mengkejiergeli Ba <mengkejiergeli.ba@intel.com>
+Date: Tue, 13 Jan 2026 14:31:39 +0000
+Subject: [PATCH 1/3] Add wan animate web UI demo
+
+---
+ app.py                                        | 1003 +++++++++++++++++
+ generate_UI.py                                |  273 +++++
+ .../animate/preprocess/preprocess_data.py     |   47 +-
+ .../animate/preprocess/process_pipepline.py   |   28 +-
+ wan/modules/animate/preprocess/sam_utils.py   |    2 +
+ 5 files changed, 1350 insertions(+), 3 deletions(-)
+ create mode 100644 app.py
+ create mode 100644 generate_UI.py
+
+diff --git a/app.py b/app.py
+new file mode 100644
+index 0000000..f0c81c0
+--- /dev/null
++++ b/app.py
+@@ -0,0 +1,1003 @@
++import argparse
++import spaces
++from huggingface_hub import snapshot_download, hf_hub_download
++import os
++import subprocess
++import importlib, site
++from PIL import Image
++import uuid
++import shutil
++import time
++import cv2
++import json
++import gradio as gr
++import sys
++import gc
++import numpy as np
++from gradio_modal import Modal
++
++def draw_points(img, points, labels):
++    out = img.copy()
++    for p, label in zip(points, labels):
++        x, y = int(p[0]), int(p[1])
++        color = (0, 255, 0) if label == 1.0 else (255, 0, 0)
++        out = cv2.circle(out, (x, y), 10, color, -1)
++    return out
++
++def compose_img_mask(img, color_mask, fac: float = 0.5):
++    out_f = fac * img / 255 + (1 - fac) * color_mask / 255
++    out_u = (255 * out_f).astype("uint8")
++    return out_u
++
++BASE = os.path.dirname(os.path.abspath(__file__))
++PREPROCESS_DIR = os.path.join(BASE, "wan", "modules", "animate", "preprocess")
++sys.path.append(PREPROCESS_DIR)
++
++# Re-discover all .pth/.egg-link files
++for sitedir in site.getsitepackages():
++    site.addsitedir(sitedir)
++
++# Clear caches so importlib will pick up new modules
++importlib.invalidate_caches()
++
++def sh(cmd): subprocess.check_call(cmd, shell=True)
++
++
++# try:
++
++    # sh("pip install flash-attn --no-build-isolation")
++    # print("Attempting to download and build sam2...")
++
++    # print("download sam")
++    # sam_dir = snapshot_download(repo_id="alexnasa/sam2")
++    # sam_dir = "/mnt/disk6/HF_models/sam2_C_cpu/sam2/"
++    # sh(f"cd {sam_dir} && python setup.py build_ext --inplace && pip install .")
++
++
++    # @spaces.GPU(duration=500)
++    # def install_sam():
++
++    #     os.environ["TORCH_CUDA_ARCH_LIST"] = "9.0"
++    #     sh(f"cd {sam_dir} && python setup.py build_ext --inplace && pip install -e .")
++
++    # print("install sam")
++    # install_sam()
++
++    # print("Attempting to download")
++
++    # print("download sam")
++    # snapshot_download(repo_id="alexnasa/sam2_C_cpu", local_dir=f"{os.getcwd()}" )
++
++    # tell Python to re-scan site-packages now that the egg-link exists
++#     import importlib, site; site.addsitedir(site.getsitepackages()[0]); importlib.invalidate_caches()
++
++#     print("sam2 installed successfully.")
++
++# except Exception as e:
++#     raise gr.Error("sam2 installation failed")
++
++import torch
++from preprocess_data import run as run_preprocess
++from preprocess_data import load_preprocess_models
++from process_pipepline import get_frames
++from sam2.build_sam import build_sam2, build_sam2_video_predictor
++from sam2.sam2_image_predictor import SAM2ImagePredictor
++
++print(f"Torch version: {torch.__version__}")
++
++os.environ["PROCESSED_RESULTS"] = f"{os.getcwd()}/processed_results"
++
++
++rc_mapping = {
++    "Video → Ref Image" : False,
++    "Video ← Ref Image" : True
++}
++
++
++def prune_prompt_dicts(pts_by_frame: dict, lbs_by_frame: dict):
++    """Remove frames with empty/invalid clicks; keep only frames where
++    points and labels both exist and lengths match (>0)."""
++    clean_pts, clean_lbs = {}, {}
++    for k, pts in pts_by_frame.items():
++        lbs = lbs_by_frame.get(k, [])
++        # normalize weird cases (None, np arrays with size 0, etc.)
++        pts_len = len(pts) if pts is not None else 0
++        lbs_len = len(lbs) if lbs is not None else 0
++        if pts_len > 0 and lbs_len > 0 and pts_len == lbs_len:
++            clean_pts[int(k)] = pts
++            clean_lbs[int(k)] = lbs
++    return clean_pts, clean_lbs
++
++
++def _ensure_frame_bucket(ps, frame_idx):
++    if "selections" not in ps:
++        ps["selections"] = {}
++    if frame_idx not in ps["selections"]:
++        ps["selections"][frame_idx] = {"points": [], "labels": []}
++
++
++def _get_points_labels_for_frame(ps, frame_idx):
++    if "selections" not in ps or frame_idx not in ps["selections"]:
++        return [], []
++    bucket = ps["selections"][frame_idx]
++    return bucket["points"], bucket["labels"]
++
++
++def preprocess_video(input_video_path, duration, session_id=None):
++
++    if session_id is None:
++        session_id = uuid.uuid4().hex
++
++    output_dir = os.path.join(os.environ["PROCESSED_RESULTS"], session_id)
++    os.makedirs(output_dir, exist_ok=True)
++
++    process_video_path = os.path.join(output_dir, 'input_video.mp4')
++
++    clip_and_set_fps(input_video_path, process_video_path, duration_s=duration)
++
++    return process_video_path
++
++
++def extract_audio_from_video_ffmpeg(video_path, output_wav_path, sample_rate=None):
++    """
++    Extracts the audio track from a video file and saves it as a WAV file.
++    Args:
++        video_path (str): Path to the input video file.
++        output_wav_path (str): Path to save the extracted WAV file.
++        sample_rate (int, optional): Output sample rate (e.g., 16000).
++                                     If None, keep the original.
++    """
++    cmd = [
++        'ffmpeg',
++        '-i', video_path,             # Input video
++        '-vn',                        # Disable video
++        '-acodec', 'pcm_s16le',       # 16-bit PCM (WAV format)
++        '-ac', '1',                   # Mono channel (use '2' for stereo)
++        '-y',                         # Overwrite output
++        '-loglevel', 'error'          # Cleaner output
++    ]
++
++    # Only add the sample rate option if explicitly specified
++    if sample_rate is not None:
++        cmd.extend(['-ar', str(sample_rate)])
++
++    cmd.append(output_wav_path)
++
++    try:
++        subprocess.run(cmd, check=True, capture_output=True, text=True)
++        return True
++    except subprocess.CalledProcessError as e:
++        return False
++
++
++def combine_video_and_audio_ffmpeg(video_path, audio_path, output_video_path):
++    """
++    Combines a silent MP4 video with a WAV audio file into a single MP4 with sound.
++    Args:
++        video_path (str): Path to the silent video file.
++        audio_path (str): Path to the WAV audio file.
++        output_video_path (str): Path to save the output MP4 with audio.
++    """
++    cmd = [
++        'ffmpeg',
++        '-i', video_path,            # Input video
++        '-i', audio_path,            # Input audio
++        '-c:v', 'copy',              # Copy video without re-encoding
++        '-shortest',                 # Stop when the shortest stream ends
++        '-y',                        # Overwrite output
++        '-loglevel', 'error',
++        output_video_path
++    ]
++
++    try:
++        subprocess.run(cmd, check=True, capture_output=True, text=True)
++    except subprocess.CalledProcessError as e:
++        raise RuntimeError(f"ffmpeg failed ({e.returncode}): {e.stderr.strip()}")
++
++
++def clip_and_set_fps(input_video_path, output_video_path, duration_s=2, target_fps=30):
++    """
++    Trim to duration_s and (optionally) change FPS, without resizing.
++    - If target_fps is None, keeps the original FPS.
++    - Re-encodes video when changing FPS for predictable timing.
++    """
++    vf = []
++    if target_fps is not None:
++        vf.append(f"fps={target_fps}")
++    vf_arg = ",".join(vf) if vf else None
++
++    cmd = [
++        "ffmpeg",
++        "-nostdin",
++        "-hide_banner",
++        "-y",
++        "-i", input_video_path,
++        "-t", str(duration_s),
++    ]
++
++    if vf_arg:
++        cmd += ["-vf", vf_arg]
++
++    cmd += [
++        output_video_path,
++    ]
++#         "-preset", "veryfast",
++#         "-crf", "18",
++#         "-movflags", "+faststart",
++#         "-c:a", "aac",
++    try:
++        subprocess.run(cmd, check=True, capture_output=True, text=True)
++    except subprocess.CalledProcessError as e:
++        raise RuntimeError(f"ffmpeg failed ({e.returncode}): {e.stderr.strip()}")
++
++
++def is_portrait(video_file):
++
++    # Get video information
++    cap = cv2.VideoCapture(video_file)
++    if not cap.isOpened():
++        error_msg = "Cannot open video file"
++        gr.Warning(error_msg)
++
++    orig_frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
++    orig_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
++    orig_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
++
++    cap.release()
++
++    return orig_width < orig_height
++
++
++def calculate_time_required(max_duration_s, rc_bool):
++
++    if max_duration_s == -2:
++        return None
++    if max_duration_s == -1:
++        return 75
++    if max_duration_s == 1 or max_duration_s == 2:
++        # return 120 # gpu
++        return 300
++    elif max_duration_s == 3 or  max_duration_s == 4:
++        return 800
++    elif max_duration_s == 5 or  max_duration_s == 6:
++        return 1200
++    elif max_duration_s == 7 or  max_duration_s == 8:
++        return 1500
++    elif max_duration_s == 9 or  max_duration_s == 10:
++        return 1800
++
++
++def get_display_time_required(max_duration_s, rc_bool):
++    # the 30 seconds extra is just for saftey in case of a unexpected slow down
++    return calculate_time_required(max_duration_s, rc_bool)
++
++
++def update_time_required(max_duration_s, rc_str):
++
++    rc_bool = rc_mapping[rc_str]
++
++    duration_s = get_display_time_required(max_duration_s, rc_bool)
++    duration_m = duration_s / 60
++
++    return gr.update(value=f"⌚ Gaudi Required: ~{duration_s}.0s ({duration_m:.1f} mins)")
++
++
++def get_duration(input_video, max_duration_s, edited_frame, rc_bool, pts_by_frame, lbs_by_frame, session_id, progress):
++    return calculate_time_required(max_duration_s, rc_bool)
++
++
++def extract_frames(input_video, max_duration_s, session_id=None):
++    if not input_video:
++        raise gr.Error("Please provide an video")
++
++    if session_id is None:
++        session_id = uuid.uuid4().hex
++
++    processed_video = preprocess_video(input_video, max_duration_s, session_id)
++
++    if is_portrait(processed_video):
++        size = (480, 832)
++    else:
++        size = (832, 480)
++
++    frames = get_frames(processed_video, size)
++
++    output_dir = os.path.join(os.environ["PROCESSED_RESULTS"], session_id)
++    os.makedirs(output_dir, exist_ok=True)
++
++    preprocess_dir = os.path.join(output_dir, "preprocess_dir")
++    os.makedirs(preprocess_dir, exist_ok=True)
++
++    sam_frame_path = os.path.join(preprocess_dir, "sam_frame.png")
++    Image.fromarray(frames[0]).save(sam_frame_path)
++
++    slider = gr.update(minimum=0, maximum=len(frames) - 1, value=0, step=1)
++
++    return sam_frame_path, frames, slider
++
++
++def set_positive(prompt_state):
++    prompt_state["cur_label_val"] = 1.0
++    return prompt_state
++
++
++def set_negative(prompt_state):
++    prompt_state["cur_label_val"] = 0.0
++    return prompt_state
++
++
++def set_sam2_mode(prompt_state, mode):
++    prompt_state["cur_label_val"] = 1.0 if mode == "✔️Include" else 0.0
++    return prompt_state
++
++
++def set_reset(prompt_state):
++    prompt_state["selections"] = {}
++    prompt_state["active_frame"] = 0
++    prompt_state["cur_label_val"] = 1.0
++    return prompt_state, gr.update(value="✔️Include")
++
++
++def get_select_coords(prompt_state, frames, frame_idx, img_path, evt: gr.SelectData):
++    img = np.array(frames[frame_idx])
++
++    # y, x from the event
++    i = evt.index[1]
++    j = evt.index[0]
++
++    # make sure we're editing the correct frame
++    prompt_state["active_frame"] = int(frame_idx)
++    binary_mask, prompt_state = add_point(prompt_state, frames, frame_idx, i, j)
++
++    colored_mask = np.zeros_like(img)
++    colored_mask[binary_mask] = [0, 255, 0]
++    out_u = compose_img_mask(img, colored_mask, 0.5)
++
++    pts, lbs = _get_points_labels_for_frame(prompt_state, frame_idx)
++    overlaid = draw_points(out_u, pts, lbs)
++    return overlaid, prompt_state
++
++
++def add_point(prompt_state, frames, frame_idx, i, j):
++    _ensure_frame_bucket(prompt_state, frame_idx)
++    prompt_state["selections"][frame_idx]["points"].append([int(j), int(i)])
++    prompt_state["selections"][frame_idx]["labels"].append(prompt_state["cur_label_val"])
++
++    pts, lbs = _get_points_labels_for_frame(prompt_state, frame_idx)
++    mask, logit, prompt_state = get_sam_mask(
++        prompt_state, frames, frame_idx,
++        np.array(pts, dtype=np.float32),
++        np.array(lbs, dtype=np.int32)
++    )
++    return mask, prompt_state
++
++
++def open_modal(input_video, edited_frame):
++
++    if not input_video:
++        raise gr.Error("Please provide an video")
++
++    if not edited_frame:
++        raise gr.Error("Please provide an image")
++
++    return Modal(visible=False)
++
++
++def get_sam_mask(prompt_state, frames, frame_idx, input_points, input_labels):
++    """
++    :param frame_idx: int
++    :param input_points: (N, 2) float32
++    :param input_labels: (N,)   int32
++    :return: (H, W) boolean mask, (H, W) float32 logits (or None), prompt_state
++    """
++
++    model_cfg = "sam2_hiera_l.yaml"
++    ckpt_path = "/mnt/disk6/HF_models/Wan2.2-Animate-14B/process_checkpoint"
++    sam2_checkpoint_path = os.path.join(ckpt_path, 'sam2/sam2_hiera_large.pt')
++
++    video_predictor_local = build_sam2_video_predictor(model_cfg, sam2_checkpoint_path, device="cpu")
++    inference_state = video_predictor_local.init_state(images=np.array(frames), device="cpu")
++
++    # Run point prompt
++    _, out_obj_ids, out_mask_logits = video_predictor_local.add_new_points(
++        inference_state=inference_state,
++        frame_idx=int(frame_idx),
++        obj_id=0,
++        points=input_points,
++        labels=input_labels,
++    )
++
++    # Get logits for object 0 as numpy
++    logits = out_mask_logits[0].detach().cpu().numpy()  # shape could be (H,W) or (1,H,W)
++    if logits.ndim == 3:
++        logits = logits.squeeze(0)
++
++    # --- Normalize to the frame's size (critical) ---
++    H, W = frames[frame_idx].shape[:2]
++    if logits.shape != (H, W):
++        # Resize logits to (W,H); use nearest for crisp mask boundaries
++        # (If you want smoother logits, you can use INTER_LINEAR then threshold)
++        resized = cv2.resize(logits, (W, H), interpolation=cv2.INTER_NEAREST)
++        logits = resized.astype(np.float32)
++
++    # Threshold -> boolean mask
++    mask = (logits > 0.0)
++
++    return mask, logits, prompt_state
++
++
++css = """
++    #col-container {
++        margin: 0 auto;
++        max-width: 1600px;
++    }
++    #modal-container {
++    width: 100vw;            /* Take full viewport width */
++    height: 100vh;           /* Take full viewport height (optional) */
++    display: flex;
++    justify-content: center; /* Center content horizontally */
++    align-items: center;     /* Center content vertically if desired */
++    }
++    #modal-content {
++    width: 100%;
++    max-width: 700px;         /* Limit content width */
++    margin: 0 auto;
++    border-radius: 8px;
++    padding: 1.5rem;
++    }
++    #step-column {
++        padding: 10px;
++        border-radius: 8px;
++        box-shadow: var(--card-shadow);
++        margin: 10px;
++    }
++    #col-showcase {
++        margin: 0 auto;
++        max-width: 1100px;
++    }
++    .button-gradient {
++        background: linear-gradient(45deg, rgb(255, 65, 108), rgb(255, 75, 43), rgb(255, 155, 0), rgb(255, 65, 108)) 0% 0% / 400% 400%;
++        border: none;
++        padding: 14px 28px;
++        font-size: 16px;
++        font-weight: bold;
++        color: white;
++        border-radius: 10px;
++        cursor: pointer;
++        transition: 0.3s ease-in-out;
++        animation: 2s linear 0s infinite normal none running gradientAnimation;
++        box-shadow: rgba(255, 65, 108, 0.6) 0px 4px 10px;
++    }
++    .toggle-container {
++    display: inline-flex;
++    background-color: #ffd6ff;  /* light pink background */
++    border-radius: 9999px;
++    padding: 4px;
++    position: relative;
++    width: fit-content;
++    font-family: sans-serif;
++    }
++    .toggle-container input[type="radio"] {
++    display: none;
++    }
++    .toggle-container label {
++    position: relative;
++    z-index: 2;
++    flex: 1;
++    text-align: center;
++    font-weight: 700;
++    color: #4b2ab5; /* dark purple text for unselected */
++    padding: 6px 22px;
++    border-radius: 9999px;
++    cursor: pointer;
++    transition: color 0.25s ease;
++    }
++    /* Moving highlight */
++    .toggle-highlight {
++    position: absolute;
++    top: 4px;
++    left: 4px;
++    width: calc(50% - 4px);
++    height: calc(100% - 8px);
++    background-color: #4b2ab5; /* dark purple background */
++    border-radius: 9999px;
++    transition: transform 0.25s ease;
++    z-index: 1;
++    }
++    /* When "True" is checked */
++    #true:checked ~ label[for="true"] {
++    color: #ffd6ff; /* light pink text */
++    }
++    /* When "False" is checked */
++    #false:checked ~ label[for="false"] {
++    color: #ffd6ff; /* light pink text */
++    }
++    /* Move highlight to right side when False is checked */
++    #false:checked ~ .toggle-highlight {
++    transform: translateX(100%);
++    }
++    """
++
++def set_input_image(prompt_state, frames, frame_index, session_id):
++    output_dir = os.path.join(os.environ["PROCESSED_RESULTS"], session_id)
++    os.makedirs(output_dir, exist_ok=True)
++
++    preprocess_dir = os.path.join(output_dir, "preprocess_dir")
++    os.makedirs(preprocess_dir, exist_ok=True)
++
++    sam_frame_path = os.path.join(preprocess_dir, "sam_frame.png")
++
++    # clamp/check
++    if frame_index is None or frame_index < 0 or (frames and frame_index >= len(frames)):
++        frame_index = 0
++    frame_index = int(frame_index)
++
++    # mark active frame and ensure bucket exists
++    prompt_state["active_frame"] = frame_index
++    _ensure_frame_bucket(prompt_state, frame_index)
++
++    # base image
++    img = np.array(frames[frame_index])
++
++    # fetch any saved selections for this frame
++    pts, lbs = _get_points_labels_for_frame(prompt_state, frame_index)
++
++    if len(pts) > 0:
++        # recompute mask from saved clicks on this frame
++        mask, _logits, _ = get_sam_mask(
++            prompt_state,
++            frames,
++            frame_index,
++            np.array(pts, dtype=np.float32),
++            np.array(lbs, dtype=np.int32),
++        )
++
++        # overlay mask + points
++        colored_mask = np.zeros_like(img)
++        colored_mask[mask.astype(bool)] = [0, 255, 0]
++        out_u = compose_img_mask(img, colored_mask, 0.5)
++        overlaid = draw_points(out_u, pts, lbs)
++        Image.fromarray(overlaid).save(sam_frame_path)
++    else:
++        # no selections yet on this frame → show plain frame
++        Image.fromarray(img).save(sam_frame_path)
++
++    return sam_frame_path, prompt_state
++
++
++def open_modal(input_video, edited_frame):
++
++    if not input_video:
++        raise gr.Error("Please provide an video")
++
++    if not edited_frame:
++        raise gr.Error("Please provide an image")
++
++    return Modal(visible=True)
++
++
++def log_change(log_source, session_id, meta_data = None):
++
++    if not meta_data:
++        print(f'{session_id} changed {log_source}')
++    else:
++        print(f'{session_id} changed {log_source} with {meta_data}')
++
++
++def start_session(request: gr.Request):
++
++    return request.session_hash
++
++
++def cleanup(request: gr.Request):
++
++    sid = request.session_hash
++
++    if sid:
++        print(f"{sid} left")
++        d1 = os.path.join(os.environ["PROCESSED_RESULTS"], sid)
++        shutil.rmtree(d1, ignore_errors=True)
++
++
++def run_gradio():
++    # Create pipe
++    cp_size = 8
++    for i in range(cp_size):
++        pipename = f"animate_fifo_{i}"
++        if os.path.exists(pipename):
++            os.unlink(pipename)
++        os.mkfifo(pipename)
++
++    pipename = "animate_fifo_result"
++    if not os.path.exists(pipename):
++        os.mkfifo(pipename)
++
++    # Open pipe
++    pipelist = []
++    for i in range(cp_size):
++        pipename = f"animate_fifo_{i}"
++        pipelist.append(os.open(pipename, os.O_WRONLY))
++    result_pipe = os.open("animate_fifo_result", os.O_RDONLY)
++
++    def broadcast_args(message):
++        for pipe in pipelist:
++            os.write(pipe, message.encode())
++
++    def read_result():
++        return os.read(result_pipe, 16384).decode()
++
++    @spaces.GPU(duration=get_duration)
++    def _preprocess(input_video, max_duration_s, edited_frame, rc_bool, pts_by_frame, lbs_by_frame, session_id=None, progress=gr.Progress(track_tqdm=True)):
++        if session_id is None:
++            session_id = uuid.uuid4().hex
++
++        output_dir = os.path.join(os.environ["PROCESSED_RESULTS"], session_id)
++        os.makedirs(output_dir, exist_ok=True)
++
++        preprocess_dir = os.path.join(output_dir, "preprocess_dir")
++        os.makedirs(preprocess_dir, exist_ok=True)
++
++        start_preprocess = time.time()
++
++        if is_portrait(input_video):
++            w, h = 480, 832
++        else:
++            w, h = 832, 480
++
++        if max_duration_s == -1:
++            if is_portrait(input_video):
++                w, h = 360, 640
++            else:
++                w, h = 640, 360
++        elif max_duration_s == -2:
++            if is_portrait(input_video):
++                w, h = 240, 426
++            else:
++                w, h = 426, 240
++
++        tag_string = "replace_flag" if rc_bool else "retarget_flag"
++
++        preprocess_model = load_preprocess_models(max_duration_s)
++
++        # NOTE: run_preprocess now receives dicts keyed by frame_idx.
++        # Update run_preprocess(...) accordingly in your preprocess_data.py.
++        run_preprocess(
++            preprocess_model, input_video, edited_frame, preprocess_dir,
++            w, h, tag_string, pts_by_frame, lbs_by_frame
++        )
++
++        preprocess_time = time.time() - start_preprocess
++        print(f"Preprocess took {preprocess_time:.2f} seconds")
++
++        gc.collect()
++
++        return preprocess_dir
++
++
++    def animate_scene(input_video, max_duration_s, edited_frame, rc_str,
++                  prompt_state=None, session_id=None,
++                  progress=gr.Progress(track_tqdm=True)):
++
++        # Build dicts keyed by frame index, or empty if none
++        if not prompt_state or "selections" not in prompt_state:
++            pts_by_frame, lbs_by_frame = {}, {}
++        else:
++            pts_by_frame = {int(k): v["points"] for k, v in prompt_state["selections"].items()}
++            lbs_by_frame = {int(k): v["labels"] for k, v in prompt_state["selections"].items()}
++
++        # 🧹 prune empties/invalids
++        pts_by_frame, lbs_by_frame = prune_prompt_dicts(pts_by_frame, lbs_by_frame)
++
++        # If nothing left, treat as vanilla run (no prompts)
++        if not pts_by_frame:
++            pts_by_frame, lbs_by_frame = {}, {}
++
++
++        if not input_video:
++            raise gr.Error("Please provide an video")
++        if not edited_frame:
++            raise gr.Error("Please provide an image")
++
++        if session_id is None:
++            session_id = uuid.uuid4().hex
++
++        input_video = preprocess_video(input_video, max_duration_s, session_id)
++        rc_bool = rc_mapping[rc_str]
++
++        output_dir = os.path.join(os.environ["PROCESSED_RESULTS"], session_id)
++        os.makedirs(output_dir, exist_ok=True)
++
++        input_audio_path = os.path.join(output_dir, 'input_audio.wav')
++        audio_extracted = extract_audio_from_video_ffmpeg(input_video, input_audio_path)
++
++        edited_frame_png = os.path.join(output_dir, 'edited_frame.png')
++        Image.open(edited_frame).save(edited_frame_png)
++
++        print(f'{session_id} inference started with {rc_str} and duration of {max_duration_s}')
++
++        preprocess_dir = _preprocess(
++            input_video, max_duration_s, edited_frame_png, rc_bool,
++            pts_by_frame, lbs_by_frame, session_id, progress
++        )
++
++        preprocess_dir = os.path.join(output_dir, "preprocess_dir")
++        pose_video = os.path.join(preprocess_dir, 'src_pose.mp4')
++
++        if rc_bool:
++            mask_video = os.path.join(preprocess_dir, 'src_mask.mp4')
++            bg_video   = os.path.join(preprocess_dir, 'src_bg.mp4')
++            face_video = os.path.join(preprocess_dir, 'src_face.mp4')
++        else:
++            mask_video = pose_video
++            bg_video   = pose_video
++            face_video = os.path.join(preprocess_dir, 'src_face.mp4')
++
++        args = {}
++        args['save_file'] = output_dir + '/final_result.mp4'
++        args['process_dir'] = preprocess_dir
++        args['replace_flag'] = rc_bool
++
++        broadcast_args(json.dumps(args))
++        result_video = read_result()
++
++        if audio_extracted:
++            output_video = output_dir + '/final_result_with_audio.mp4'
++            combine_video_and_audio_ffmpeg(result_video, input_audio_path, output_video)
++        else:
++            output_video = result_video
++
++        print(f"task for {session_id} finalised")
++        return output_video, pose_video, bg_video, mask_video, face_video
++
++    with gr.Blocks(css=css, title="Wan 2.2 Animate --replace", theme=gr.themes.Ocean()) as demo:
++
++        session_state = gr.State()
++
++        prompt_state = gr.State({
++            "selections": {  # frame_idx -> {"points": [[x,y],...], "labels": [0/1,...]}
++                # e.g. 0: {"points": [], "labels": []}
++            },
++            "active_frame": 0,  # which frame the user is editing/adding points to
++            "cur_label_val": 1.0,
++        })
++
++        frames = gr.State()
++
++        demo.load(start_session, outputs=[session_state])
++
++        with gr.Column(elem_id="col-container"):
++            with gr.Row():
++                gr.HTML(
++                    """
++                    <div style="text-align: center;">
++                        <p style="font-size:16px; display: inline; margin: 0;">
++                            <strong>Wan2.2-Animate-14B </strong>
++                        </p>
++                        <a href="https://huggingface.co/Wan-AI/Wan2.2-Animate-14B" style="display: inline-block; vertical-align: middle; margin-left: 0.5em;">
++                            [Model]
++                        </a>
++                    </div>
++                    """
++                )
++            with gr.Row():
++                with gr.Column(elem_id="step-column"):
++                    gr.HTML("""
++                    <div>
++                        <span style="font-size: 24px;">1. Upload a Video</span><br>
++                    </div>
++                    """)
++                    input_video = gr.Video(label="Input Video", height=512)
++
++                    max_duration_slider = gr.Slider(2, 10, 2, step=1, label="Max Duration", visible=False)
++
++                    gr.Examples(
++                        examples=[
++
++                            [
++                                "./examples/wan_animate/demo/martialart.mp4",
++                            ],
++
++                            [
++                                "./examples/wan_animate/demo/test_example.mp4",
++                            ],
++
++                            [
++                                "./examples/wan_animate/demo/dream.mp4",
++                            ],
++
++                        ],
++                        inputs=[input_video],
++                        cache_examples=False,
++                    )
++
++                with gr.Column(elem_id="step-column"):
++                    gr.HTML("""
++                    <div>
++                        <span style="font-size: 24px;">2. Upload a Ref Image</span><br>
++                    </div>
++                    """)
++                    edited_frame = gr.Image(label="Ref Image", type="filepath", height=512)
++
++                    default_replace_string = "Video ← Ref Image"
++                    replace_character_string = gr.Radio(
++                        ["Video → Ref Image", "Video ← Ref Image"], value=default_replace_string, show_label=False
++                    )
++                    replace_mode = rc_mapping[default_replace_string]
++
++                    gr.Examples(
++                        examples=[
++
++                            [
++                                "./examples/wan_animate/demo/ali.png",
++                            ],
++
++                            [
++                                "./examples/wan_animate/demo/james.png",
++                            ],
++
++
++                            [
++                                "./examples/wan_animate/demo/amber.png",
++                            ],
++
++                            [
++                                "./examples/wan_animate/demo/ella.png",
++                            ],
++
++                        ],
++                        inputs=[edited_frame],
++                        cache_examples=False,
++                    )
++
++                with gr.Column(elem_id="step-column"):
++                    gr.HTML("""
++                    <div>
++                        <span style="font-size: 24px;">3. Wan Animate it!</span><br>
++                    </div>
++                    """)
++                    output_video = gr.Video(label="Edited Video", height=512)
++                    duration_s = get_display_time_required(2, default_replace_string)
++                    duration_m = duration_s / 60
++
++                    time_required = f"⌚ Gaudi Required: ~{duration_s}.0s ({duration_m:.1f} mins)"
++
++                    time_required = gr.Text(value=time_required, show_label=False, visible=True)
++
++                    action_button = gr.Button("Wan Animate 🦆", variant='primary', elem_classes="button-gradient")
++
++                    with gr.Accordion("Advanced 🎭", open=False, visible=True):
++                        with gr.Row():
++                            adv_masking = gr.Button("Wan Animate PRO ⚙️")
++                        with gr.Row():
++                            pose_video = gr.Video(label="Pose Video")
++                            if replace_mode:
++                                bg_video = gr.Video(label="Background Video")
++                        with gr.Row():
++                            face_video = gr.Video(label="Face Video")
++                            if replace_mode:
++                                mask_video = gr.Video(label="Mask Video")
++
++            with gr.Row():
++                with gr.Column(elem_id="col-showcase"):
++
++                    gr.Examples(
++                        examples=[
++
++                            [
++                                "./examples/wan_animate/demo/okay.mp4",
++                                2,
++                                "./examples/wan_animate/demo/amber.png",
++                                "Video ← Ref Image"
++                            ],
++
++                            [
++                                "./examples/wan_animate/demo/rachel.mp4",
++                                2,
++                                "./examples/wan_animate/demo/james.png",
++                                "Video ← Ref Image"
++                            ],
++
++                            [
++                                "./examples/wan_animate/demo/test_example.mp4",
++                                2,
++                                "./examples/wan_animate/demo/ella.png",
++                                "Video ← Ref Image"
++                            ],
++
++                            [
++                                "./examples/wan_animate/demo/desi.mp4",
++                                2,
++                                "./examples/wan_animate/demo/desi.png",
++                                "Video ← Ref Image"
++                            ],
++
++
++                            [
++                                "./examples/wan_animate/demo/kat.mp4",
++                                2,
++                                "./examples/wan_animate/demo/cat.png",
++                                "Video → Ref Image"
++                            ],
++
++                            [
++                                "./examples/wan_animate/demo/kat.mp4",
++                                2,
++                                "./examples/wan_animate/demo/anime.png",
++                                "Video → Ref Image"
++                            ],
++
++
++                            [
++                                "./examples/wan_animate/demo/paul.mp4",
++                                2,
++                                "./examples/wan_animate/demo/man.png",
++                                "Video → Ref Image"
++                            ],
++
++                        ],
++                        inputs=[input_video, max_duration_slider, edited_frame, replace_character_string],
++                        outputs=[output_video, pose_video, bg_video, mask_video, face_video],
++                        fn=animate_scene,
++                        cache_examples=False,
++                    )
++
++        with Modal(visible=False, elem_id="modal-container") as modal:
++            with gr.Column(elem_id="modal-content"):
++                with gr.Row():
++                    gr.Markdown("## WAN Animate PRO")
++                    gr.Markdown("Choose a frame and adjust the relevant mask, by including and excluding points, to propagate across frames. If no mask is selected, one will be chosen automatically.")
++                    gr.Markdown("")
++                with gr.Row():
++                    max_duration_slider_2 = gr.Slider(2, 10, 2, step=1, label="Max Duration", visible=True)
++                    frame_index = gr.Slider(label="Frame Index", minimum=0, maximum=0, value=0, step=1,)
++                with gr.Row():
++                    first_frame = gr.Image(type="filepath", height=384, interactive=False)
++                with gr.Row():
++
++                    with gr.Column():
++                        sam2_mode_select = gr.Radio(
++                            ["✔️Include", "❌Exclude"], value="✔️Include", show_label=False
++                        )
++
++                    with gr.Column():
++
++                        confirm_sam2_points = gr.Button("Wan Animate 🦆", variant='primary', elem_classes="button-gradient")
++                        cancel_button = gr.Button("Cancel")
++
++        action_button.click(fn=animate_scene, inputs=[input_video, max_duration_slider, edited_frame, replace_character_string, prompt_state, session_state], outputs=[output_video, pose_video, bg_video, mask_video, face_video])
++        replace_character_string.change(update_time_required, inputs=[max_duration_slider, replace_character_string], outputs=[time_required]) \
++            .then(log_change, inputs=[gr.State("mode"), session_state, replace_character_string])
++
++        def sync_slider(val):
++            return val
++
++        max_duration_slider_2.change(sync_slider, max_duration_slider_2, max_duration_slider)
++        max_duration_slider.change(log_change, inputs=[gr.State("slider"), session_state, max_duration_slider]) \
++            .then(update_time_required, inputs=[max_duration_slider, replace_character_string], outputs=[time_required]) \
++            .then(extract_frames, inputs=[input_video, max_duration_slider, session_state], outputs=[first_frame, frames, frame_index])
++
++        input_video.change(log_change, inputs=[gr.State("video"), session_state]) \
++            .then(set_reset, inputs=[prompt_state], outputs=[prompt_state, sam2_mode_select])
++        edited_frame.change(log_change, inputs=[gr.State("ref image"), session_state])
++
++        adv_masking.click(log_change, inputs=[gr.State("advanced masking"), session_state]) \
++            .then(set_reset, inputs=[prompt_state], outputs=[prompt_state, sam2_mode_select]) \
++            .then(open_modal, [input_video, edited_frame], modal) \
++            .then(extract_frames, inputs=[input_video, max_duration_slider, session_state], outputs=[first_frame, frames, frame_index])
++
++        confirm_sam2_points.click(lambda: Modal(visible=False), None, modal) \
++                            .then(fn=animate_scene, inputs=[input_video, max_duration_slider, edited_frame, replace_character_string, prompt_state, session_state], outputs=[output_video, pose_video, face_video]) \
++                            .then(set_reset, inputs=[prompt_state], outputs=[prompt_state, sam2_mode_select])
++
++        sam2_mode_select.change(set_sam2_mode, [prompt_state, sam2_mode_select], [prompt_state])
++
++        cancel_button.click(set_reset, inputs=[prompt_state], outputs=[prompt_state, sam2_mode_select]) \
++            .then(lambda: Modal(visible=False), None, modal)
++
++        frame_index.release(set_input_image, [prompt_state, frames, frame_index, session_state], [first_frame, prompt_state])
++        first_frame.select(get_select_coords, [prompt_state, frames, frame_index, first_frame], [first_frame, prompt_state])
++    demo.queue(max_size=8, default_concurrency_limit=1).launch(server_name="0.0.0.0", server_port=8330)
++
++
++if __name__ == "__main__":
++    run_gradio()
+diff --git a/generate_UI.py b/generate_UI.py
+new file mode 100644
+index 0000000..7e1ecdd
+--- /dev/null
++++ b/generate_UI.py
+@@ -0,0 +1,273 @@
++# Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
++import argparse
++import json
++import logging
++import os
++import sys
++import time
++import warnings
++from datetime import datetime
++
++warnings.filterwarnings('ignore')
++
++import random
++
++import torch
++import torch.distributed as dist
++from PIL import Image
++
++import wan
++from wan.configs import MAX_AREA_CONFIGS, SIZE_CONFIGS, SUPPORTED_SIZES, WAN_CONFIGS
++from wan.distributed.util import init_distributed_group
++from wan.utils.prompt_extend import DashScopePromptExpander, QwenPromptExpander
++from wan.utils.utils import merge_video_audio, save_video, str2bool
++
++
++EXAMPLE_PROMPT = {
++    "t2v-A14B": {
++        "prompt":
++            "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage.",
++    },
++    "i2v-A14B": {
++        "prompt":
++            "Summer beach vacation style, a white cat wearing sunglasses sits on a surfboard. The fluffy-furred feline gazes directly at the camera with a relaxed expression. Blurred beach scenery forms the background featuring crystal-clear waters, distant green hills, and a blue sky dotted with white clouds. The cat assumes a naturally relaxed posture, as if savoring the sea breeze and warm sunlight. A close-up shot highlights the feline's intricate details and the refreshing atmosphere of the seaside.",
++        "image":
++            "examples/i2v_input.JPG",
++    },
++    "ti2v-5B": {
++        "prompt":
++            "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage.",
++    },
++    "animate-14B": {
++        "prompt": "视频中的人在做动作",
++        "video": "",
++        "pose": "",
++        "mask": "",
++    },
++    "s2v-14B": {
++        "prompt":
++            "Summer beach vacation style, a white cat wearing sunglasses sits on a surfboard. The fluffy-furred feline gazes directly at the camera with a relaxed expression. Blurred beach scenery forms the background featuring crystal-clear waters, distant green hills, and a blue sky dotted with white clouds. The cat assumes a naturally relaxed posture, as if savoring the sea breeze and warm sunlight. A close-up shot highlights the feline's intricate details and the refreshing atmosphere of the seaside.",
++        "image":
++            "examples/i2v_input.JPG",
++        "audio":
++            "examples/talk.wav",
++        "tts_prompt_audio":
++            "examples/zero_shot_prompt.wav",
++        "tts_prompt_text":
++            "希望你以后能够做的比我还好呦。",
++        "tts_text":
++            "收到好友从远方寄来的生日礼物，那份意外的惊喜与深深的祝福让我心中充满了甜蜜的快乐，笑容如花儿般绽放。"
++    },
++}
++
++
++def _validate_args(args):
++    # Basic check
++    assert args.ckpt_dir is not None, "Please specify the checkpoint directory."
++    assert args.task in WAN_CONFIGS, f"Unsupport task: {args.task}"
++    assert args.task in EXAMPLE_PROMPT, f"Unsupport task: {args.task}"
++
++    if args.prompt is None:
++        args.prompt = EXAMPLE_PROMPT[args.task]["prompt"]
++    if args.image is None and "image" in EXAMPLE_PROMPT[args.task]:
++        args.image = EXAMPLE_PROMPT[args.task]["image"]
++    if args.audio is None and args.enable_tts is False and "audio" in EXAMPLE_PROMPT[args.task]:
++        args.audio = EXAMPLE_PROMPT[args.task]["audio"]
++    if (args.tts_prompt_audio is None or args.tts_text is None) and args.enable_tts is True and "audio" in EXAMPLE_PROMPT[args.task]:
++        args.tts_prompt_audio = EXAMPLE_PROMPT[args.task]["tts_prompt_audio"]
++        args.tts_prompt_text = EXAMPLE_PROMPT[args.task]["tts_prompt_text"]
++        args.tts_text = EXAMPLE_PROMPT[args.task]["tts_text"]
++
++    if args.task == "i2v-A14B":
++        assert args.image is not None, "Please specify the image path for i2v."
++
++    cfg = WAN_CONFIGS[args.task]
++
++    if args.sample_steps is None:
++        args.sample_steps = cfg.sample_steps
++
++    if args.sample_shift is None:
++        args.sample_shift = cfg.sample_shift
++
++    if args.sample_guide_scale is None:
++        args.sample_guide_scale = cfg.sample_guide_scale
++
++    if args.frame_num is None:
++        args.frame_num = cfg.frame_num
++
++    args.base_seed = args.base_seed if args.base_seed >= 0 else random.randint(
++        0, sys.maxsize)
++    # Size check
++    if not 's2v' in args.task:
++        assert args.size in SUPPORTED_SIZES[
++            args.
++            task], f"Unsupport size {args.size} for task {args.task}, supported sizes are: {', '.join(SUPPORTED_SIZES[args.task])}"
++
++
++class _Args:
++    pass
++
++def _parse_args():
++    args = _Args()
++
++    # core generation options
++    args.task                    = "animate-14B"
++    # args.size                    = "1280*720"
++    args.size                    = "720*1280"
++    args.frame_num               = None
++    args.ckpt_dir                = "/mnt/disk6/HF_models/Wan2.2-Animate-14B/"
++    args.offload_model           = False
++    args.ulysses_size            = 1
++    args.t5_fsdp                 = False
++    args.t5_cpu                  = False
++    args.dit_fsdp                = False
++    args.prompt                  = None
++    args.use_prompt_extend       = False
++    args.prompt_extend_method    = "local_qwen"     # ["dashscope", "local_qwen"]
++    args.prompt_extend_model     = None
++    args.prompt_extend_target_lang = "zh"           # ["zh", "en"]
++    args.base_seed               = 1234
++    args.image                   = None
++    args.sample_solver           = "unipc"          # ['unipc', 'dpm++']
++    args.sample_steps            = None
++    args.sample_shift            = None
++    args.sample_guide_scale      = None
++    args.convert_model_dtype     = True
++
++    # animate
++    args.refert_num              = 1
++
++    # s2v-only
++    args.num_clip                = None
++    args.audio                   = None
++    args.enable_tts              = False
++    args.tts_prompt_audio        = None
++    args.tts_prompt_text         = None
++    args.tts_text                = None
++    args.pose_video              = None
++    args.start_from_ref          = False
++    args.infer_frames            = 80
++
++    _validate_args(args)
++    return args
++
++
++
++def _init_logging(rank):
++    # logging
++    if rank == 0:
++        # set format
++        logging.basicConfig(
++            level=logging.INFO,
++            format="[%(asctime)s] %(levelname)s: %(message)s",
++            handlers=[logging.StreamHandler(stream=sys.stdout)])
++    else:
++        logging.basicConfig(level=logging.ERROR)
++
++
++def generate(args):
++    rank = int(os.getenv("RANK", 0))
++    world_size = int(os.getenv("WORLD_SIZE", 1))
++    local_rank = int(os.getenv("LOCAL_RANK", 0))
++    device = local_rank
++    _init_logging(rank)
++
++    if world_size > 1:
++        torch.cuda.set_device(local_rank)
++        dist.init_process_group(
++            backend="hccl",
++            init_method="env://",
++            rank=rank,
++            world_size=world_size)
++
++    cfg = WAN_CONFIGS[args.task]
++
++    if args.ulysses_size > 1:
++        assert args.ulysses_size == world_size, f"The number of ulysses_size should be equal to the world size."
++        init_distributed_group()
++
++    logging.info(f"Input prompt: {args.prompt}")
++    img = None
++    if args.image is not None:
++        img = Image.open(args.image).convert("RGB")
++        logging.info(f"Input image: {args.image}")
++
++    print(f'rank:{rank}')
++
++    if dist.is_initialized():
++        base_seed = [args.base_seed] if rank == 0 else [None]
++        dist.broadcast_object_list(base_seed, src=0)
++        args.base_seed = base_seed[0]
++
++    logging.info("Creating Wan-Animate pipeline.")
++    wan_animate = wan.WanAnimate(
++        config=cfg,
++        checkpoint_dir=args.ckpt_dir,
++        device_id=device,
++        rank=rank,
++        t5_fsdp=args.t5_fsdp,
++        dit_fsdp=args.dit_fsdp,
++        use_sp=(args.ulysses_size > 1),
++        t5_cpu=args.t5_cpu,
++        convert_model_dtype=args.convert_model_dtype,
++        use_relighting_lora=True,
++    )
++
++    pipename = f"animate_fifo_{rank}"
++    while(not os.path.exists(pipename)):
++        time.sleep(1)
++    pipe = os.open(pipename, os.O_RDONLY)
++
++    if rank == 0:
++        pipename = "animate_fifo_result"
++        while(not os.path.exists(pipename)):
++            time.sleep(1)
++        result_pipe = os.open(pipename, os.O_WRONLY)
++
++
++    logging.info(f"Generating video ...")
++    while (True):
++        data = os.read(pipe, 16384).decode()
++        ui_args = json.loads(data)
++        print("rank: ", rank)
++        print(ui_args)
++        base_seed = ui_args.get('base_seed', 42)
++        save_file = ui_args.get('save_file', './final_result.mp4')
++        preprocess_dir = ui_args.get('process_dir', './processed_results')
++        replace_flag = ui_args.get('replace_flag', False)
++        video = wan_animate.generate(
++            src_root_path=preprocess_dir,
++            replace_flag=replace_flag,
++            refert_num = args.refert_num,
++            clip_len=args.frame_num,
++            shift=args.sample_shift,
++            sample_solver=args.sample_solver,
++            sampling_steps=args.sample_steps,
++            guide_scale=args.sample_guide_scale,
++            seed=base_seed,
++            offload_model=args.offload_model)
++        if rank == 0:
++            save_video(
++                tensor=video[None],
++                save_file=save_file,
++                fps=cfg.sample_fps,
++                nrow=1,
++                normalize=True,
++                value_range=(-1, 1))
++            # if "s2v" in args.task:
++            #     if args.enable_tts is False:
++            #         merge_video_audio(video_path=args.save_file, audio_path=args.audio)
++            #     else:
++            #         merge_video_audio(video_path=args.save_file, audio_path="tts.wav")
++            os.write(result_pipe, f"{save_file}".encode())
++
++        torch.hpu.synchronize()
++        if dist.is_initialized():
++            dist.barrier()
++            dist.destroy_process_group()
++
++    logging.info("Finished.")
++
++if __name__ == "__main__":
++    args = _parse_args()
++    generate(args)
+\ No newline at end of file
+diff --git a/wan/modules/animate/preprocess/preprocess_data.py b/wan/modules/animate/preprocess/preprocess_data.py
+index a99b0fe..e3e1c6c 100644
+--- a/wan/modules/animate/preprocess/preprocess_data.py
++++ b/wan/modules/animate/preprocess/preprocess_data.py
+@@ -106,8 +106,8 @@ if __name__ == '__main__':
+     flux_kontext_path = os.path.join(args.ckpt_path, 'FLUX.1-Kontext-dev') if args.use_flux else None
+     process_pipeline = ProcessPipeline(det_checkpoint_path=det_checkpoint_path, pose2d_checkpoint_path=pose2d_checkpoint_path, sam_checkpoint_path=sam2_checkpoint_path, flux_kontext_path=flux_kontext_path)
+     os.makedirs(args.save_path, exist_ok=True)
+-    process_pipeline(video_path=args.video_path, 
+-                     refer_image_path=args.refer_path, 
++    process_pipeline(video_path=args.video_path,
++                     refer_image_path=args.refer_path,
+                      output_path=args.save_path,
+                      resolution_area=args.resolution_area,
+                      fps=args.fps,
+@@ -119,3 +119,46 @@ if __name__ == '__main__':
+                      use_flux=args.use_flux,
+                      replace_flag=args.replace_flag)
+ 
++
++def load_preprocess_models(max_duration_s):
++    ckpt_path = "/mnt/disk6/HF_models/Wan2.2-Animate-14B/process_checkpoint"
++
++    pose2d_checkpoint_path = os.path.join(ckpt_path, 'pose2d/vitpose_h_wholebody.onnx')
++    det_checkpoint_path = os.path.join(ckpt_path, 'det/yolov10m.onnx')
++
++    if max_duration_s < 0:
++        print("using small sam2")
++        sam2_checkpoint_path = [os.path.join(ckpt_path, 'sam2/sam2_hiera_small.pt'),"sam2_hiera_s.yaml"]
++    else:
++        sam2_checkpoint_path = [os.path.join(ckpt_path, 'sam2/sam2_hiera_large.pt'),"sam2_hiera_l.yaml"]
++
++    flux_kontext_path = None
++
++    process_pipeline = ProcessPipeline(det_checkpoint_path=det_checkpoint_path, pose2d_checkpoint_path=pose2d_checkpoint_path, sam_checkpoint_path=sam2_checkpoint_path, flux_kontext_path=flux_kontext_path)
++
++    return process_pipeline
++
++def run(process_pipeline, input_video, edited_frame, preprocess_dir, w, h, tag_string,
++        pts_by_frame: dict, lbs_by_frame: dict):
++    args = _parse_args()
++
++    if tag_string == "retarget_flag":
++        retarget_flag = True
++        replace_flag = False
++    else:
++        retarget_flag = False
++        replace_flag = True
++
++    os.makedirs(preprocess_dir, exist_ok=True)
++    process_pipeline(video_path=input_video,
++                     refer_image_path=edited_frame,
++                     output_path=preprocess_dir,
++                     resolution_area=[w, h],
++                     fps=args.fps,
++                     iterations=args.iterations,
++                     k=args.k,
++                     w_len=args.w_len,
++                     h_len=args.h_len,
++                     retarget_flag=retarget_flag,
++                     use_flux=args.use_flux,
++                     replace_flag=replace_flag)
+diff --git a/wan/modules/animate/preprocess/process_pipepline.py b/wan/modules/animate/preprocess/process_pipepline.py
+index f648e7b..5a3c846 100644
+--- a/wan/modules/animate/preprocess/process_pipepline.py
++++ b/wan/modules/animate/preprocess/process_pipepline.py
+@@ -25,6 +25,32 @@ transformer.OLD_GPU = True
+ from sam_utils import build_sam2_video_predictor
+ 
+ 
++def get_frames(video_path, resolution_area, fps=30):
++    video_reader = VideoReader(video_path)
++    frame_num = len(video_reader)
++
++    video_fps = video_reader.get_avg_fps()
++
++    # TODO: Maybe we can switch to PyAV later, which can get accurate frame num
++    duration = video_reader.get_frame_timestamp(-1)[-1]
++
++    expected_frame_num = int(duration * video_fps + 0.5)
++    ratio = abs((frame_num - expected_frame_num)/frame_num)
++    if ratio > 0.1:
++        print("Warning: The difference between the actual number of frames and the expected number of frames is two large")
++        frame_num = expected_frame_num
++
++    if fps == -1:
++        fps = video_fps
++
++    target_num = int(frame_num / video_fps * fps)
++    idxs = get_frame_indices(frame_num, video_fps, target_num, fps)
++    frames = video_reader.get_batch(idxs).asnumpy()
++    frames = [resize_by_area(frame, resolution_area[0] * resolution_area[1], divisor=16) for frame in frames]
++
++    return frames
++
++
+ class ProcessPipeline():
+     def __init__(self, det_checkpoint_path, pose2d_checkpoint_path, sam_checkpoint_path, flux_kontext_path):
+         self.pose2d = Pose2d(checkpoint=pose2d_checkpoint_path, detector_checkpoint=det_checkpoint_path, device="cpu")
+@@ -341,7 +367,7 @@ class ProcessPipeline():
+                     all_mask.append(out_mask)
+ 
+         return all_mask
+-    
++
+     def convert_list_to_array(self, metas):
+         metas_list = []
+         for meta in metas:
+diff --git a/wan/modules/animate/preprocess/sam_utils.py b/wan/modules/animate/preprocess/sam_utils.py
+index e5d9425..d44786c 100644
+--- a/wan/modules/animate/preprocess/sam_utils.py
++++ b/wan/modules/animate/preprocess/sam_utils.py
+@@ -150,6 +150,8 @@ def build_sam2_video_predictor(
+     cfg = compose(config_name=config_file, overrides=hydra_overrides)
+     OmegaConf.resolve(cfg)
+     model = instantiate(cfg.model, _recursive_=True)
++    if isinstance(ckpt_path, list):
++        ckpt_path = ckpt_path[0]
+     _load_checkpoint(model, ckpt_path)
+     model = model.to(device)
+     if mode == "eval":
+-- 
+2.43.0
+
