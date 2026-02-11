@@ -1,6 +1,5 @@
 --extra-index-url https://download.pytorch.org/whl/cpu
 torchaudio==2.9.0+cpu
-optimum-habana==1.20.0
 gradio
 librosa
 soundfile
