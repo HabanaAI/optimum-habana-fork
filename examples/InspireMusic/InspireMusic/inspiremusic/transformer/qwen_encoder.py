@@ -17,6 +17,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from inspiremusic.utils.mask import make_pad_mask
 from inspiremusic.utils.hinter import hint_once
+from habana_frameworks.torch.hpu import wrap_in_hpu_graph
 
 class QwenEncoder(nn.Module):
     def __init__(
@@ -39,7 +40,7 @@ class QwenEncoder(nn.Module):
         else:
             self.dtype = torch.float32
 
-        self.model = AutoModelForCausalLM.from_pretrained(pretrain_path, device_map="auto", attn_implementation="flash_attention_2", torch_dtype=self.dtype)
+        self.model = AutoModelForCausalLM.from_pretrained(pretrain_path, device_map="auto", attn_implementation="eager", torch_dtype=self.dtype)
         self._output_size = self.model.config.hidden_size
         self.do_fusion_emb = do_fusion_emb
         self.hidden_norm = torch.nn.LayerNorm(self._output_size)
@@ -109,8 +110,9 @@ class QwenEmbeddingEncoder(nn.Module):
         else:
             self.dtype = torch.float32
         from transformers import Qwen2ForCausalLM
-        self.model = Qwen2ForCausalLM.from_pretrained(pretrain_path, device_map="auto", attn_implementation="flash_attention_2", torch_dtype=self.dtype)
+        self.model = Qwen2ForCausalLM.from_pretrained(pretrain_path, device_map="auto", attn_implementation="eager", torch_dtype=self.dtype)
         self._output_size = self.model.config.hidden_size
+        self.model = wrap_in_hpu_graph(self.model, disable_tensor_cache=False)
 
     def output_size(self) -> int:
         return self._output_size
@@ -131,8 +133,8 @@ class QwenEmbeddingEncoder(nn.Module):
 
         return outs.hidden_states[-1], input_masks
 
-    def forward_one_step(self, xs, masks, cache=None):
-
+    def forward_one_step(self, xs, masks, cache=None,
+                         token_idx=None, position_ids=None, cache_idx=None):
         outs = self.model(
             inputs_embeds=xs,
             attention_mask=masks,
@@ -140,6 +142,10 @@ class QwenEmbeddingEncoder(nn.Module):
             return_dict=True,
             use_cache=True,
             past_key_values=cache,
+            use_flash_attention=True,
+            token_idx=token_idx,
+            position_ids=position_ids,
+            cache_idx=cache_idx,
         )
         xs = outs.hidden_states[-1]
         new_cache = outs.past_key_values
@@ -163,7 +169,7 @@ class QwenInputOnlyEncoder(nn.Module):
         else:
             self.dtype = torch.float32
         from transformers import Qwen2ForCausalLM
-        model = Qwen2ForCausalLM.from_pretrained(pretrain_path, device_map="auto", attn_implementation="flash_attention_2", torch_dtype=self.dtype)
+        model = Qwen2ForCausalLM.from_pretrained(pretrain_path, device_map="auto", attn_implementation="eager", torch_dtype=self.dtype)
         self.embed = model.model.embed_tokens
         for p in self.embed.parameters():
             p.requires_grad = False

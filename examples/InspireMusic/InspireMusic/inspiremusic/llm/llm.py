@@ -14,6 +14,7 @@
 from typing import Dict, Optional, Callable, List, Generator
 import torch
 from torch import nn
+import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence, unpad_sequence
 from inspiremusic.utils.common import IGNORE_ID
 from inspiremusic.transformer.label_smoothing_loss import LabelSmoothingLoss
@@ -22,6 +23,10 @@ from torch import Tensor
 from math import log
 from einops import rearrange, reduce, repeat
 import logging
+from tqdm import tqdm
+import math
+import habana_frameworks.torch as htorch
+
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -35,7 +40,7 @@ class SinusoidalEmbedding(nn.Module):
         emb = torch.tensor(log(10000) / (half_dim - 1), device=device)
         emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
         emb = rearrange(x, "i -> i 1") * rearrange(emb, "j -> 1 j")
-        return torch.cat((emb.sin(), emb.cos()), dim=-1).to(torch.float16)
+        return torch.cat((emb.sin(), emb.cos()), dim=-1).to(torch.float)
 
 class LLM(torch.nn.Module):
     def __init__(
@@ -50,7 +55,7 @@ class LLM(torch.nn.Module):
             length_normalized_loss: bool = True,
             lsm_weight: float = 0.0,
             frozen_input_embed: bool = False,
-            dtype: str = "fp16",
+            dtype: str = "bf16",
             text_token_size: int = 151643,
             **kwargs,
     ):
@@ -272,6 +277,18 @@ class LLM(torch.nn.Module):
         top_ids = self.sampling(weighted_scores, decoded_tokens)
         return top_ids
 
+    def pad_cache(self, past_key_values, target_length):
+        # pad the kv cache to target length
+        new_cache = []
+        for layer_cache in past_key_values:
+            key_cache, value_cache = layer_cache
+            pad_length = target_length - key_cache.shape[2]
+            if pad_length > 0:
+                key_cache = torch.nn.functional.pad(key_cache, (0, 0, 0, pad_length), value=0)
+                value_cache = torch.nn.functional.pad(value_cache, (0, 0, 0, pad_length), value=0)
+            new_cache.append((key_cache, value_cache))
+        return tuple(new_cache)
+
     @torch.inference_mode()
     def inference(
             self,
@@ -354,10 +371,37 @@ class LLM(torch.nn.Module):
         out_tokens = []
         offset = 0
         state = None
+        token_idx = None
+        position_ids = None
+        cache_idx = None
+        prompt_len = lm_input.shape[1]
+        total_len = math.ceil((prompt_len + max_len) / 512) * 512
+        pad_len = total_len - lm_input.shape[1]
+        mask = torch.ones((lm_input.shape[0], prompt_len), device=lm_input.device).to(torch.bool)
+        lm_input = F.pad(lm_input, (0, 0, 0, pad_len, 0, 0), value=0)
+        mask = F.pad(mask, (0, pad_len, 0, 0), value=False)
+        for i in tqdm(range(int(max_len))):
+            token_idx = torch.tensor([prompt_len + i], dtype=torch.long, device=lm_input.device)
+            input_lm_input = lm_input
+            input_mask = mask
 
-        for i in range(int(max_len)):
-            y_pred, _, state = self.llm.forward_one_step(lm_input.to(self.dtype), torch.ones(lm_input.shape[0], lm_input.shape[1], device=lm_input.device).to(torch.bool), cache=state)
-            logits = self.llm_decoder(y_pred[:, -1])
+            padded_idx = math.ceil(token_idx / 512) * 512
+            input_mask = mask[:, :padded_idx]
+            input_lm_input = lm_input[:,:padded_idx,:]
+            if state is not None and padded_idx > state[0][0].shape[2]:
+                state = self.pad_cache(state, padded_idx)
+
+            y_pred, _, state = self.llm.forward_one_step(
+                input_lm_input.to(self.dtype),
+                masks=input_mask,
+                cache=state,
+                token_idx=token_idx,
+                position_ids=position_ids,
+            )
+            position_ids = torch.tensor([prompt_len + i], dtype=torch.long, device=lm_input.device).unsqueeze(0)
+            mask=mask.index_fill_(1, token_idx, 1)
+            y_pred = y_pred[:, prompt_len + i - 1] if i == 0 else y_pred[:, -1]
+            logits = self.llm_decoder(y_pred)
             if infer_cfg:
                 # perform context free guidance
                 logits_cf = logits[1]
@@ -366,7 +410,7 @@ class LLM(torch.nn.Module):
                 logits = infer_cfg_ratio * logits + (1 - infer_cfg_ratio) * logits_cf
 
             logp = logits.log_softmax(dim=-1)
-            logp = logp.squeeze(dim=0)
+            logp = logp.squeeze(dim=0).cpu()
 
             if i < int(min_len):
                 logp[self.audio_token_size] = torch.tensor(float('-inf'), dtype=self.dtype)
@@ -377,11 +421,11 @@ class LLM(torch.nn.Module):
                 break
 
             # # in stream mode, yield token one by one
-
-            yield torch.tensor([[top_ids]], dtype=torch.int64, device=device)
+            htorch.core.mark_step()
+            yield torch.tensor([[top_ids]], dtype=torch.int64, device="cpu")
             out_tokens.append(top_ids)
             offset += lm_input.size(1)
-            lm_input = self.speech_embedding.weight[top_ids].reshape(1, 1, -1)
+            lm_input = self.speech_embedding.weight[top_ids].reshape(1, 1, -1).to(device)
             if infer_cfg:
                 lm_input = lm_input.repeat(2, 1, 1)
 
@@ -471,14 +515,37 @@ class LLM(torch.nn.Module):
         offset = 0
         state = None
         cfg_state = None
-
+        token_idx = None
+        position_ids = None
+        prompt_len = lm_input.shape[1]
+        total_len = math.ceil((prompt_len + max_len) / 512) * 512
+        pad_len = total_len - lm_input.shape[1]
+        mask = torch.ones((lm_input.shape[0], prompt_len), device=lm_input.device).to(torch.bool)
+        lm_input = F.pad(lm_input, (0, 0, 0, pad_len, 0, 0), value=0)
+        mask = F.pad(mask, (0, pad_len, 0, 0), value=False)
         stop_mask = [False for _ in range(batch_size)]
 
-        for i in range(max_len):
-            y_pred,_, state = self.llm.forward_one_step(lm_input,torch.ones(lm_input.shape[0], lm_input.shape[1],
-                                                                         device=lm_input.device).to(torch.bool),cache=state)
+        for i in tqdm(range(max_len)):
+            token_idx = torch.tensor([prompt_len + i], dtype=torch.long, device=lm_input.device)
+            input_lm_input = lm_input
+            input_mask = mask
 
-            logits = self.llm_decoder(y_pred[:, -1])
+            padded_idx = math.ceil(token_idx / 512) * 512
+            input_mask = mask[:, :padded_idx]
+            input_lm_input = lm_input[:,:padded_idx,:]
+            if state is not None and padded_idx > state[0][0].shape[2]:
+                state = self.pad_cache(state, padded_idx)
+            y_pred,_, state = self.llm.forward_one_step(
+                input_lm_input.to(self.dtype),
+                masks=input_mask,
+                cache=state,
+                token_idx=token_idx,
+                position_ids=position_ids
+            )
+            position_ids = torch.tensor([prompt_len + i], dtype=torch.long, device=lm_input.device).unsqueeze(0)
+            mask=mask.index_fill_(1, token_idx, 1)
+            y_pred = y_pred[:, prompt_len + i - 1] if i == 0 else y_pred[:, -1]
+            logits = self.llm_decoder(y_pred)
             if infer_cfg:
                 logits_cf = logits[batch_size:]
                 logits_cond = logits = logits[:batch_size]
@@ -487,7 +554,7 @@ class LLM(torch.nn.Module):
 
                 logits = infer_cfg_ratio  * logits + (1 - infer_cfg_ratio ) *  logits_cf
 
-            logp = logits.log_softmax(dim=-1)
+            logp = logits.log_softmax(dim=-1).cpu()
             if i < min_len:
                 logp[:,self.audio_token_size] = float("-inf")
             top_ids = []
@@ -508,7 +575,7 @@ class LLM(torch.nn.Module):
             if all(stop_mask):
                 return out_tokens
             top_ids = torch.cat(top_ids,0)
-            top_ids_embed = self.speech_embedding.weight[top_ids][:,None,:].repeat(2,1,1)
+            top_ids_embed = self.speech_embedding.weight[top_ids][:,None,:].repeat(2,1,1).to(device)
 
             if i + min_text_len >= lm_input_orig.size(1):
                 lm_input = top_ids_embed

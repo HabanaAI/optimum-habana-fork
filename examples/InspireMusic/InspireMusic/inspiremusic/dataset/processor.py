@@ -22,8 +22,6 @@ import torch.nn.functional as F
 import numpy as np
 import re
 
-torchaudio.set_audio_backend('soundfile')
-
 AUDIO_FORMAT_SETS = {'flac', 'mp3', 'm4a', 'ogg', 'opus', 'wav', 'wma'}
 CHORUS = {"intro": 0, "chorus": 1, "verse1": 2, "verse2": 3, "verse": 2,
 		  "outro": 4}

@@ -42,8 +42,8 @@ def get_args():
     parser.add_argument('--chorus', default="random",required=False, help='chorus tag generation mode, eg. random, verse, chorus, intro.')
     parser.add_argument('--fast', action='store_true', required=False, help='True: fast inference mode, without flow matching for fast inference. False: normal inference mode, with flow matching for high quality.')
     parser.add_argument('--batch', action='store_true', required=False, help='batch inference mode, use infer.yaml to set batch size')
-    parser.add_argument('--dtype', type=str, default="fp16", required=False, choices=["fp16", "bf16", "fp32"], help='data type')
-    parser.add_argument('--fp16', default=True, type=bool, required=False, help='inference with fp16 model')
+    parser.add_argument('--dtype', type=str, default="bf16", required=False, choices=["fp16", "bf16", "fp32"], help='data type')
+    parser.add_argument('--fp16', default=False, type=bool, required=False, help='inference with fp16 model')
     parser.add_argument('--fade_out', default=True, type=bool, required=False, help='add fade out effect to generated audio')
     parser.add_argument('--fade_out_duration', default=1.0, type=float, required=False, help='fade out duration in seconds')
     parser.add_argument('--trim', default=False, type=bool, required=False, help='trim the silence ending of generated audio')
@@ -106,7 +106,7 @@ def main():
     if args.llm_model is None:
         model.llm = None
     else:
-        model.llm = model.llm.to(torch.float32)
+        model.llm = model.llm.to(torch.bfloat16)
 
     if args.flow_model is None:
         model.flow = None

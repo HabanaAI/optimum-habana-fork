@@ -17,6 +17,8 @@
 
 from typing import List
 import torch
+import random
+import numpy as np
 IGNORE_ID = -1
 
 def pad_list(xs: List[torch.Tensor], pad_value: int):

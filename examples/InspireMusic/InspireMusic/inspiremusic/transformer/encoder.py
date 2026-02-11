@@ -32,6 +32,7 @@ from inspiremusic.utils.class_utils import (
 )
 from inspiremusic.utils.mask import make_pad_mask
 from inspiremusic.utils.mask import add_optional_chunk_mask
+import habana_frameworks.torch as htorch
 
 
 class BaseEncoder(torch.nn.Module):
@@ -168,6 +169,7 @@ class BaseEncoder(torch.nn.Module):
                        mask_pad: torch.Tensor) -> torch.Tensor:
         for layer in self.encoders:
             xs, chunk_masks, _, _ = layer(xs, chunk_masks, pos_emb, mask_pad)
+            htorch.core.mark_step()
         return xs
 
     @torch.jit.unused

@@ -14,6 +14,8 @@
 import torch
 import torch.nn.functional as F
 from matcha.models.components.flow_matching import BASECFM
+import habana_frameworks.torch as htorch
+from tqdm import tqdm
 
 
 class ConditionalCFM(BASECFM):
@@ -75,7 +77,7 @@ class ConditionalCFM(BASECFM):
         # Or in future might add like a return_all_steps flag
         sol = []
 
-        for step in range(1, len(t_span)):
+        for step in tqdm(range(1, len(t_span))):
             dphi_dt = self.forward_estimator(x, mask, mu, t, spks, cond)
             # Classifier-Free Guidance inference introduced in VoiceBox
             if self.inference_cfg_rate > 0:
@@ -92,6 +94,7 @@ class ConditionalCFM(BASECFM):
             sol.append(x)
             if step < len(t_span) - 1:
                 dt = t_span[step + 1] - t
+            htorch.core.mark_step()
 
         return sol[-1]
 

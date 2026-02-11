@@ -16,6 +16,7 @@ import torch.nn as nn
 from einops import pack, rearrange, repeat
 from matcha.models.components.decoder import SinusoidalPosEmb, Block1D, ResnetBlock1D, Downsample1D, TimestepEmbedding, Upsample1D
 from matcha.models.components.transformer import BasicTransformerBlock
+import habana_frameworks.torch as htorch
 
 class Transpose(torch.nn.Module):
     def __init__(self, dim0: int, dim1: int):
@@ -238,9 +239,11 @@ class ConditionalDecoder(nn.Module):
                     attention_mask=attn_mask,
                     timestep=t,
                 )
+                htorch.core.mark_step()
             x = rearrange(x, "b t c -> b c t").contiguous()
             hiddens.append(x)  # Save hidden states for skip connections
             x = downsample(x * mask_down)
+            htorch.core.mark_step()
             masks.append(mask_down[:, :, ::2])
         masks = masks[:-1]
         mask_mid = masks[-1]
@@ -255,7 +258,9 @@ class ConditionalDecoder(nn.Module):
                     attention_mask=attn_mask,
                     timestep=t,
                 )
+                htorch.core.mark_step()
             x = rearrange(x, "b t c -> b c t").contiguous()
+            htorch.core.mark_step()
 
         for resnet, transformer_blocks, upsample in self.up_blocks:
             mask_up = masks.pop()
@@ -270,8 +275,10 @@ class ConditionalDecoder(nn.Module):
                     attention_mask=attn_mask,
                     timestep=t,
                 )
+                htorch.core.mark_step()
             x = rearrange(x, "b t c -> b c t").contiguous()
             x = upsample(x * mask_up)
+            htorch.core.mark_step()
         x = self.final_block(x, mask_up)
         output = self.final_proj(x * mask_up)
         return output * mask
