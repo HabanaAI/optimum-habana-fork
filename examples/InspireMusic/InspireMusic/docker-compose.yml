@@ -1,0 +1,20 @@
+services:
+  inspire-music:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: inspire-music
+    container_name: inspire-music
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    volumes:
+      - ./pretrained_models:/pretrained_models
+      - .:/workspace/InspireMusic
+    stdin_open: true
+    tty: true
