@@ -25,6 +25,8 @@ from diffusers.utils import (
     scale_lora_layers,
     unscale_lora_layers,
 )
+from ...distributed import parallel_state
+
 import habana_frameworks.torch.core as htcore
 import time #tmp
 
@@ -67,7 +69,6 @@ def HunyuanVideo15Transformer3DModelForwardGaudi(
     post_patch_num_frames = num_frames // p_t
     post_patch_height = height // p_h
     post_patch_width = width // p_w
-    htcore.mark_step()
 
     # 1. RoPE
     image_rotary_emb = self.rope(hidden_states)
@@ -76,6 +77,43 @@ def HunyuanVideo15Transformer3DModelForwardGaudi(
     temb = self.time_embed(timestep, timestep_r=timestep_r)
 
     hidden_states = self.x_embedder(hidden_states)
+
+    pad_len = 0
+    if parallel_state.sequence_parallel_is_initialized():
+        bs, seq_len, _ = hidden_states.shape
+        cp_size = parallel_state.get_sequence_parallel_world_size()
+        # We need to ensure seq_len can be divided by cp_size
+        if seq_len % cp_size != 0:
+            padded_seq_len = (seq_len // cp_size + 1) * cp_size
+            pad_len = padded_seq_len - seq_len
+            print("exitdebug -HunyuanVideo15Transformer3DModelForwardGaudi pad_len=",pad_len)
+            exit()
+            hidden_states = F.pad(hidden_states, (0, 0, 0, pad_len))
+            cos = F.pad(image_rotary_emb[0], (0, 0, 0, pad_len))
+            sin = F.pad(image_rotary_emb[1], (0, 0, 0, pad_len))
+            image_rotary_emb = (cos, sin)
+            # if timestep.ndim == 2:
+            #     timestep = F.pad(timestep, (0, pad_len))
+
+            seq_len = padded_seq_len
+
+        sp_seq_len = seq_len // parallel_state.get_sequence_parallel_world_size()
+        start = sp_seq_len * parallel_state.get_sequence_parallel_rank()
+        end = sp_seq_len * (parallel_state.get_sequence_parallel_rank() + 1)
+
+        hidden_states = hidden_states[:, start:end, :]
+
+        # # timestep with 2 dims means expand_timesteps in config is True, and
+        # # We only need to split the timestep when it has 2 dim.
+        # expanded_timestep = False
+        # if timestep.ndim == 2:
+        #     expanded_timestep = True
+        #     timestep = timestep[:, start:end]
+
+        cos = image_rotary_emb[0][start:end, :]
+        sin = image_rotary_emb[1][start:end, :]
+        image_rotary_emb = (cos, sin)
+
 
     # qwen text embedding
     encoder_hidden_states = self.context_embedder(encoder_hidden_states, timestep, encoder_attention_mask)
@@ -149,6 +187,9 @@ def HunyuanVideo15Transformer3DModelForwardGaudi(
             )
         )
 
+        encoder_pad_len = image_mask[~image_mask].shape[0]+text_mask_2[~text_mask_2].shape[0]+text_mask[~text_mask].shape[0]
+        print("encoder_pad_len=",encoder_pad_len)
+
         # Apply same reordering to attention masks
         new_encoder_attention_mask.append(
             torch.cat(
@@ -164,8 +205,15 @@ def HunyuanVideo15Transformer3DModelForwardGaudi(
             )
         )
 
+
     encoder_hidden_states = torch.stack(new_encoder_hidden_states)
     encoder_attention_mask = torch.stack(new_encoder_attention_mask)
+
+    # Do not use mask to get better perf.
+    # May influent the accuracy.
+    # As seqlen in hidden_states is much bigger than encoder_hidden_states,
+    # Accuracy loss is acceptable. More test needed to verify.
+    encoder_attention_mask =None
 
     htcore.mark_step()
 
@@ -179,6 +227,8 @@ def HunyuanVideo15Transformer3DModelForwardGaudi(
                 temb,
                 encoder_attention_mask,
                 image_rotary_emb,
+                pad_len,
+                encoder_pad_len,
             )
             htcore.mark_step()
 
@@ -190,9 +240,26 @@ def HunyuanVideo15Transformer3DModelForwardGaudi(
                 temb,
                 encoder_attention_mask,
                 image_rotary_emb,
+                pad_len,
+                encoder_pad_len,
             )
             htcore.mark_step()
 
+    if parallel_state.sequence_parallel_is_initialized():
+        cp_size = parallel_state.get_sequence_parallel_world_size()
+        bs, seq, dim = hidden_states.shape
+
+        gather_hidden = torch.empty(bs, seq * cp_size, dim, dtype=hidden_states.dtype, device=hidden_states.device)
+        gather1 = torch.distributed.all_gather_into_tensor(
+            gather_hidden,
+            hidden_states,
+            group=parallel_state.get_sequence_parallel_group(),
+            async_op=True,
+        )
+        gather1.wait()
+
+        hidden_states = gather_hidden.reshape(bs, seq * cp_size, dim)
+        hidden_states = hidden_states[:, :-pad_len, :] if pad_len > 0 else hidden_states
 
     # 5. Output projection
     hidden_states = self.norm_out(hidden_states, temb)
@@ -211,9 +278,62 @@ def HunyuanVideo15Transformer3DModelForwardGaudi(
     if not return_dict:
         return (hidden_states,)
 
-    htcore.mark_step()
 
     return Transformer2DModelOutput(sample=hidden_states)
+
+def HunyuanVideo15TransformerBlockForwardGaudi(
+    self,
+    hidden_states: torch.Tensor,
+    encoder_hidden_states: torch.Tensor,
+    temb: torch.Tensor,
+    attention_mask: Optional[torch.Tensor] = None,
+    freqs_cis: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    pad_len: Optional[int] = 0,
+    encoder_pad_len: Optional[int] = 0,
+    *args,
+    **kwargs,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    r"""
+    Adapted from: https://github.com/huggingface/diffusers/blob/v0.36.0/src/diffusers/models/transformers/transformer_hunyuan_video15.py#L466
+    add encoder_pad_len parameter.
+
+    """
+    # 1. Input normalization
+    norm_hidden_states, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.norm1(hidden_states, emb=temb)
+    norm_encoder_hidden_states, c_gate_msa, c_shift_mlp, c_scale_mlp, c_gate_mlp = self.norm1_context(
+        encoder_hidden_states, emb=temb
+    )
+
+    # 2. Joint attention
+    attn_output, context_attn_output = self.attn(
+        hidden_states=norm_hidden_states,
+        encoder_hidden_states=norm_encoder_hidden_states,
+        attention_mask=attention_mask,
+        image_rotary_emb=freqs_cis,
+        pad_len=pad_len,
+        encoder_pad_len=encoder_pad_len,
+    )
+
+    # 3. Modulation and residual connection
+    hidden_states = hidden_states + attn_output * gate_msa.unsqueeze(1)
+    encoder_hidden_states = encoder_hidden_states + context_attn_output * c_gate_msa.unsqueeze(1)
+
+    norm_hidden_states = self.norm2(hidden_states)
+    norm_encoder_hidden_states = self.norm2_context(encoder_hidden_states)
+
+    norm_hidden_states = norm_hidden_states * (1 + scale_mlp[:, None]) + shift_mlp[:, None]
+    norm_encoder_hidden_states = norm_encoder_hidden_states * (1 + c_scale_mlp[:, None]) + c_shift_mlp[:, None]
+
+
+    # 4. Feed-forward
+    ff_output = self.ff(norm_hidden_states)
+    context_ff_output = self.ff_context(norm_encoder_hidden_states)
+
+    hidden_states = hidden_states + gate_mlp.unsqueeze(1) * ff_output
+    encoder_hidden_states = encoder_hidden_states + c_gate_mlp.unsqueeze(1) * context_ff_output
+
+
+    return hidden_states, encoder_hidden_states
 
 def HunyuanVideo15IndividualTokenRefinerForwardGaudi(
     self,

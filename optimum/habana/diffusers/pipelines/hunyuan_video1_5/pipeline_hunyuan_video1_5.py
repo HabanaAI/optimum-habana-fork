@@ -33,11 +33,16 @@ from ....utils import HabanaProfile
 from ..pipeline_utils import GaudiDiffusionPipeline
 from ....transformers.gaudi_configuration import GaudiConfig
 from ...models.attention_processor import GaudiHunyuanVideo15AttnProcessor2_0,AttnProcessor2_0
-from ...models.hunyuan_video15_transformer import HunyuanVideo15Transformer3DModelForwardGaudi,HunyuanVideo15IndividualTokenRefinerForwardGaudi
+from ...models.hunyuan_video15_transformer import (
+    HunyuanVideo15Transformer3DModelForwardGaudi,
+    HunyuanVideo15IndividualTokenRefinerForwardGaudi,
+    HunyuanVideo15TransformerBlockForwardGaudi,
+)
 from ...models.autoencoders.autoencoder_kl_hunyuanvideo15 import (
     HunyuanVideo15Decoder3DForwardGaudi,
     HunyuanVideo15AttnBlockForwardGaudi,
     AutoencoderKLHunyuanVideo15TiledDecodeGaudi,
+    HunyuanVideo15UpBlock3DForwardGaudi,
 )
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 import habana_frameworks.torch as ht_torch #tmp
@@ -121,7 +126,7 @@ class GaudiHunyuanVideo15Pipeline(GaudiDiffusionPipeline, HunyuanVideo15Pipeline
                 types.MethodType(HunyuanVideo15IndividualTokenRefinerForwardGaudi, \
                     self.transformer.context_embedder.token_refiner)
             for block in self.transformer.transformer_blocks:
-                #block.forward = types.MethodType(HunyuanVideo15TransformerBlockForwardGaudi, block)
+                block.forward = types.MethodType(HunyuanVideo15TransformerBlockForwardGaudi, block)
                 block.attn.processor = GaudiHunyuanVideo15AttnProcessor2_0()
             for block in self.transformer.context_embedder.token_refiner.refiner_blocks:
                 block.attn.processor = AttnProcessor2_0()
@@ -130,6 +135,8 @@ class GaudiHunyuanVideo15Pipeline(GaudiDiffusionPipeline, HunyuanVideo15Pipeline
         self.vae.decoder.forward = types.MethodType(HunyuanVideo15Decoder3DForwardGaudi, self.vae.decoder)
         for attn in self.vae.decoder.mid_block.attentions:
             attn.forward = types.MethodType(HunyuanVideo15AttnBlockForwardGaudi, attn)
+        for block in self.vae.decoder.up_blocks:
+            block.forward = types.MethodType(HunyuanVideo15UpBlock3DForwardGaudi, block)
 
         # if use_hpu_graphs:
         #     from habana_frameworks.torch.hpu import wrap_in_hpu_graph
@@ -416,6 +423,7 @@ class GaudiHunyuanVideo15Pipeline(GaudiDiffusionPipeline, HunyuanVideo15Pipeline
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             #for i, t in enumerate(timesteps):
             for i in range(len(timesteps)):
+
                 if self.interrupt:
                     continue
                 t = timesteps[0]
@@ -479,8 +487,9 @@ class GaudiHunyuanVideo15Pipeline(GaudiDiffusionPipeline, HunyuanVideo15Pipeline
                             **cond_kwargs,
                         )[0]
 
+                    torch.hpu.synchronize()
                     mem_summary = ht_torch.hpu.memory_summary()
-                    logger.info(f" memory is {mem_summary}")
+                    logger.info(f"{i}- memory is {mem_summary}")
                     print()
 
                     # Cleanup model (e.g., remove hooks)
@@ -530,11 +539,13 @@ class GaudiHunyuanVideo15Pipeline(GaudiDiffusionPipeline, HunyuanVideo15Pipeline
         # 8. decode the latents to video and postprocess
         if not output_type == "latent":
             latents = latents.to(self.vae.dtype) / self.vae.config.scaling_factor
+
             video = self.vae.decode(latents, return_dict=False)[0]
-            video = self.video_processor.postprocess_video(video, output_type=output_type)
+
             torch.hpu.synchronize()
             print(f"vae.decode time ={time.time()-t0}")
-            t0 = time.time()
+
+            video = self.video_processor.postprocess_video(video, output_type=output_type)
         else:
             video = latents
 
@@ -542,7 +553,6 @@ class GaudiHunyuanVideo15Pipeline(GaudiDiffusionPipeline, HunyuanVideo15Pipeline
 
         # Offload all models
         self.maybe_free_model_hooks()
-        print("==maybe_free_model_hooks=")
 
         if not return_dict:
             return (video,)
