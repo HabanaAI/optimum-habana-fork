@@ -6,6 +6,8 @@ OPEA Wan Animate (角色动画) 微服务，用于根据参考图像和驱动视
 
 本项目提供 OPEA Wan Animate 组件的独立部署方案。它通过 REST API 提供先进的角色动画生成能力，支持将参考图像中的角色按照驱动视频的动作进行动画化，或替换驱动视频中的角色。本服务针对英特尔 ® Habana® Gaudi® 加速器进行了优化。
 
+> **注意:** Wan2.2 代码已合并到 [optimum-habana-fork](https://github.com/HabanaAI/optimum-habana-fork.git) 仓库的 `examples/Wan2.2` 目录中（分支 `aice/v1.22.0`），无需再单独克隆 Wan2.2 仓库。
+
 ## 主要特性
 
 - **角色动画 (Animate)**: 将参考图像中的角色按照驱动视频的动作进行动画化。
