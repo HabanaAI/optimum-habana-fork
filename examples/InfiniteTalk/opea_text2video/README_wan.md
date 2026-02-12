@@ -6,6 +6,8 @@ OPEA Text-to-Video (文本到视频) 微服务，用于根据文本提示和音�
 
 本项目提供 OPEA Text2Video 组件的独立部署方案。它通过 REST API 提供先进的视频生成能力，并针对英特尔 ® Habana® Gaudi® 加速器进行了优化。本指南提供了基于 docker compose 的自动部署和命令行的手工部署两种部署方式。
 
+> **注意:** Wan2.2 代码已合并到 [optimum-habana-fork](https://github.com/HabanaAI/optimum-habana-fork.git) 仓库的 `examples/Wan2.2` 目录中（分支 `aice/v1.22.0`），无需再单独克隆 Wan2.2 仓库。
+
 ## 主要特性
 
 - **文生视频**: 支持文本提示和音频条件输入，生成动态视频。

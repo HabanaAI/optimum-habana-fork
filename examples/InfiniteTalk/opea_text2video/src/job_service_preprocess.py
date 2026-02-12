@@ -200,7 +200,7 @@ def init_process_pipeline(args):
         ProcessPipeline instance
     """
     # Import preprocessing modules from Wan2.2
-    wan_root = os.getenv("WAN_ROOT", "/home/user/Wan2.2")
+    wan_root = os.getenv("WAN_ROOT", "/home/user/optimum-habana-fork/examples/Wan2.2")
     preprocess_path = os.path.join(wan_root, "wan/modules/animate/preprocess")
     if preprocess_path not in sys.path:
         sys.path.insert(0, preprocess_path)
