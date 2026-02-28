@@ -225,7 +225,7 @@ clean:
 test_installs:
 	python -m pip install .[tests]
 
-DEEPSPEED_SPEC ?= git+https://github.com/habana-internal/deepspeed-fork.git@master
+DEEPSPEED_SPEC ?= git+https://${GH_TOKEN}@github.com/habana-internal/deepspeed-fork.git@master
 
 install_deepspeed:
 	@set -eu
