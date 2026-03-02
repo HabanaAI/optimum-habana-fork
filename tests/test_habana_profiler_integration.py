@@ -48,9 +48,20 @@ def temp_dir():
 
 
 def install_requirements(requirements_file_path):
-    print(f"Installing {requirements_file_path}")
-    p = subprocess.run(f"pip install -r {requirements_file_path}", shell=True)
-    assert p.returncode == 0, f"Failed to install {requirements_file_path}"
+    import sys
+
+    if not Path(requirements_file_path).exists():
+        return
+
+    with open(requirements_file_path) as f:
+        lines = [l.strip() for l in f if l.strip() and not l.startswith("#")]
+
+    for pkg in lines:
+        cmd = [sys.executable, "-m", "pip", "install"]
+        if pkg.startswith("timm"):
+            cmd.append("--no-deps")
+        cmd.append(pkg)
+        assert subprocess.run(cmd).returncode == 0
 
 
 def run_command_and_check_profiler_output(command, expected_directories, expected_num_files):
