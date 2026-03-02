@@ -747,16 +747,31 @@ class ExampleTesterBase(TestCase):
 
     def _install_requirements(self, requirements_filename: Union[str, os.PathLike]):
         """
-        Installs the necessary requirements to run the example if the provided file exists, otherwise does nothing.
+        Installs the necessary requirements to run the example if the provided file exists.
+        Installs `timm` with --no-deps to prevent torch reinstall.
         """
+        
+        import sys
 
         if not Path(requirements_filename).exists():
             return
 
-        cmd_line = f"pip install -r {requirements_filename}".split()
-        p = subprocess.Popen(cmd_line)
-        return_code = p.wait()
-        self.assertEqual(return_code, 0)
+        with open(requirements_filename) as f:
+            lines = [
+                line.strip()
+                for line in f.readlines()
+                if line.strip() and not line.strip().startswith("#")
+            ]
+
+        for pkg in lines:
+            if pkg.startswith("timm"):
+                cmd = [sys.executable, "-m", "pip", "install", "--no-deps", pkg]
+            else:
+                cmd = [sys.executable, "-m", "pip", "install", pkg]
+
+            p = subprocess.Popen(cmd)
+            return_code = p.wait()
+            self.assertEqual(return_code, 0)
 
     def assert_no_regression(self, results: Dict, metrics: List, model_name: str):
         """
