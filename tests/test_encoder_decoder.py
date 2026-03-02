@@ -39,10 +39,23 @@ class TestEncoderDecoderModels:
         self.baseline = baseline
 
     def _install_requirements(self, task: str):
-        cmd_line = f"pip install -r {self.PATH_TO_EXAMPLE_DIR / task / 'requirements.txt'}".split()
-        p = subprocess.Popen(cmd_line)
-        return_code = p.wait()
-        assert return_code == 0
+        import sys, tempfile
+        req = self.PATH_TO_EXAMPLE_DIR / task / "requirements.txt"
+        if not req.exists():
+            return
+
+        lines = [l.strip() for l in req.read_text().splitlines() if l.strip() and not l.lstrip().startswith("#")]
+        timm = [l for l in lines if l.startswith("timm")]
+        other = [l for l in lines if not l.startswith("timm")]
+
+        if other:
+            with tempfile.NamedTemporaryFile("w", delete=False) as f:
+                f.write("\n".join(other))
+                tmp = f.name
+            assert subprocess.run([sys.executable, "-m", "pip", "install", "-r", tmp]).returncode == 0
+
+        for t in timm:
+            assert subprocess.run([sys.executable, "-m", "pip", "install", "--no-deps", t]).returncode == 0
 
     def _build_command(
         self,
