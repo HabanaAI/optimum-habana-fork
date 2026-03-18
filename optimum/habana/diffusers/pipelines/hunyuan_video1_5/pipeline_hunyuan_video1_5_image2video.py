@@ -13,21 +13,28 @@
 # limitations under the License.
 
 import types
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
+import PIL
 import torch
 from diffusers.guiders import ClassifierFreeGuidance
 from diffusers.models import AutoencoderKLHunyuanVideo15, HunyuanVideo15Transformer3DModel
-from diffusers.pipelines.hunyuan_video1_5.pipeline_hunyuan_video1_5 import (
-    HunyuanVideo15Pipeline,
-    format_text_input,
+from diffusers.pipelines.hunyuan_video1_5.pipeline_hunyuan_video1_5_image2video import (
+    HunyuanVideo15ImageToVideoPipeline,
     retrieve_timesteps,
 )
 from diffusers.pipelines.hunyuan_video1_5.pipeline_output import HunyuanVideo15PipelineOutput
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 from diffusers.utils import logging, replace_example_docstring
-from transformers import ByT5Tokenizer, Qwen2_5_VLTextModel, Qwen2Tokenizer, T5EncoderModel
+from transformers import (
+    ByT5Tokenizer,
+    Qwen2_5_VLTextModel,
+    Qwen2Tokenizer,
+    SiglipImageProcessor,
+    SiglipVisionModel,
+    T5EncoderModel,
+)
 
 from ....transformers.gaudi_configuration import GaudiConfig
 from ....utils import HabanaProfile
@@ -48,15 +55,16 @@ from ..pipeline_utils import GaudiDiffusionPipeline
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
+
 EXAMPLE_DOC_STRING = """
     Examples:
         ```python
         >>> import torch
-        >>> from optimum.habana.diffusers import GaudiHunyuanVideo15Pipeline
+        >>> from optimum.habana.diffusers import HunyuanVideo15ImageToVideoPipeline
         >>> from diffusers.utils import export_to_video
 
-        >>> model_id = "hunyuanvideo-community/HunyuanVideo-1.5-480p_t2v"
-        >>> pipe = GaudiHunyuanVideo15Pipeline.from_pretrained(
+        >>> model_id = "hunyuanvideo-community/HunyuanVideo-1.5-480p_i2v"
+        >>> pipe = HunyuanVideo15ImageToVideoPipeline.from_pretrained(
         ...     model_id,
         ...     torch_dtype=torch.bfloat16,
         ...     use_habana=True,
@@ -64,19 +72,22 @@ EXAMPLE_DOC_STRING = """
         ...     gaudi_config="Habana/stable-diffusion",)
         >>> pipe.vae.enable_tiling()
 
+        >>> image = load_image("https://huggingface.co/datasets/YiYiXu/testing-images/resolve/main/wan_i2v_input.JPG")
+
         >>> output = pipe(
-        ...     prompt="A cat walks on the grass, realistic",
+        ...     prompt="Summer beach vacation style, a white cat wearing sunglasses sits on a surfboard. The fluffy-furred feline gazes directly at the camera with a relaxed expression. Blurred beach scenery forms the background featuring crystal-clear waters, distant green hills, and a blue sky dotted with white clouds. The cat assumes a naturally relaxed posture, as if savoring the sea breeze and warm sunlight. A close-up shot highlights the feline's intricate details and the refreshing atmosphere of the seaside.",
+        ...     image=image,
         ...     num_inference_steps=50,
         ... ).frames[0]
-        >>> export_to_video(output, "output.mp4", fps=15)
+        >>> export_to_video(output, "output.mp4", fps=24)
         ```
 """
 
-class GaudiHunyuanVideo15Pipeline(GaudiDiffusionPipeline, HunyuanVideo15Pipeline):
+class GaudiHunyuanVideo15ImageToVideoPipeline(GaudiDiffusionPipeline,HunyuanVideo15ImageToVideoPipeline):
     r"""
-    Adapted from: https://github.com/huggingface/diffusers/blob/v0.36.0/src/diffusers/pipelines/hunyuan_video1_5/pipeline_hunyuan_video1_5.py#L166
+    Adapted from: https://github.com/huggingface/diffusers/blob/v0.36.0/src/diffusers/pipelines/hunyuan_video1_5/pipeline_hunyuan_video1_5_image2video.py#L193
 
-    This class inherits from `HunyuanVideo15Pipeline` and overrides methods to use Gaudi-specific implementations.
+    This class inherits from `HunyuanVideo15ImageToVideoPipeline` and overrides methods to use Gaudi-specific implementations.
     add args use_habana
     add args use_hpu_graphs
     add args gaudi_config
@@ -84,6 +95,7 @@ class GaudiHunyuanVideo15Pipeline(GaudiDiffusionPipeline, HunyuanVideo15Pipeline
     add args sdp_on_bf16
     add args is_training
     """
+
     def __init__(
         self,
         text_encoder: Qwen2_5_VLTextModel,
@@ -94,6 +106,8 @@ class GaudiHunyuanVideo15Pipeline(GaudiDiffusionPipeline, HunyuanVideo15Pipeline
         text_encoder_2: T5EncoderModel,
         tokenizer_2: ByT5Tokenizer,
         guider: ClassifierFreeGuidance,
+        image_encoder: SiglipVisionModel,
+        feature_extractor: SiglipImageProcessor,
         use_habana: bool = False,
         use_hpu_graphs: bool = False,
         gaudi_config: Union[str, GaudiConfig] = None,
@@ -109,7 +123,7 @@ class GaudiHunyuanVideo15Pipeline(GaudiDiffusionPipeline, HunyuanVideo15Pipeline
             bf16_full_eval,
             sdp_on_bf16,
         )
-        HunyuanVideo15Pipeline.__init__(
+        HunyuanVideo15ImageToVideoPipeline.__init__(
             self,
             text_encoder=text_encoder,
             tokenizer=tokenizer,
@@ -119,6 +133,8 @@ class GaudiHunyuanVideo15Pipeline(GaudiDiffusionPipeline, HunyuanVideo15Pipeline
             text_encoder_2=text_encoder_2,
             tokenizer_2=tokenizer_2,
             guider=guider,
+            image_encoder=image_encoder,
+            feature_extractor=feature_extractor,
         )
         self.to(self._device)
         if self.transformer is not None:
@@ -151,66 +167,13 @@ class GaudiHunyuanVideo15Pipeline(GaudiDiffusionPipeline, HunyuanVideo15Pipeline
                 resnet.conv2.forward = types.MethodType(HunyuanVideo15CausalConv3dForwardGaudi,resnet.conv2)
 
 
-    @staticmethod
-    def _get_mllm_prompt_embeds(
-        text_encoder: Qwen2_5_VLTextModel,
-        tokenizer: Qwen2Tokenizer,
-        prompt: Union[str, List[str]],
-        device: torch.device,
-        tokenizer_max_length: int = 1000,
-        num_hidden_layers_to_skip: int = 2,
-        # fmt: off
-        system_message: str = "You are a helpful assistant. Describe the video by detailing the following aspects: \
-        1. The main content and theme of the video. \
-        2. The color, shape, size, texture, quantity, text, and spatial relationships of the objects. \
-        3. Actions, events, behaviors temporal relationships, physical movement changes of the objects. \
-        4. background environment, light, style and atmosphere. \
-        5. camera angles, movements, and transitions used in the video.",
-        # fmt: on
-        crop_start: int = 108,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-
-        # HPU: add use_flash_attention=True for self.text_encoder input
-
-        prompt = [prompt] if isinstance(prompt, str) else prompt
-
-        prompt = format_text_input(prompt, system_message)
-
-        text_inputs = tokenizer.apply_chat_template(
-            prompt,
-            add_generation_prompt=True,
-            tokenize=True,
-            return_dict=True,
-            padding="max_length",
-            max_length=tokenizer_max_length + crop_start,
-            truncation=True,
-            return_tensors="pt",
-        )
-
-        text_input_ids = text_inputs.input_ids.to(device=device)
-        prompt_attention_mask = text_inputs.attention_mask.to(device=device)
-
-        prompt_embeds = text_encoder(
-            input_ids=text_input_ids,
-            attention_mask=prompt_attention_mask,
-            output_hidden_states=True,
-            use_flash_attention=True,
-        ).hidden_states[-(num_hidden_layers_to_skip + 1)]
-
-        if crop_start is not None and crop_start > 0:
-            prompt_embeds = prompt_embeds[:, crop_start:]
-            prompt_attention_mask = prompt_attention_mask[:, crop_start:]
-
-        return prompt_embeds, prompt_attention_mask
-
     @torch.no_grad()
     @replace_example_docstring(EXAMPLE_DOC_STRING)
     def __call__(
         self,
+        image: PIL.Image.Image,
         prompt: Union[str, List[str]] = None,
         negative_prompt: Union[str, List[str]] = None,
-        height: Optional[int] = None,
-        width: Optional[int] = None,
         num_frames: int = 121,
         num_inference_steps: int = 50,
         sigmas: List[float] = None,
@@ -230,22 +193,19 @@ class GaudiHunyuanVideo15Pipeline(GaudiDiffusionPipeline, HunyuanVideo15Pipeline
         attention_kwargs: Optional[Dict[str, Any]] = None,
         profiling_warmup_steps: Optional[int] = 0,
         profiling_steps: Optional[int] = 0,
-        **kwargs,
     ):
         r"""
         The call function to the pipeline for generation.
 
         Args:
+            image (`PIL.Image.Image`):
+                The input image to condition video generation on.
             prompt (`str` or `List[str]`, *optional*):
-                The prompt or prompts to guide the image generation. If not defined, one has to pass `prompt_embeds`
+                The prompt or prompts to guide the video generation. If not defined, one has to pass `prompt_embeds`
                 instead.
             negative_prompt (`str` or `List[str]`, *optional*):
-                The prompt or prompts not to guide the image generation. If not defined, one has to pass
+                The prompt or prompts not to guide the video generation. If not defined, one has to pass
                 `negative_prompt_embeds` instead.
-            height (`int`, *optional*):
-                The height in pixels of the generated video.
-            width (`int`, *optional*):
-                The width in pixels of the generated video.
             num_frames (`int`, defaults to `121`):
                 The number of frames in the generated video.
             num_inference_steps (`int`, defaults to `50`):
@@ -302,13 +262,13 @@ class GaudiHunyuanVideo15Pipeline(GaudiDiffusionPipeline, HunyuanVideo15Pipeline
                 If `return_dict` is `True`, [`HunyuanVideo15PipelineOutput`] is returned, otherwise a `tuple` is
                 returned where the first element is a list with the generated videos.
         """
+
         import habana_frameworks.torch.core as htcore
 
         # 1. Check inputs. Raise error if not correct
         self.check_inputs(
             prompt=prompt,
-            height=height,
-            width=width,
+            image=image,
             negative_prompt=negative_prompt,
             prompt_embeds=prompt_embeds,
             negative_prompt_embeds=negative_prompt_embeds,
@@ -320,10 +280,10 @@ class GaudiHunyuanVideo15Pipeline(GaudiDiffusionPipeline, HunyuanVideo15Pipeline
             negative_prompt_embeds_mask_2=negative_prompt_embeds_mask_2,
         )
 
-        if height is None and width is None:
-            height, width = self.video_processor.calculate_default_height_width(
-                self.default_aspect_ratio[1], self.default_aspect_ratio[0], self.target_size
-            )
+        height, width = self.video_processor.calculate_default_height_width(
+            height=image.size[1], width=image.size[0], target_size=self.target_size
+        )
+        image = self.video_processor.resize(image, height=height, width=width, resize_mode="crop")
 
         self._attention_kwargs = attention_kwargs
         self._current_timestep = None
@@ -339,7 +299,15 @@ class GaudiHunyuanVideo15Pipeline(GaudiDiffusionPipeline, HunyuanVideo15Pipeline
         else:
             batch_size = prompt_embeds.shape[0]
 
-        # 3. Encode input prompt
+        # 3. Encode image
+        image_embeds = self.encode_image(
+            image=image,
+            batch_size=batch_size * num_videos_per_prompt,
+            device=device,
+            dtype=self.transformer.dtype,
+        )
+
+        # 4. Encode input prompt
         prompt_embeds, prompt_embeds_mask, prompt_embeds_2, prompt_embeds_mask_2 = self.encode_prompt(
             prompt=prompt,
             device=device,
@@ -370,27 +338,29 @@ class GaudiHunyuanVideo15Pipeline(GaudiDiffusionPipeline, HunyuanVideo15Pipeline
                 prompt_embeds_mask_2=negative_prompt_embeds_mask_2,
             )
 
-        # 4. Prepare timesteps
+        # 5. Prepare timesteps
         sigmas = np.linspace(1.0, 0.0, num_inference_steps + 1)[:-1] if sigmas is None else sigmas
         timesteps, num_inference_steps = retrieve_timesteps(self.scheduler, num_inference_steps, device, sigmas=sigmas)
 
-        # 5. Prepare latent variables
+        # 6. Prepare latent variables
         latents = self.prepare_latents(
-            batch_size * num_videos_per_prompt,
-            self.num_channels_latents,
-            height,
-            width,
-            num_frames,
-            self.transformer.dtype,
-            device,
-            generator,
-            latents,
+            batch_size=batch_size * num_videos_per_prompt,
+            num_channels_latents=self.num_channels_latents,
+            height=height,
+            width=width,
+            num_frames=num_frames,
+            dtype=self.transformer.dtype,
+            device=device,
+            generator=generator,
+            latents=latents,
         )
-        cond_latents_concat, mask_concat = self.prepare_cond_latents_and_mask(latents, self.transformer.dtype, device)
-        image_embeds = torch.zeros(
-            batch_size,
-            self.vision_num_semantic_tokens,
-            self.vision_states_dim,
+
+        cond_latents_concat, mask_concat = self.prepare_cond_latents_and_mask(
+            latents=latents,
+            image=image,
+            batch_size=batch_size * num_videos_per_prompt,
+            height=height,
+            width=width,
             dtype=self.transformer.dtype,
             device=device,
         )
@@ -408,22 +378,26 @@ class GaudiHunyuanVideo15Pipeline(GaudiDiffusionPipeline, HunyuanVideo15Pipeline
         self._num_timesteps = len(timesteps)
 
         with self.progress_bar(total=num_inference_steps) as progress_bar:
-
+            #for i, t in enumerate(timesteps):
             for i in range(len(timesteps)):
-
                 if self.interrupt:
                     continue
                 t = timesteps[0]
                 timesteps = torch.roll(timesteps, shifts=-1, dims=0)
-                self._current_timestep = t
-
-                if self.interrupt:
-                    continue
 
                 self._current_timestep = t
                 latent_model_input = torch.cat([latents, cond_latents_concat, mask_concat], dim=1)
                 # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
                 timestep = t.expand(latent_model_input.shape[0]).to(latent_model_input.dtype)
+
+                if self.transformer.config.use_meanflow:
+                    if i == len(timesteps) - 1:
+                        timestep_r = torch.tensor([0.0], device=device)
+                    else:
+                        timestep_r = timesteps[i + 1]
+                    timestep_r = timestep_r.expand(latents.shape[0]).to(latents.dtype)
+                else:
+                    timestep_r = None
 
                 # Step 1: Collect model inputs needed for the guidance method
                 # conditional inputs should always be first element in the tuple
@@ -467,6 +441,7 @@ class GaudiHunyuanVideo15Pipeline(GaudiDiffusionPipeline, HunyuanVideo15Pipeline
                             hidden_states=latent_model_input,
                             image_embeds=image_embeds,
                             timestep=timestep,
+                            timestep_r=timestep_r,
                             attention_kwargs=self.attention_kwargs,
                             return_dict=False,
                             **cond_kwargs,
@@ -513,12 +488,9 @@ class GaudiHunyuanVideo15Pipeline(GaudiDiffusionPipeline, HunyuanVideo15Pipeline
 
         self._current_timestep = None
 
-        # 8. decode the latents to video and postprocess
         if not output_type == "latent":
             latents = latents.to(self.vae.dtype) / self.vae.config.scaling_factor
-
             video = self.vae.decode(latents, return_dict=False)[0]
-
             video = self.video_processor.postprocess_video(video, output_type=output_type)
         else:
             video = latents

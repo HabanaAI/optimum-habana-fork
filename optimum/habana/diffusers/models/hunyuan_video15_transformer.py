@@ -13,22 +13,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple, Union
 
+import habana_frameworks.torch.core as htcore
 import torch
 import torch.nn.functional as F
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
 from diffusers.utils import (
     USE_PEFT_BACKEND,
-    logging,
     scale_lora_layers,
     unscale_lora_layers,
 )
+
 from ...distributed import parallel_state
 
-import habana_frameworks.torch.core as htcore
-import time #tmp
 
 def HunyuanVideo15Transformer3DModelForwardGaudi(
     self,
@@ -48,7 +46,6 @@ def HunyuanVideo15Transformer3DModelForwardGaudi(
     add mark_step.
     !!!To do: cp
     """
-
     if attention_kwargs is not None:
         attention_kwargs = attention_kwargs.copy()
         lora_scale = attention_kwargs.pop("scale", 1.0)
@@ -86,14 +83,10 @@ def HunyuanVideo15Transformer3DModelForwardGaudi(
         if seq_len % cp_size != 0:
             padded_seq_len = (seq_len // cp_size + 1) * cp_size
             pad_len = padded_seq_len - seq_len
-            print("exitdebug -HunyuanVideo15Transformer3DModelForwardGaudi pad_len=",pad_len)
-            exit()
             hidden_states = F.pad(hidden_states, (0, 0, 0, pad_len))
             cos = F.pad(image_rotary_emb[0], (0, 0, 0, pad_len))
             sin = F.pad(image_rotary_emb[1], (0, 0, 0, pad_len))
             image_rotary_emb = (cos, sin)
-            # if timestep.ndim == 2:
-            #     timestep = F.pad(timestep, (0, pad_len))
 
             seq_len = padded_seq_len
 
@@ -102,13 +95,6 @@ def HunyuanVideo15Transformer3DModelForwardGaudi(
         end = sp_seq_len * (parallel_state.get_sequence_parallel_rank() + 1)
 
         hidden_states = hidden_states[:, start:end, :]
-
-        # # timestep with 2 dims means expand_timesteps in config is True, and
-        # # We only need to split the timestep when it has 2 dim.
-        # expanded_timestep = False
-        # if timestep.ndim == 2:
-        #     expanded_timestep = True
-        #     timestep = timestep[:, start:end]
 
         cos = image_rotary_emb[0][start:end, :]
         sin = image_rotary_emb[1][start:end, :]
@@ -179,16 +165,17 @@ def HunyuanVideo15Transformer3DModelForwardGaudi(
                     image[image_mask],  # valid image
                     text_2[text_mask_2],  # valid byt5
                     text[text_mask],  # valid mllm
-                    image[~image_mask],  # invalid image
-                    torch.zeros_like(text_2[~text_mask_2]),  # invalid byt5 (zeroed)
-                    torch.zeros_like(text[~text_mask]),  # invalid mllm (zeroed)
+                    # image[~image_mask],  # invalid image
+                    # torch.zeros_like(text_2[~text_mask_2]),  # invalid byt5 (zeroed)
+                    # torch.zeros_like(text[~text_mask]),  # invalid mllm (zeroed)
                 ],
                 dim=0,
             )
         )
 
-        encoder_pad_len = image_mask[~image_mask].shape[0]+text_mask_2[~text_mask_2].shape[0]+text_mask[~text_mask].shape[0]
-        print("encoder_pad_len=",encoder_pad_len)
+        #original encoder_pad_len =
+        #image_mask[~image_mask].shape[0]+text_mask_2[~text_mask_2].shape[0]+text_mask[~text_mask].shape[0]
+        encoder_pad_len = 0
 
         # Apply same reordering to attention masks
         new_encoder_attention_mask.append(
@@ -197,9 +184,9 @@ def HunyuanVideo15Transformer3DModelForwardGaudi(
                     image_mask[image_mask],
                     text_mask_2[text_mask_2],
                     text_mask[text_mask],
-                    image_mask[~image_mask],
-                    text_mask_2[~text_mask_2],
-                    text_mask[~text_mask],
+                    # image_mask[~image_mask],
+                    # text_mask_2[~text_mask_2],
+                    # text_mask[~text_mask],
                 ],
                 dim=0,
             )
@@ -207,12 +194,10 @@ def HunyuanVideo15Transformer3DModelForwardGaudi(
 
 
     encoder_hidden_states = torch.stack(new_encoder_hidden_states)
-    encoder_attention_mask = torch.stack(new_encoder_attention_mask)
 
-    # Do not use mask to get better perf.
-    # May influent the accuracy.
-    # As seqlen in hidden_states is much bigger than encoder_hidden_states,
-    # Accuracy loss is acceptable. More test needed to verify.
+    # encoder_attention_mask = torch.stack(new_encoder_attention_mask)
+    # Do not use mask to get better attention perf.
+    # Trade off :1st transformer compile time become longer.
     encoder_attention_mask =None
 
     htcore.mark_step()
@@ -278,7 +263,6 @@ def HunyuanVideo15Transformer3DModelForwardGaudi(
     if not return_dict:
         return (hidden_states,)
 
-
     return Transformer2DModelOutput(sample=hidden_states)
 
 def HunyuanVideo15TransformerBlockForwardGaudi(
@@ -324,14 +308,12 @@ def HunyuanVideo15TransformerBlockForwardGaudi(
     norm_hidden_states = norm_hidden_states * (1 + scale_mlp[:, None]) + shift_mlp[:, None]
     norm_encoder_hidden_states = norm_encoder_hidden_states * (1 + c_scale_mlp[:, None]) + c_shift_mlp[:, None]
 
-
     # 4. Feed-forward
     ff_output = self.ff(norm_hidden_states)
     context_ff_output = self.ff_context(norm_encoder_hidden_states)
 
     hidden_states = hidden_states + gate_mlp.unsqueeze(1) * ff_output
     encoder_hidden_states = encoder_hidden_states + c_gate_mlp.unsqueeze(1) * context_ff_output
-
 
     return hidden_states, encoder_hidden_states
 
@@ -356,3 +338,42 @@ def HunyuanVideo15IndividualTokenRefinerForwardGaudi(
 
     return hidden_states
 
+
+def apply_rotary_emb_hunyuanvideo15(
+    x: torch.Tensor,
+    freqs_cis: Union[torch.Tensor, Tuple[torch.Tensor]],
+) -> Tuple[torch.Tensor, torch.Tensor]:
+
+    cos, sin = freqs_cis  # [S, D]
+
+    cos = cos[None, :, None, :]
+    sin = sin[None, :, None, :]
+
+    cos, sin = cos.to(x.device), sin.to(x.device)
+
+    x_real, x_imag = x.reshape(*x.shape[:-1], -1, 2).unbind(-1)  # [B, H, S, D//2]
+    x_rotated = torch.stack([-x_imag, x_real], dim=-1).flatten(3)
+
+    out = (x.float() * cos + x_rotated.float() * sin).to(x.dtype)
+
+    return out
+
+
+def apply_rotary_emb_hunyuanvideo15_hpu(
+    x: torch.Tensor,
+    freqs_cis: Union[torch.Tensor, Tuple[torch.Tensor]],
+) -> Tuple[torch.Tensor, torch.Tensor]:
+
+    cos, sin = freqs_cis  # [S, D]
+
+    cos = cos[None, :, None, :]
+    sin = sin[None, :, None, :]
+
+    cos, sin = cos.to(x.device), sin.to(x.device)
+
+    ori_dtype = x.dtype
+    x = x.to(cos.dtype)
+
+    out = torch.ops.hpu.rotary_pos_embedding(x, sin, cos, None, 0, 1)
+
+    return out.to(ori_dtype)

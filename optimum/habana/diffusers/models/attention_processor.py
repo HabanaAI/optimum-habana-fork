@@ -29,8 +29,9 @@ from torch import nn
 
 from ...distributed import parallel_state
 from .embeddings import RotaryPosEmbedding
+from .hunyuan_video15_transformer import apply_rotary_emb_hunyuanvideo15_hpu
 from .qwenimage_transformer import apply_rotary_emb_qwen_gaudi
-import habana_frameworks.torch.core as htcore
+
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
@@ -1203,29 +1204,6 @@ class GaudiQwenDoubleStreamAttnProcessor2_0:
         return img_attn_output, txt_attn_output
 
 
-
-def apply_rotary_emb_hunyuanvideo15(
-    x: torch.Tensor,
-    freqs_cis: Union[torch.Tensor, Tuple[torch.Tensor]],
-    use_real: bool = True,
-    use_real_unbind_dim: int = -1,
-    sequence_dim: int = 2,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-
-    cos, sin = freqs_cis  # [S, D]
-
-    cos = cos[None, :, None, :]
-    sin = sin[None, :, None, :]
-
-    cos, sin = cos.to(x.device), sin.to(x.device)
-
-    x_real, x_imag = x.reshape(*x.shape[:-1], -1, 2).unbind(-1)  # [B, H, S, D//2]
-    x_rotated = torch.stack([-x_imag, x_real], dim=-1).flatten(3)
-
-    out = (x.float() * cos + x_rotated.float() * sin).to(x.dtype)
-
-    return out
-
 class GaudiHunyuanVideo15AttnProcessor2_0:
     """
     Adapted from:
@@ -1277,11 +1255,8 @@ class GaudiHunyuanVideo15AttnProcessor2_0:
 
         # 3. Rotational positional embeddings applied to latent stream
         if image_rotary_emb is not None:
-            query = apply_rotary_emb_hunyuanvideo15(query, image_rotary_emb, sequence_dim=1)
-            key = apply_rotary_emb_hunyuanvideo15(key, image_rotary_emb, sequence_dim=1)
-        # if image_rotary_emb is not None:
-        #     query, key = apply_rotary_emb_hpu(query, key, image_rotary_emb)
-        htcore.mark_step()
+            query = apply_rotary_emb_hunyuanvideo15_hpu(query, image_rotary_emb)
+            key = apply_rotary_emb_hunyuanvideo15_hpu(key, image_rotary_emb)
 
         if self.cp_size > 1:
             bs, kv_seq, num_head, head_dim = key.shape
@@ -1311,8 +1286,6 @@ class GaudiHunyuanVideo15AttnProcessor2_0:
             if pad_len > 0:
                 key = key[:,:-pad_len,:,:]
                 value = value[:,:-pad_len,:,:]
-                print("pad_len > 0 exit-debug")
-                exit()
 
 
         # 4. Encoder condition QKV projection and normalization
@@ -1325,7 +1298,6 @@ class GaudiHunyuanVideo15AttnProcessor2_0:
             encoder_key = encoder_key.unflatten(2, (attn.heads, -1))
             encoder_value = encoder_value.unflatten(2, (attn.heads, -1))
 
-            #to do FusedRMSNorm ?
             if attn.norm_added_q is not None:
                 encoder_query = attn.norm_added_q(encoder_query)
             if attn.norm_added_k is not None:
@@ -1335,47 +1307,20 @@ class GaudiHunyuanVideo15AttnProcessor2_0:
             key = torch.cat([key, encoder_key], dim=1)
             value = torch.cat([value, encoder_value], dim=1)
 
-
         batch_size, seq_len, heads, dim = query.shape
 
         if attention_mask is not None:
-            print("before padding attention_mask.shape==",attention_mask.shape)
             attention_mask = F.pad(attention_mask, (seq_len - attention_mask.shape[1], 0), value=True)
             attention_mask = attention_mask.bool()
             self_attn_mask_1 = attention_mask.view(batch_size, 1, 1, seq_len).repeat(1, 1, seq_len, 1)
             self_attn_mask_2 = self_attn_mask_1.transpose(2, 3)
             attention_mask = (self_attn_mask_1 & self_attn_mask_2).bool()
-        # else: #for solution 2
-        #     query = query[:,:-encoder_pad_len,:,:]
-        #     key = key[:,:-encoder_pad_len,:,:]
-        #     value= value[:,:-encoder_pad_len,:,:]
 
-        htcore.mark_step()
         fsdpa_mode = "fast"
-
-        # hidden_states = self.fused_scaled_dot_product_attention(
-        #     query,
-        #     key,
-        #     value,
-        #     attention_mask,
-        #     0.0,
-        #     False,
-        #     None,
-        #     fsdpa_mode,
-        #     False,
-        #     None,
-        #     "None",
-        # )
 
         hidden_states = self.fav3.forward(
                 query, key, value,attention_mask, fsdpa_mode=fsdpa_mode, cp_size=self.cp_size
         )
-
-        # #for solution 2
-        # hidden_states = F.pad(hidden_states, (0,0,0,0,0,encoder_pad_len), value=0)
-
-        if self.cp_size > 1:
-            torch.hpu.synchronize()
 
         hidden_states = hidden_states.flatten(2, 3)
         hidden_states = hidden_states.to(query.dtype)
@@ -1393,8 +1338,6 @@ class GaudiHunyuanVideo15AttnProcessor2_0:
 
             if getattr(attn, "to_add_out", None) is not None:
                 encoder_hidden_states = attn.to_add_out(encoder_hidden_states)
-        htcore.mark_step()
-
 
         return hidden_states, encoder_hidden_states
 

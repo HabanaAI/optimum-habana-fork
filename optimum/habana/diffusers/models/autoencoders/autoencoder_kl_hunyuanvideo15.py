@@ -1,8 +1,10 @@
-import torch
-import torch.nn as nn
 import habana_frameworks.torch.core as htcore
+import torch
+import torch.nn.functional as F
 from habana_frameworks.torch.hpex.kernels import FusedSDPA
-import habana_frameworks.torch as ht_torch #tmp
+
+from ....distributed import parallel_state
+
 
 def AutoencoderKLHunyuanVideo15TiledDecodeGaudi(self, z: torch.Tensor) -> torch.Tensor:
     r"""
@@ -27,6 +29,7 @@ def AutoencoderKLHunyuanVideo15TiledDecodeGaudi(self, z: torch.Tensor) -> torch.
     row_limit_height = self.tile_sample_min_height - blend_height  # 256 - 64 = 192
     row_limit_width = self.tile_sample_min_width - blend_width  # 256 - 64 = 192
 
+    htcore.mark_step()
     rows = []
     for i in range(0, height, overlap_height):
         row = []
@@ -37,23 +40,29 @@ def AutoencoderKLHunyuanVideo15TiledDecodeGaudi(self, z: torch.Tensor) -> torch.
                 :,
                 i : i + self.tile_latent_min_height,
                 j : j + self.tile_latent_min_width,
-            ]
+            ].clone()
             decoded = self.decoder(tile)
             row.append(decoded)
             htcore.mark_step()
         rows.append(row)
+        htcore.mark_step()
 
+
+    htcore.mark_step()
     result_rows = []
     for i, row in enumerate(rows):
         result_row = []
         for j, tile in enumerate(row):
+
             if i > 0:
                 tile = self.blend_v(rows[i - 1][j], tile, blend_height)
             if j > 0:
                 tile = self.blend_h(row[j - 1], tile, blend_width)
-            result_row.append(tile[:, :, :, :row_limit_height, :row_limit_width])
+
+            result_row.append(tile[:, :, :, :row_limit_height, :row_limit_width].clone())
             htcore.mark_step()
         result_rows.append(torch.cat(result_row, dim=-1))
+        htcore.mark_step()
     dec = torch.cat(result_rows, dim=-2)
 
     return dec
@@ -72,7 +81,6 @@ def prepare_causal_attention_mask_bool(n_frame: int, n_hw: int, dtype, device, b
         torch.Tensor: Causal attention mask.
     """
     seq_len = n_frame * n_hw
-    # mask = torch.full((seq_len, seq_len), float("-inf"), dtype=dtype, device=device)
     mask = torch.zeros((seq_len, seq_len), dtype=torch.bool, device=device)
     for i in range(seq_len):
         i_frame = i // n_hw
@@ -118,25 +126,51 @@ def HunyuanVideo15AttnBlockForwardGaudi(self, x: torch.Tensor) -> torch.Tensor:
     key = key.reshape(batch_size, channels, frames * height * width).permute(0, 2, 1).unsqueeze(1).contiguous()
     value = value.reshape(batch_size, channels, frames * height * width).permute(0, 2, 1).unsqueeze(1).contiguous()
 
-    # attention_mask = self.prepare_causal_attention_mask(
-    #     frames, height * width, query.dtype, query.device, batch_size=batch_size
-    # )
     attention_mask = prepare_causal_attention_mask_optimized(
         frames, height * width, query.device, batch_size=batch_size
     )
 
     htcore.mark_step()
 
-    # x = nn.functional.scaled_dot_product_attention(query, key, value, attn_mask=attention_mask)
-
     x = FusedSDPA.apply(query, key, value, attention_mask, 0.0, False, None, "fast", None)
     htcore.mark_step()
 
     # batch_size, 1, frames * height * width, channels
-    x = x.squeeze(1).reshape(batch_size, frames, height, width, channels).permute(0, 4, 1, 2, 3)
+    x = x.squeeze(1).reshape(batch_size, frames, height, width, channels).permute(0, 4, 1, 2, 3).contiguous()
+    htcore.mark_step()
     x = self.proj_out(x)
 
     return x + identity
+
+
+def HunyuanVideo15CausalConv3dForwardGaudi(self, hidden_states: torch.Tensor) -> torch.Tensor:
+
+        if parallel_state.sequence_parallel_is_initialized():
+            htcore.mark_step()
+            # for multi-cards case, pad_mode=replicate,takes long time.
+            # Using expand + cat , to replace "replicate" padding to reduce hpu process time.
+            # when kernel_size=3, self.time_causal_padding= (1, 1, 1, 1, 2, 0)
+            # 1. Pad Time (dim 2): Prepend the first frame 2 times
+            t_pad = hidden_states[:, :, :1, :, :].expand(-1, -1, self.time_causal_padding[4], -1, -1)
+            hidden_states = torch.cat([t_pad, hidden_states], dim=2)
+
+            # 2. Pad Height (dim 3): Prepend first row and append last row
+            h_top = hidden_states[:, :, :, :1, :].expand(-1, -1, -1, self.time_causal_padding[2], -1)
+            h_bottom = hidden_states[:, :, :, -1:, :].expand(-1, -1, -1, self.time_causal_padding[3], -1)
+            hidden_states = torch.cat([h_top, hidden_states, h_bottom], dim=3)
+
+            # 3. Pad Width (dim 4): Prepend first column and append last column
+            w_left = hidden_states[:, :, :, :, :1].expand(-1, -1, -1, -1, self.time_causal_padding[0])
+            w_right = hidden_states[:, :, :, :, -1:].expand(-1, -1, -1, -1, self.time_causal_padding[1])
+            hidden_states = torch.cat([w_left, hidden_states, w_right], dim=4)
+            htcore.mark_step()
+        else:
+            hidden_states = F.pad(hidden_states, self.time_causal_padding, mode=self.pad_mode)
+
+        htcore.mark_step()
+
+        return self.conv(hidden_states)
+
 
 def HunyuanVideo15UpBlock3DForwardGaudi(self, hidden_states: torch.Tensor) -> torch.Tensor:
     r"""
@@ -155,6 +189,7 @@ def HunyuanVideo15UpBlock3DForwardGaudi(self, hidden_states: torch.Tensor) -> to
     if self.upsamplers is not None:
         for upsampler in self.upsamplers:
             hidden_states = upsampler(hidden_states)
+            htcore.mark_step()
 
     return hidden_states
 
@@ -176,11 +211,12 @@ def HunyuanVideo15Decoder3DForwardGaudi(self, hidden_states: torch.Tensor) -> to
         htcore.mark_step()
         for up_block in self.up_blocks:
             hidden_states = up_block(hidden_states)
-        htcore.mark_step()
+            htcore.mark_step()
 
     # post-process
     hidden_states = self.norm_out(hidden_states)
     hidden_states = self.conv_act(hidden_states)
+
     htcore.mark_step()
     hidden_states = self.conv_out(hidden_states)
 
