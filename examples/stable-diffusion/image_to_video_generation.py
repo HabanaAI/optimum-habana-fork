@@ -28,6 +28,7 @@ from optimum.habana.diffusers import (
     GaudiI2VGenXLPipeline,
     GaudiStableVideoDiffusionPipeline,
     GaudiWanImageToVideoPipeline,
+    GaudiHunyuanVideo15ImageToVideoPipeline,
 )
 from optimum.habana.distributed import parallel_state
 from optimum.habana.transformers.gaudi_configuration import GaudiConfig
@@ -255,8 +256,11 @@ def main():
     is_cogvideo_model = any(model in args.model_name_or_path.lower() for model in cogvideo_models)
     wan_i2v_models = ["Wan2.2"]
     is_wan_i2v_model = any(model in args.model_name_or_path for model in wan_i2v_models)
+    hunyuan_video_15_models = ["HunyuanVideo-1.5"]
+    is_hunyuan_video_15_model = any(model in args.model_name_or_path for model in hunyuan_video_15_models)
 
-    if is_wan_i2v_model:
+
+    if is_wan_i2v_model or is_hunyuan_video_15_model:
         gaudi_config_kwargs = {"use_fused_adam": True, "use_fused_clip_norm": True}
         if args.bf16:
             gaudi_config_kwargs["use_torch_autocast"] = True
@@ -274,7 +278,7 @@ def main():
         image = load_image(image_path)
         if is_i2v_model:
             image = image.convert("RGB")
-        elif is_wan_i2v_model:
+        elif is_wan_i2v_model or is_hunyuan_video_15_model:
             image = image.resize((args.height, args.width))
             # wan2.2 i2v pipeline only accepts 1 image
             input = image
@@ -351,6 +355,14 @@ def main():
             **kwargs,
         )
         generator = torch.Generator(device="cpu").manual_seed(args.seed)
+    elif is_hunyuan_video_15_model:
+        del kwargs["scheduler"]
+        pipeline = GaudiHunyuanVideo15ImageToVideoPipeline.from_pretrained(
+            args.model_name_or_path,
+            **kwargs,
+        )
+        pipeline.vae.enable_tiling()
+        generator = torch.Generator(device="cpu").manual_seed(args.seed)
     else:
         pipeline = GaudiStableVideoDiffusionPipeline.from_pretrained(
             args.model_name_or_path,
@@ -414,6 +426,19 @@ def main():
                 num_frames=args.num_frames,
                 num_inference_steps=args.num_inference_steps,
                 guidance_scale=5.0,  # WAN I2V recommended guidance scale
+                generator=generator,
+                output_type=args.output_type,
+                profiling_warmup_steps=args.profiling_warmup_steps,
+                profiling_steps=args.profiling_steps,
+            )
+        elif is_hunyuan_video_15_model:
+            outputs = pipeline(
+                image=input,
+                prompt=args.prompts,
+                negative_prompt=args.negative_prompts,
+                num_videos_per_prompt=args.num_videos_per_prompt,
+                num_frames=args.num_frames,
+                num_inference_steps=args.num_inference_steps,
                 generator=generator,
                 output_type=args.output_type,
                 profiling_warmup_steps=args.profiling_warmup_steps,
