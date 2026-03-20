@@ -29,6 +29,7 @@ from torch import nn
 
 from ...distributed import parallel_state
 from .embeddings import RotaryPosEmbedding
+from .hunyuan_video15_transformer import apply_rotary_emb_hunyuanvideo15_hpu
 from .qwenimage_transformer import apply_rotary_emb_qwen_gaudi
 
 
@@ -204,13 +205,14 @@ class AttnProcessor2_0:
     def __call__(
         self,
         attn: Attention,
-        hidden_states: torch.FloatTensor,
-        encoder_hidden_states: Optional[torch.FloatTensor] = None,
-        attention_mask: Optional[torch.FloatTensor] = None,
-        temb: Optional[torch.FloatTensor] = None,
+        hidden_states: torch.Tensor,
+        encoder_hidden_states: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        temb: Optional[torch.Tensor] = None,
         *args,
         **kwargs,
-    ) -> torch.FloatTensor:
+    ) -> torch.Tensor:
+
         if len(args) > 0 or kwargs.get("scale", None) is not None:
             deprecation_message = "The `scale` argument is deprecated and will be ignored. Please remove it, as passing it will raise an error in the future. `scale` should directly be passed while calling the underlying pipeline component i.e., via `cross_attention_kwargs`."
             deprecate("scale", "1.0.0", deprecation_message)
@@ -255,6 +257,11 @@ class AttnProcessor2_0:
 
         key = key.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
         value = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+
+        if attn.norm_q is not None:
+            query = attn.norm_q(query)
+        if attn.norm_k is not None:
+            key = attn.norm_k(key)
 
         # the output of sdp = (batch, num_heads, seq_len, head_dim)
         # TODO: add support for attn.scale when we move to Torch 2.1
@@ -1190,5 +1197,142 @@ class GaudiQwenDoubleStreamAttnProcessor2_0:
 
         return img_attn_output, txt_attn_output
 
+
+class GaudiHunyuanVideo15AttnProcessor2_0:
+    """
+    Adapted from:
+    https://github.com/huggingface/diffusers/blob/v0.36.0/src/diffusers/models/transformers/transformer_hunyuan_video15.py#L44
+        * Modified SDPA to use Gaudi fused SDPA kernel/FA3
+        ---To do:
+        apply_rotary_emb_hunyuanvideo15->Gaudi apply_rotary_pos_emb
+        fav3 ? or FusedSDPA?
+        check attention_mask ?
+        FusedRMSNorm ?
+        * apply_rotary_emb_qwen use_real=True
+        * support cp
+        * Padding for encoder_hidden_states
+    """
+
+
+    _attention_backend = None
+    _parallel_config = None
+
+    def __init__(self):
+
+        self.fused_scaled_dot_product_attention = ModuleFusedSDPA(FusedSDPA) if FusedSDPA else None
+        self.cp_size = parallel_state.get_sequence_parallel_world_size()
+        self.fav3 = FlashAttnV3Gaudi()
+
+    def __call__(
+        self,
+        attn: Attention,
+        hidden_states: torch.Tensor,
+        encoder_hidden_states: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        image_rotary_emb: Optional[torch.Tensor] = None,
+        pad_len: Optional[int] = 0,
+        encoder_pad_len: Optional[int] = 0,
+    ) -> torch.Tensor:
+
+        # 1. QKV projections
+        query = attn.to_q(hidden_states)
+        key = attn.to_k(hidden_states)
+        value = attn.to_v(hidden_states)
+
+        query = query.unflatten(2, (attn.heads, -1))
+        key = key.unflatten(2, (attn.heads, -1))
+        value = value.unflatten(2, (attn.heads, -1))
+
+        # 2. QK normalization
+        query = attn.norm_q(query)
+        key = attn.norm_k(key)
+
+        # 3. Rotational positional embeddings applied to latent stream
+        if image_rotary_emb is not None:
+            query = apply_rotary_emb_hunyuanvideo15_hpu(query, image_rotary_emb)
+            key = apply_rotary_emb_hunyuanvideo15_hpu(key, image_rotary_emb)
+
+        if self.cp_size > 1:
+            bs, kv_seq, num_head, head_dim = key.shape
+            key = key.reshape(bs, kv_seq, -1)
+            value = value.reshape(bs, kv_seq, -1)
+            full_key = torch.empty(
+                bs, kv_seq * self.cp_size, num_head * head_dim, dtype=key.dtype, device=key.device
+            )
+            full_value = torch.empty(
+                bs, kv_seq * self.cp_size, num_head * head_dim, dtype=value.dtype, device=value.device
+            )
+            gather1 = torch.distributed.all_gather_into_tensor(
+                full_key,
+                key,
+                group=parallel_state.get_sequence_parallel_group(),
+                async_op=True,
+            )
+            torch.distributed.all_gather_into_tensor(
+                full_value,
+                value,
+                group=parallel_state.get_sequence_parallel_group(),
+                async_op=False,
+            )
+            gather1.wait()
+            key = full_key.reshape(bs, kv_seq * self.cp_size, num_head, head_dim)
+            value = full_value.reshape(bs, kv_seq * self.cp_size, num_head, head_dim)
+            if pad_len > 0:
+                key = key[:,:-pad_len,:,:]
+                value = value[:,:-pad_len,:,:]
+
+
+        # 4. Encoder condition QKV projection and normalization
+        if encoder_hidden_states is not None:
+            encoder_query = attn.add_q_proj(encoder_hidden_states)
+            encoder_key = attn.add_k_proj(encoder_hidden_states)
+            encoder_value = attn.add_v_proj(encoder_hidden_states)
+
+            encoder_query = encoder_query.unflatten(2, (attn.heads, -1))
+            encoder_key = encoder_key.unflatten(2, (attn.heads, -1))
+            encoder_value = encoder_value.unflatten(2, (attn.heads, -1))
+
+            if attn.norm_added_q is not None:
+                encoder_query = attn.norm_added_q(encoder_query)
+            if attn.norm_added_k is not None:
+                encoder_key = attn.norm_added_k(encoder_key)
+
+            query = torch.cat([query, encoder_query], dim=1)
+            key = torch.cat([key, encoder_key], dim=1)
+            value = torch.cat([value, encoder_value], dim=1)
+
+        batch_size, seq_len, heads, dim = query.shape
+
+        if attention_mask is not None:
+            attention_mask = F.pad(attention_mask, (seq_len - attention_mask.shape[1], 0), value=True)
+            attention_mask = attention_mask.bool()
+            self_attn_mask_1 = attention_mask.view(batch_size, 1, 1, seq_len).repeat(1, 1, seq_len, 1)
+            self_attn_mask_2 = self_attn_mask_1.transpose(2, 3)
+            attention_mask = (self_attn_mask_1 & self_attn_mask_2).bool()
+
+        fsdpa_mode = "fast"
+
+        hidden_states = self.fav3.forward(
+                query, key, value,attention_mask, fsdpa_mode=fsdpa_mode, cp_size=self.cp_size
+        )
+
+        hidden_states = hidden_states.flatten(2, 3)
+        hidden_states = hidden_states.to(query.dtype)
+
+        # 6. Output projection
+        if encoder_hidden_states is not None:
+            hidden_states, encoder_hidden_states = (
+                hidden_states[:, : -encoder_hidden_states.shape[1]],
+                hidden_states[:, -encoder_hidden_states.shape[1] :],
+            )
+
+            if getattr(attn, "to_out", None) is not None:
+                hidden_states = attn.to_out[0](hidden_states)
+                hidden_states = attn.to_out[1](hidden_states)
+
+            if getattr(attn, "to_add_out", None) is not None:
+                encoder_hidden_states = attn.to_add_out(encoder_hidden_states)
+
+        return hidden_states, encoder_hidden_states
 
 AttentionProcessor = Union[AttnProcessor2_0,]

@@ -653,3 +653,55 @@ bash run_kolors_inpainting_demo.sh
    This issue is expected to be resolved in a future release.
 
 - **Image-to-Video ControlNet**: The Image-to-Video ControlNet command is currently not supported on Gaudi3.
+
+
+### Image-to-Video with Hunyuanvideo1.5
+Hunyuanvideo1.5 is a video generation model. Please refer to [Huggingface Hunyuanvideo1.5 doc](https://huggingface.co/tencent/HunyuanVideo-1.5)
+
+Here is how to generate a video with one image and text prompt:
+
+```bash
+PT_HPU_SYNC_LAUNCH=1 \
+PT_HPU_LAZY_MODE=1 \
+python image_to_video_generation.py \
+    --model_name_or_path "hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_i2v" \
+    --image_path "https://raw.githubusercontent.com/Wan-Video/Wan2.2/main/examples/i2v_input.JPG" \
+    --video_save_dir ./hunyuanvideo1.5-output \
+    --prompts "Summer beach vacation style, a white cat wearing sunglasses sits on a surfboard. The fluffy-furred feline gazes directly at the camera with a relaxed expression. Blurred beach scenery forms the background featuring crystal-clear waters, distant green hills, and a blue sky dotted with white clouds. The cat assumes a naturally relaxed posture, as if savoring the sea breeze and warm sunlight. A close-up shot highlights the feline's intricate details and the refreshing atmosphere of the seaside." \
+    --use_habana \
+    --fps 16 \
+    --num_frames 81 \
+    --sdp_on_bf16 \
+    --bf16 
+```
+
+For multi-cards inference, we support both traditional sequence parallelism (SP) to accelerate the inference. 
+
+```bash
+bash run_hunyuanvideo15_i2v_demo.sh
+```
+
+### Text-to-Video with Hunyuanvideo1.5
+Hunyuanvideo1.5 is a video generation model. Please refer to [Huggingface Hunyuanvideo1.5 doc](https://huggingface.co/tencent/HunyuanVideo-1.5)
+
+Here is how to generate a video with text prompt:
+
+```bash
+PT_HPU_SYNC_LAUNCH=1 \
+PT_HPU_LAZY_MODE=1 \
+python text_to_video_generation.py \
+    --model_name_or_path "hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_t2v" \
+    --prompts "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage." \
+    --pipeline_type hunyuan_video_15 \
+    --num_videos_per_prompt 1 \
+    --use_habana \
+    --num_frames 121 \
+    --num_inference_steps 20 \
+    --dtype bf16
+```
+
+For multi-cards inference, we support both traditional sequence parallelism (SP) to accelerate the inference. 
+
+```bash
+bash run_hunyuanvideo15_t2v_demo.sh
+```

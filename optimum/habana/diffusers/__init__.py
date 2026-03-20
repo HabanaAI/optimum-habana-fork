@@ -1,3 +1,5 @@
+from diffusers import __version__
+
 from .pipelines.auto_pipeline import AutoPipelineForInpainting, AutoPipelineForText2Image
 from .pipelines.cogvideox.pipeline_cogvideox import GaudiCogVideoXPipeline
 from .pipelines.cogvideox.pipeline_cogvideox_image2video import GaudiCogVideoXImageToVideoPipeline
@@ -13,9 +15,12 @@ from .pipelines.flux2.pipeline_flux2 import GaudiFlux2Pipeline
 from .pipelines.i2vgen_xl.pipeline_i2vgen_xl import GaudiI2VGenXLPipeline
 from .pipelines.pipeline_utils import GaudiDiffusionPipeline
 from .pipelines.qwenimage.pipeline_qwenimage import GaudiQwenImagePipeline
-from diffusers import __version__
+
+
 if "dev" in __version__:
     from .pipelines.qwenimage.pipeline_qwenimage_layered import GaudiQwenImageLayeredPipeline
+from .pipelines.hunyuan_video1_5.pipeline_hunyuan_video1_5 import GaudiHunyuanVideo15Pipeline
+from .pipelines.hunyuan_video1_5.pipeline_hunyuan_video1_5_image2video import GaudiHunyuanVideo15ImageToVideoPipeline
 from .pipelines.qwenimage.pipeline_qwenimage_edit import GaudiQwenImageEditPipeline
 from .pipelines.qwenimage.pipeline_qwenimage_edit_plus import GaudiQwenImageEditPlusPipeline
 from .pipelines.stable_diffusion.pipeline_stable_diffusion import GaudiStableDiffusionPipeline

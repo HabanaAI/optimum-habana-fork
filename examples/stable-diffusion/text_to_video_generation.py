@@ -24,7 +24,12 @@ from pathlib import Path
 import torch
 from diffusers.utils.export_utils import export_to_video
 
-from optimum.habana.diffusers import GaudiCogVideoXPipeline, GaudiTextToVideoSDPipeline, GaudiWanPipeline
+from optimum.habana.diffusers import (
+    GaudiCogVideoXPipeline, 
+    GaudiTextToVideoSDPipeline, 
+    GaudiWanPipeline,
+    GaudiHunyuanVideo15Pipeline,
+)
 from optimum.habana.distributed import parallel_state
 from optimum.habana.transformers.gaudi_configuration import GaudiConfig
 from optimum.habana.utils import set_seed
@@ -58,7 +63,7 @@ def main():
         "--pipeline_type",
         type=str,
         default="stable_diffusion",
-        help="pipeline type:stable_diffusion, cogvideoX or wan",
+        help="pipeline type:stable_diffusion, cogvideoX or wan or hunyuan_video_15",
     )
     # Pipeline arguments
     parser.add_argument(
@@ -225,6 +230,9 @@ def main():
         pipeline.vae.enable_slicing()
     elif args.pipeline_type == "wan":
         pipeline: GaudiWanPipeline = GaudiWanPipeline.from_pretrained(args.model_name_or_path, **kwargs)
+    elif args.pipeline_type == "hunyuan_video_15":
+        pipeline: GaudiHunyuanVideo15Pipeline = GaudiHunyuanVideo15Pipeline.from_pretrained(args.model_name_or_path, **kwargs)
+        pipeline.vae.enable_tiling()
     else:
         logger.error(f"unsupported pipeline type {args.pipeline_type}")
         return None
@@ -264,6 +272,15 @@ def main():
                 output_type="np" if args.output_type == "mp4" else args.output_type,
                 **kwargs_call,
             )
+        elif args.pipeline_type == "hunyuan_video_15":
+            set_seed(args.seed)
+            video = pipeline(
+                prompt=args.prompts,
+                num_videos_per_prompt=args.num_videos_per_prompt,
+                num_inference_steps=args.num_inference_steps,
+                num_frames=args.num_frames,
+                generator=torch.Generator(device="cpu").manual_seed(args.seed),
+            ).frames[0]
         torch.hpu.synchronize()
         if torch.distributed.is_initialized():
             torch.distributed.barrier()
@@ -272,10 +289,10 @@ def main():
         if (torch.distributed.is_initialized() and torch.distributed.get_rank() == 0) or not torch.distributed.is_initialized():
             logger.info("Text2Video Generation Latency in Loop #{:d}: {:.1f} sec".format(i, duration))
         
-    if args.pipeline_type == "cogvideox":
+    if args.pipeline_type == "cogvideox" or args.pipeline_type == "hunyuan_video_15":
         video_save_dir = Path(args.video_save_dir)
         video_save_dir.mkdir(parents=True, exist_ok=True)
-        filename = video_save_dir / "cogvideoX_out.mp4"
+        filename = video_save_dir / (args.pipeline_type+"_t2v_out.mp4")
         export_to_video(video, str(filename.resolve()), fps=args.fps)
     else:
         # Save the pipeline in the specified directory if not None
@@ -290,7 +307,7 @@ def main():
                 logger.info(f"Saving videos in {video_save_dir.resolve()}...")
 
                 for i, video in enumerate(outputs.frames):
-                    filename = video_save_dir / f"wan_video_{i + 1}.mp4"
+                    filename = video_save_dir / f"t2v_video_{i + 1}.mp4"
                     export_to_video(video, str(filename.resolve()), fps=args.fps)
             else:
                 logger.warning("--output_type should be equal to 'mp4' to save videos in --video_save_dir.")
