@@ -153,16 +153,11 @@ class FlashAttnV3Gaudi:
                 key_slice = key[..., kv_start:kv_end, :]
                 value_slice = value[..., kv_start:kv_end, :]
 
-                if attention_mask is not None:
-                    attention_mask_slice = attention_mask[..., query_start:query_end,kv_start:kv_end]
-                else:
-                    attention_mask_slice = None
-
                 block_out, block_m, block_linv, _ = torch.ops.hpu.sdpa_recomp_fwd(
                     query_slice,
                     key_slice,
                     value_slice,
-                    attention_mask_slice,
+                    None,
                     0.0,
                     1 / math.sqrt(query.shape[-1]),
                     False,
@@ -280,6 +275,7 @@ class AttnProcessor2_0:
         else:
             import habana_frameworks.torch.hpu as ht
             from habana_frameworks.torch.hpex.kernels import FusedSDPA
+
             with ht.sdp_kernel(enable_recompute=True):
                 hidden_states = FusedSDPA.apply(query, key, value, attention_mask, 0.0, False)
 
@@ -330,8 +326,6 @@ class ModuleFusedSDPA(torch.nn.Module):
         padding_side="left",
     ):
         query, key, value = (x.permute(0, 2, 1, 3).contiguous() for x in (query, key, value))
-        sdpa_out = FusedSDPA.apply(query, key, value,attn_mask,0.0,False)
-
         out = self._hpu_kernel_fsdpa.apply(
             query,
             key,
@@ -345,7 +339,6 @@ class ModuleFusedSDPA(torch.nn.Module):
             valid_sequence_lengths,
             padding_side,
         )
-
         return out.permute(0, 2, 1, 3)
 
 
@@ -575,6 +568,7 @@ class GaudiJointAttnProcessor2_0:
         fsdpa_mode = "None" if self.is_training else "fast"
         hidden_states = FusedSDPA.apply(query, key, value, None, 0.0, False, None, fsdpa_mode, None)
 
+        # hidden_states = F.scaled_dot_product_attention(query, key, value, dropout_p=0.0, is_causal=False)
         hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim)
         hidden_states = hidden_states.to(query.dtype)
 

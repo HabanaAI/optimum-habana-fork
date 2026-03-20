@@ -48,7 +48,6 @@ from .pipelines.z_image.pipeline_zimage import GaudiZImagePipeline
 from .pipelines.z_image.pipeline_zimage_omni import GaudiZImageOmniPipeline
 from .pipelines.z_image.pipeline_zimage_controlnet import GaudiZImageControlNetPipeline
 from .pipelines.z_image.pipeline_zimage_controlnet_inpaint import GaudiZImageControlNetInpaintPipeline
-from .pipelines.hunyuan_video1_5.pipeline_hunyuan_video1_5 import GaudiHunyuanVideo15Pipeline
 from .schedulers import (
     GaudiDDIMScheduler,
     GaudiEulerAncestralDiscreteScheduler,
