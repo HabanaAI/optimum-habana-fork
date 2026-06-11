@@ -155,6 +155,57 @@ def main():
 
     parser.add_argument("--seed", type=int, default=42, help="Random seed for initialization.")
 
+    # cache_dit (DBCache) block-caching arguments (Wan pipeline only)
+    parser.add_argument(
+        "--use_cache_dit",
+        action="store_true",
+        help="Enable cache_dit (DBCache) block-level caching to accelerate inference (wan pipeline only).",
+    )
+    parser.add_argument(
+        "--cache_threshold",
+        type=float,
+        default=0.24,
+        help="cache_dit residual_diff_threshold (higher caches more: faster, lower fidelity).",
+    )
+    parser.add_argument(
+        "--cache_warmup",
+        type=int,
+        default=8,
+        help="cache_dit global max_warmup_steps (initial steps always computed).",
+    )
+    parser.add_argument(
+        "--cache_fn_blocks",
+        type=int,
+        default=1,
+        help="cache_dit Fn_compute_blocks (leading transformer blocks always computed).",
+    )
+    parser.add_argument(
+        "--cache_warmup_per_transformer",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Per-transformer warmup steps for Wan2.2 [high_noise, low_noise], e.g. 4 2. "
+        "Overrides --cache_warmup via a per-transformer ParamsModifier.",
+    )
+    parser.add_argument(
+        "--cache_threshold_per_transformer",
+        type=float,
+        nargs="+",
+        default=None,
+        help="Per-transformer thresholds aligned to --cache_warmup_per_transformer, e.g. 0.24 0.24.",
+    )
+    parser.add_argument(
+        "--no_taylorseer",
+        action="store_true",
+        help="Disable the cache_dit TaylorSeer calibrator (enabled by default).",
+    )
+    parser.add_argument(
+        "--taylorseer_order",
+        type=int,
+        default=1,
+        help="cache_dit TaylorSeer expansion order.",
+    )
+
     # HPU-specific arguments
     parser.add_argument("--use_habana", action="store_true", help="Use HPU.")
     parser.add_argument(
@@ -225,6 +276,16 @@ def main():
         pipeline.vae.enable_slicing()
     elif args.pipeline_type == "wan":
         pipeline: GaudiWanPipeline = GaudiWanPipeline.from_pretrained(args.model_name_or_path, **kwargs)
+        if args.use_cache_dit:
+            pipeline.enable_cache_dit(
+                residual_diff_threshold=args.cache_threshold,
+                max_warmup_steps=args.cache_warmup,
+                Fn_compute_blocks=args.cache_fn_blocks,
+                use_taylorseer=not args.no_taylorseer,
+                taylorseer_order=args.taylorseer_order,
+                warmup_steps_per_transformer=args.cache_warmup_per_transformer,
+                thresholds_per_transformer=args.cache_threshold_per_transformer,
+            )
     else:
         logger.error(f"unsupported pipeline type {args.pipeline_type}")
         return None
