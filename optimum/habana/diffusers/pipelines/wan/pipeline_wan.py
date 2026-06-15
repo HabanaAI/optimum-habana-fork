@@ -152,6 +152,121 @@ class GaudiWanPipeline(GaudiDiffusionPipeline, WanPipeline):
             if self.transformer_2 is not None:
                 self.transformer_2 = wrap_in_hpu_graph(transformer_2)
 
+    def enable_cache_dit(
+        self,
+        residual_diff_threshold: float = 0.24,
+        max_warmup_steps: int = 8,
+        Fn_compute_blocks: int = 1,
+        Bn_compute_blocks: int = 0,
+        max_continuous_cached_steps: int = 3,
+        use_taylorseer: bool = True,
+        taylorseer_order: int = 1,
+        warmup_steps_per_transformer: Optional[List[int]] = None,
+        thresholds_per_transformer: Optional[List[float]] = None,
+    ):
+        r"""
+        Enable cache_dit (DBCache) block-level caching on the Wan transformer(s) to accelerate
+        inference. Stacks on top of bf16 or FP8 — call this AFTER any FP8 convert, and before
+        generation. Requires eager mode (`use_hpu_graphs=False`): cache_dit hooks the eager
+        block forwards and is incompatible with HPU graphs.
+
+        Wan2.2-A14B exposes two transformers (high-noise `transformer`, low-noise
+        `transformer_2`); both are registered as a dual `BlockAdapter`. Per-transformer warmup
+        and threshold are supplied via `warmup_steps_per_transformer` / `thresholds_per_transformer`
+        (each a list aligned to the present transformers, e.g. `[4, 2]` for [high-noise, low-noise]).
+        When `warmup_steps_per_transformer` is omitted, the global `max_warmup_steps` /
+        `residual_diff_threshold` apply to every transformer.
+
+        Args:
+            residual_diff_threshold (`float`, defaults to `0.24`):
+                DBCache residual-difference threshold; higher caches more (faster, lower fidelity).
+            max_warmup_steps (`int`, defaults to `8`):
+                Number of initial steps always computed (never cached), applied globally.
+            Fn_compute_blocks (`int`, defaults to `1`):
+                Number of leading transformer blocks always computed each step.
+            Bn_compute_blocks (`int`, defaults to `0`):
+                Number of trailing transformer blocks always computed each step.
+            max_continuous_cached_steps (`int`, defaults to `3`):
+                Cap on consecutive cached steps before forcing a full recompute.
+            use_taylorseer (`bool`, defaults to `True`):
+                Enable the TaylorSeer calibrator to approximate cached residuals.
+            taylorseer_order (`int`, defaults to `1`):
+                TaylorSeer expansion order.
+            warmup_steps_per_transformer (`List[int]`, *optional*):
+                Per-transformer warmup steps, aligned to the present transformers (e.g. `[4, 2]`).
+                Enables a per-transformer `ParamsModifier` override.
+            thresholds_per_transformer (`List[float]`, *optional*):
+                Per-transformer thresholds, aligned to `warmup_steps_per_transformer`. Falls back
+                to `residual_diff_threshold` for every transformer when omitted.
+        """
+        import cache_dit
+        from cache_dit import DBCacheConfig
+
+        transformers = [t for t in (self.transformer, self.transformer_2) if t is not None]
+        if not transformers:
+            raise ValueError("enable_cache_dit() requires at least one transformer on the pipeline.")
+        adapter = cache_dit.BlockAdapter(
+            pipe=self,
+            transformer=transformers,
+            blocks=[t.blocks for t in transformers],
+            forward_pattern=[cache_dit.Pattern_2] * len(transformers),
+            check_forward_pattern=True,
+            has_separate_cfg=True,
+        )
+
+        calibrator_config = None
+        if use_taylorseer:
+            calibrator_config = cache_dit.TaylorSeerCalibratorConfig(taylorseer_order=taylorseer_order)
+
+        params_modifiers = None
+        if warmup_steps_per_transformer is not None:
+            from cache_dit import ParamsModifier
+
+            if thresholds_per_transformer is None:
+                thresholds_per_transformer = [residual_diff_threshold] * len(warmup_steps_per_transformer)
+            if len(thresholds_per_transformer) != len(warmup_steps_per_transformer):
+                raise ValueError(
+                    "thresholds_per_transformer and warmup_steps_per_transformer must have the same length."
+                )
+            params_modifiers = [
+                ParamsModifier(
+                    cache_config=DBCacheConfig(
+                        Fn_compute_blocks=Fn_compute_blocks,
+                        Bn_compute_blocks=Bn_compute_blocks,
+                        max_warmup_steps=warmup,
+                        max_continuous_cached_steps=max_continuous_cached_steps,
+                        residual_diff_threshold=threshold,
+                    )
+                )
+                for warmup, threshold in zip(warmup_steps_per_transformer, thresholds_per_transformer)
+            ]
+
+        cache_dit.enable_cache(
+            adapter,
+            cache_config=DBCacheConfig(
+                Fn_compute_blocks=Fn_compute_blocks,
+                Bn_compute_blocks=Bn_compute_blocks,
+                max_warmup_steps=max_warmup_steps,
+                max_continuous_cached_steps=max_continuous_cached_steps,
+                residual_diff_threshold=residual_diff_threshold,
+            ),
+            calibrator_config=calibrator_config,
+            params_modifiers=params_modifiers,
+        )
+        logger.info(
+            "cache_dit enabled: threshold=%s, max_warmup_steps=%s, Fn=%s, Bn=%s, "
+            "per_transformer_warmup=%s, per_transformer_threshold=%s, taylorseer=%s(order=%s)",
+            residual_diff_threshold,
+            max_warmup_steps,
+            Fn_compute_blocks,
+            Bn_compute_blocks,
+            warmup_steps_per_transformer,
+            thresholds_per_transformer,
+            use_taylorseer,
+            taylorseer_order,
+        )
+        return self
+
     def prepare_latents(
         self,
         batch_size: int,
