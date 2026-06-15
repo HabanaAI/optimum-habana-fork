@@ -164,7 +164,7 @@ def main():
     parser.add_argument(
         "--cache_threshold",
         type=float,
-        default=0.24,
+        default=0.15,
         help="cache_dit residual_diff_threshold (higher caches more: faster, lower fidelity).",
     )
     parser.add_argument(
