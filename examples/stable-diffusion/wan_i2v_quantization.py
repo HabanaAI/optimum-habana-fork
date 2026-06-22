@@ -203,9 +203,10 @@ def main():
         "--cache_warmup_per_transformer",
         type=int,
         nargs="+",
-        default=None,
-        help="Per-transformer warmup steps for Wan2.2 [high_noise, low_noise], e.g. 4 2. "
-        "Overrides --cache_warmup via a per-transformer ParamsModifier.",
+        default=[6, 3],
+        help="Per-transformer warmup steps for Wan2.2-A14B [high_noise, low_noise]. "
+        "Default [6, 3] is the validated best-speed/good-quality config (~2.06x denoise, threshold 0.15). "
+        "Overrides --cache_warmup via a per-transformer ParamsModifier; pass a single value for single-transformer models.",
     )
     parser.add_argument(
         "--cache_threshold_per_transformer",
