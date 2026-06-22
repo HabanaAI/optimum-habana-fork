@@ -175,6 +175,57 @@ def main():
 
     parser.add_argument("--seed", type=int, default=42, help="Random seed for initialization.")
 
+    # cache_dit (DBCache) block-caching arguments
+    parser.add_argument(
+        "--use_cache_dit",
+        action="store_true",
+        help="Enable cache_dit (DBCache) block-level caching to accelerate inference.",
+    )
+    parser.add_argument(
+        "--cache_threshold",
+        type=float,
+        default=0.15,
+        help="cache_dit residual_diff_threshold (higher caches more: faster, lower fidelity).",
+    )
+    parser.add_argument(
+        "--cache_warmup",
+        type=int,
+        default=8,
+        help="cache_dit global max_warmup_steps (initial steps always computed).",
+    )
+    parser.add_argument(
+        "--cache_fn_blocks",
+        type=int,
+        default=1,
+        help="cache_dit Fn_compute_blocks (leading transformer blocks always computed).",
+    )
+    parser.add_argument(
+        "--cache_warmup_per_transformer",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Per-transformer warmup steps for Wan2.2 [high_noise, low_noise], e.g. 4 2. "
+        "Overrides --cache_warmup via a per-transformer ParamsModifier.",
+    )
+    parser.add_argument(
+        "--cache_threshold_per_transformer",
+        type=float,
+        nargs="+",
+        default=None,
+        help="Per-transformer thresholds aligned to --cache_warmup_per_transformer, e.g. 0.24 0.24.",
+    )
+    parser.add_argument(
+        "--no_taylorseer",
+        action="store_true",
+        help="Disable the cache_dit TaylorSeer calibrator (enabled by default).",
+    )
+    parser.add_argument(
+        "--taylorseer_order",
+        type=int,
+        default=1,
+        help="cache_dit TaylorSeer expansion order.",
+    )
+
     # HPU-specific arguments
     parser.add_argument("--use_habana", action="store_true", help="Use HPU.")
     parser.add_argument(
@@ -229,7 +280,8 @@ def main():
 
     kwargs = {
         "use_habana": args.use_habana,
-        "use_hpu_graphs": args.use_hpu_graphs,
+        # cache_dit hooks eager block forwards and is incompatible with HPU graphs; force eager when caching.
+        "use_hpu_graphs": False if args.use_cache_dit else args.use_hpu_graphs,
         "gaudi_config": gaudi_config,
     }
     if args.dtype == "bf16":
@@ -258,6 +310,19 @@ def main():
                 pipeline.transformer = prepare(pipeline.transformer, config)
             elif config.quantize:
                 pipeline.transformer = convert(pipeline.transformer, config)
+
+    # Enable cache_dit (DBCache) block caching after any FP8 convert. The two acceleration axes
+    # (FP8 quant + cache_dit) are orthogonal and compound.
+    if args.use_cache_dit:
+        pipeline.enable_cache_dit(
+            residual_diff_threshold=args.cache_threshold,
+            max_warmup_steps=args.cache_warmup,
+            Fn_compute_blocks=args.cache_fn_blocks,
+            use_taylorseer=not args.no_taylorseer,
+            taylorseer_order=args.taylorseer_order,
+            warmup_steps_per_transformer=args.cache_warmup_per_transformer,
+            thresholds_per_transformer=args.cache_threshold_per_transformer,
+        )
 
     set_seed(args.seed)
     max_area = args.max_area
