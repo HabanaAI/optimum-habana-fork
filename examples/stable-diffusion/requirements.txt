@@ -4,3 +4,4 @@ sentencepiece
 peft == 0.17.0
 kolors @ git+https://github.com/Kwai-Kolors/Kolors.git
 ftfy
+cache-dit >= 1.1.9
