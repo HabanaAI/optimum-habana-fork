@@ -443,6 +443,23 @@ class GaudiWanPipeline(GaudiDiffusionPipeline, WanPipeline):
             )
             height = (height // self.vae_scale_factor_spatial // p_h + 1) * p_h * self.vae_scale_factor_spatial
 
+        # Gaudi: auto-enable VAE tiling for large VAE workloads so the decode stays under the
+        # ~96GB HBM ceiling. Wan decodes per-latent-frame; when the per-frame conv3d exceeds
+        # the ceiling the failed allocation materializes as an all-zero (black) video -- T2V
+        # has no vae.encode, so unlike I2V it does not hard-crash, it silently goes black
+        # (confirmed at 1080p). Same gate as the I2V pipeline (high resolution OR long clips)
+        # for consistency. A 200px stride keeps tile boundaries off the CP=4 latent shard
+        # boundaries (60/120/180), avoiding a center seam.
+        if (
+            getattr(self, "vae", None) is not None
+            and not self.vae.use_tiling
+            and (height * width > 1_500_000 or num_frames >= 41)
+        ):
+            self.vae.enable_tiling(
+                tile_sample_stride_height=200,
+                tile_sample_stride_width=200,
+            )
+
         if self.config.boundary_ratio is not None and guidance_scale_2 is None:
             guidance_scale_2 = guidance_scale
 
