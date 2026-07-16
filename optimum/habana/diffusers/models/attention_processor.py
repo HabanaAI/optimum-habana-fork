@@ -102,6 +102,222 @@ class FlashAttnV3Gaudi:
         self.q_chunk = int(os.environ.get("FA3_Q_CHUNK", 8192))
         self.kv_chunk = int(os.environ.get("FA3_KV_CHUNK", 8192))
 
+    @staticmethod
+    def _merge_attention_blocks(
+        out,
+        m,
+        linv,
+        block_out,
+        block_m,
+        block_linv,
+        linv_factor,
+    ):
+        block_out = block_out.to(torch.float32)
+        block_m = block_m.to(torch.float32)
+        block_linv = block_linv.to(torch.float32) * linv_factor
+
+        if out is None:
+            return block_out, block_m, block_linv
+
+        new_m = torch.maximum(m, block_m)
+        l_rescaled = (1.0 / linv) * torch.exp(m - new_m)
+        block_l_rescaled = (1.0 / block_linv) * torch.exp(block_m - new_m)
+        new_linv = 1.0 / (l_rescaled + block_l_rescaled)
+
+        new_out = (l_rescaled * new_linv) * out + (block_l_rescaled * new_linv) * block_out
+
+        return new_out, new_m, new_linv
+
+    def forward_ring(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        process_group,
+        cp_size: int,
+        pad_len: int = 0,
+        attention_mask: Optional[torch.Tensor] = None,
+        fsdpa_mode: str = "fast",
+    ) -> torch.Tensor:
+        """
+        Ring Attention for sequence/context parallelism.
+
+        Query stays on the local rank. Each rank's KV block is transferred
+        around the sequence-parallel ring. Both Q and each rank's KV block
+        are split according to q_chunk and kv_chunk before SDPA computation.
+        """
+        if cp_size <= 1:
+            return self.forward(
+                query,
+                key,
+                value,
+                attention_mask=attention_mask,
+                fsdpa_mode=fsdpa_mode,
+                cp_size=1,
+                pad_len=pad_len,
+            )
+
+        if attention_mask is not None:
+            raise ValueError("FlashAttnV3Gaudi.forward_ring does not support attention_mask yet.")
+
+        # Change to (batch, heads, seq_len, head_dim).
+        query, key, value = (x.permute(0, 2, 1, 3).contiguous() for x in (query, key, value))
+
+        query_len = query.size(-2)
+        local_kv_len = key.size(-2)
+
+        if pad_len < 0:
+            raise ValueError(f"pad_len must be non-negative, but got {pad_len}.")
+
+        if pad_len >= local_kv_len:
+            raise ValueError(
+                f"pad_len ({pad_len}) must be smaller than the local KV length ({local_kv_len})."
+            )
+
+        scale = 1.0 / math.sqrt(query.shape[-1])
+        linv_factor = 128.0 if fsdpa_mode == "fast" else 1.0
+
+        sp_rank = torch.distributed.get_rank(group=process_group)
+
+        # P2P communication requires global ranks.
+        if hasattr(torch.distributed, "get_global_rank"):
+            next_rank = torch.distributed.get_global_rank(process_group, (sp_rank + 1) % cp_size)
+            prev_rank = torch.distributed.get_global_rank(process_group, (sp_rank - 1) % cp_size)
+        else:
+            group_src_rank = parallel_state.get_sequence_parallel_src_rank()
+            next_rank = group_src_rank + ((sp_rank + 1) % cp_size)
+            prev_rank = group_src_rank + ((sp_rank - 1) % cp_size)
+
+        num_query_chunks = (query_len + self.q_chunk - 1) // self.q_chunk
+
+        # One online-softmax accumulator for each local Q chunk.
+        accumulators = [[None, None, None] for _ in range(num_query_chunks)]
+
+        current_key = key
+        current_value = value
+
+        # Ping-pong receive buffers.
+        recv_key = torch.empty_like(current_key)
+        recv_value = torch.empty_like(current_value)
+
+        mark_step = os.environ.get("WAN_RING_ATTN_MARK_STEP", "1").lower() not in ("0", "false")
+
+        for ring_step in range(cp_size):
+            requests = None
+
+            # Start communication before computing the current KV block.
+            if ring_step < cp_size - 1:
+                p2p_ops = [
+                    torch.distributed.P2POp(
+                        torch.distributed.isend,
+                        current_key,
+                        next_rank,
+                        process_group,
+                        0,
+                    ),
+                    torch.distributed.P2POp(
+                        torch.distributed.irecv,
+                        recv_key,
+                        prev_rank,
+                        process_group,
+                        0,
+                    ),
+                    torch.distributed.P2POp(
+                        torch.distributed.isend,
+                        current_value,
+                        next_rank,
+                        process_group,
+                        1,
+                    ),
+                    torch.distributed.P2POp(
+                        torch.distributed.irecv,
+                        recv_value,
+                        prev_rank,
+                        process_group,
+                        1,
+                    ),
+                ]
+                requests = torch.distributed.batch_isend_irecv(p2p_ops)
+
+            block_owner = (sp_rank - ring_step) % cp_size
+            block_key = current_key
+            block_value = current_value
+            block_kv_len = local_kv_len
+
+            # The global padding is at the end of the block owned by the
+            # final sequence-parallel rank.
+            if pad_len > 0 and block_owner == cp_size - 1:
+                block_kv_len -= pad_len
+                block_key = block_key[..., :block_kv_len, :]
+                block_value = block_value[..., :block_kv_len, :]
+
+            # Preserve the KV chunking behavior of forward().
+            num_kv_chunks = (block_kv_len + self.kv_chunk - 1) // self.kv_chunk
+
+            for query_idx in range(num_query_chunks):
+                query_start = query_idx * self.q_chunk
+                query_end = min(query_start + self.q_chunk, query_len)
+                query_slice = query[..., query_start:query_end, :]
+
+                out, m, linv = accumulators[query_idx]
+
+                for kv_idx in range(num_kv_chunks):
+                    kv_start = kv_idx * self.kv_chunk
+                    kv_end = min(kv_start + self.kv_chunk, block_kv_len)
+
+                    key_slice = block_key[..., kv_start:kv_end, :]
+                    value_slice = block_value[..., kv_start:kv_end, :]
+
+                    block_out, block_m, block_linv, _ = torch.ops.hpu.sdpa_recomp_fwd(
+                        query_slice,
+                        key_slice,
+                        value_slice,
+                        None,
+                        0.0,
+                        scale,
+                        False,
+                        True,
+                        fsdpa_mode,
+                        None,  # vsl
+                        "left",
+                    )
+
+                    out, m, linv = self._merge_attention_blocks(
+                        out,
+                        m,
+                        linv,
+                        block_out,
+                        block_m,
+                        block_linv,
+                        linv_factor,
+                    )
+
+                accumulators[query_idx] = [out, m, linv]
+
+            if requests is not None:
+                # Submit lazy HPU operations before waiting for communication.
+                if mark_step:
+                    import habana_frameworks.torch.core as htcore
+
+                    htcore.mark_step()
+
+                for request in requests:
+                    request.wait()
+
+                # Switch to the newly received KV block. The old buffers can
+                # now be reused as receive buffers in the next ring step.
+                current_key, recv_key = recv_key, current_key
+                current_value, recv_value = recv_value, current_value
+
+        output = torch.cat(
+            [accumulator[0].to(query.dtype) for accumulator in accumulators],
+            dim=-2,
+        )
+
+        torch.hpu.synchronize()
+
+        return output.permute(0, 2, 1, 3).contiguous()
+
     def forward(
         self,
         query: torch.Tensor,
@@ -885,6 +1101,9 @@ class GaudiWanAttnProcessor:
         self.use_sp = os.getenv("USE_SP", "True").lower() not in ("0", "false", "False")
         self.cp_size = parallel_state.get_sequence_parallel_world_size()
         self.fav3 = FlashAttnV3Gaudi()
+        self.use_ring_attention = os.getenv(
+            "WAN_USE_RING_ATTN", "True"
+        ).lower() not in ("0", "false")
 
         if not self.use_sp and parallel_state.sequence_parallel_is_initialized() and self.cp_size > 1:
             self.fused_scaled_dot_product_attention_distributed = (
@@ -995,37 +1214,76 @@ class GaudiWanAttnProcessor:
             hidden_states_img = hidden_states_img.flatten(2, 3)
             hidden_states_img = hidden_states_img.type_as(query)
 
-        # Add traditional SP:
-        if self.use_sp and self.cp_size > 1:
-            bs, kv_seq, num_head, head_dim = key.shape
-            key = key.reshape(bs, kv_seq, -1)
-            value = value.reshape(bs, kv_seq, -1)
-            full_key = torch.empty(bs, kv_seq * self.cp_size, num_head * head_dim, dtype=key.dtype, device=key.device)
-            full_value = torch.empty(
-                bs, kv_seq * self.cp_size, num_head * head_dim, dtype=value.dtype, device=value.device
-            )
-            gather1 = torch.distributed.all_gather_into_tensor(
-                full_key,
+        if self.use_sp and self.cp_size > 1 and attention_mask is not None:
+            logger.warning("Applying attention_mask in SP is not well supported, set it as None.")
+            attention_mask = None
+
+        fsdpa_mode = "None" if self.is_training else "fast"
+
+        if self.use_sp and self.cp_size > 1 and self.use_ring_attention:
+            hidden_states = self.fav3.forward_ring(
+                query,
                 key,
-                group=parallel_state.get_sequence_parallel_group(),
-                async_op=True,
-            )
-            torch.distributed.all_gather_into_tensor(
-                full_value,
                 value,
-                group=parallel_state.get_sequence_parallel_group(),
-                async_op=False,
+                process_group=parallel_state.get_sequence_parallel_group(),
+                cp_size=self.cp_size,
+                pad_len=pad_len,
+                attention_mask=None,
+                fsdpa_mode=fsdpa_mode,
             )
-            gather1.wait()
-            key = full_key.reshape(bs, kv_seq * self.cp_size, num_head, head_dim)
-            value = full_value.reshape(bs, kv_seq * self.cp_size, num_head, head_dim)
+        else:
+            # Keep the original all-gather implementation as an A/B fallback.
+            if self.use_sp and self.cp_size > 1:
+                bs, kv_seq, num_head, head_dim = key.shape
+                flat_key = key.reshape(bs, kv_seq, -1)
+                flat_value = value.reshape(bs, kv_seq, -1)
 
-            if attention_mask is not None:
-                logger.warning("Applying attention_mask in SP is not well supported, set it as None.")
-                attention_mask = None
+                full_key = torch.empty(
+                    bs,
+                    kv_seq * self.cp_size,
+                    num_head * head_dim,
+                    dtype=flat_key.dtype,
+                    device=flat_key.device,
+                )
+                full_value = torch.empty(
+                    bs,
+                    kv_seq * self.cp_size,
+                    num_head * head_dim,
+                    dtype=flat_value.dtype,
+                    device=flat_value.device,
+                )
 
-        hidden_states = self.fav3.forward(query, key, value, attention_mask, fsdpa_mode="fast",
-                                          cp_size=self.cp_size, pad_len=pad_len)
+                gather_key = torch.distributed.all_gather_into_tensor(
+                    full_key,
+                    flat_key,
+                    group=parallel_state.get_sequence_parallel_group(),
+                    async_op=True,
+                )
+                gather_value = torch.distributed.all_gather_into_tensor(
+                    full_value,
+                    flat_value,
+                    group=parallel_state.get_sequence_parallel_group(),
+                    async_op=True,
+                )
+                gather_key.wait()
+                gather_value.wait()
+
+                key = full_key.reshape(
+                    bs, kv_seq * self.cp_size, num_head, head_dim
+                )
+                value = full_value.reshape(
+                    bs, kv_seq * self.cp_size, num_head, head_dim
+                )
+
+            hidden_states = self.fav3.forward(
+                query,
+                key,
+                value,
+                attention_mask=attention_mask,
+                fsdpa_mode=fsdpa_mode,
+                cp_size=self.cp_size,
+                pad_len=pad_len,
+            )
 
         hidden_states = hidden_states.flatten(2, 3)
         hidden_states = hidden_states.type_as(query)
