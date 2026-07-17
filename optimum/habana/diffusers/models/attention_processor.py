@@ -31,6 +31,7 @@ from ...distributed import parallel_state
 from .embeddings import RotaryPosEmbedding
 from .qwenimage_transformer import apply_rotary_emb_qwen_gaudi
 
+import habana_frameworks.torch.core as htcore
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
@@ -200,8 +201,6 @@ class FlashAttnV3Gaudi:
         recv_key = torch.empty_like(current_key)
         recv_value = torch.empty_like(current_value)
 
-        mark_step = os.environ.get("WAN_RING_ATTN_MARK_STEP", "1").lower() not in ("0", "false")
-
         for ring_step in range(cp_size):
             requests = None
 
@@ -295,11 +294,7 @@ class FlashAttnV3Gaudi:
                 accumulators[query_idx] = [out, m, linv]
 
             if requests is not None:
-                # Submit lazy HPU operations before waiting for communication.
-                if mark_step:
-                    import habana_frameworks.torch.core as htcore
-
-                    htcore.mark_step()
+                htcore.mark_step()
 
                 for request in requests:
                     request.wait()
@@ -313,7 +308,6 @@ class FlashAttnV3Gaudi:
             [accumulator[0].to(query.dtype) for accumulator in accumulators],
             dim=-2,
         )
-
         torch.hpu.synchronize()
 
         return output.permute(0, 2, 1, 3).contiguous()
