@@ -1096,8 +1096,8 @@ class GaudiWanAttnProcessor:
         self.cp_size = parallel_state.get_sequence_parallel_world_size()
         self.fav3 = FlashAttnV3Gaudi()
         self.use_ring_attention = os.getenv(
-            "WAN_USE_RING_ATTN", "True"
-        ).lower() not in ("0", "false")
+            "WAN_USE_RING_ATTN", "False"
+        ).strip().lower() in ("1", "true")
 
         if not self.use_sp and parallel_state.sequence_parallel_is_initialized() and self.cp_size > 1:
             self.fused_scaled_dot_product_attention_distributed = (
