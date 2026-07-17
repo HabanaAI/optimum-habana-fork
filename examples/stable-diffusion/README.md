@@ -553,7 +553,10 @@ python text_to_video_generation.py \
 ```
 
 For multi-cards inference, we support both traditional sequence parallelism (SP) and DeepSpeed Ulysses to accelerate the inference. Traditional SP is the default one, if you want to apply DeepSpeed Ulysses, please set USE_SP=0.
+
 When using DeepSpeed Ulysses, please set PT_HPU_SYNC_LAUNCH=1 to reduce memory consumption. Besides, to slightly improve the accuracy in DeepSpeed Ulysses case, you can enable the mask by setting CP_USE_MASK=1.
+
+For the generation task of large resolution videos (e.g., 1080p), please use `export WAN_USE_RING_ATTN=1` to enable Ring Attention, thus reducing memory consumption and avoiding null output issue.
 
 ```bash
 bash run_wan_t2v_demo.sh
