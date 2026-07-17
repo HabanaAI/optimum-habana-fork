@@ -1214,7 +1214,15 @@ class GaudiWanAttnProcessor:
 
         fsdpa_mode = "None" if self.is_training else "fast"
 
-        if self.use_sp and self.cp_size > 1 and self.use_ring_attention:
+        should_use_ring_attention = (
+            self.use_sp
+            and self.cp_size > 1
+            and self.use_ring_attention
+            and query.shape[1] == key.shape[1]
+            and query.shape[1] > 8192
+        )
+        
+        if should_use_ring_attention:
             hidden_states = self.fav3.forward_ring(
                 query,
                 key,
