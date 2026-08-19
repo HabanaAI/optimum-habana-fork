@@ -178,6 +178,12 @@ slow_tests_object_segmentation: test_installs
 example_diff_tests: test_installs
 	python -m pytest tests/test_examples_match_transformers.py
 
+test_security: test_installs
+	@status1=0; status2=0; \
+	python -m pytest tests/test_diffusers_security_patches.py -v -s || status1=$$?; \
+	python -m pytest tests/test_security_patches.py -v -s || status2=$$?; \
+	exit $$((status1 + status2))
+
 # Utilities to release to PyPi
 build_dist_install_tools:
 	python -m pip install build
