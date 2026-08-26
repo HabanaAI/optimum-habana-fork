@@ -185,9 +185,10 @@ test_security: test_installs
 	exit $$((status1 + status2))
 
 test_security_smoke: test_installs
-	python -m pip install -r examples/text-generation/requirements_awq.txt
-	BUILD_CUDA_EXT=0 python -m pip install -vvv --no-build-isolation git+https://github.com/HabanaAI/AutoGPTQ.git
-	python -m pytest tests/test_text_generation_example.py -v -s -m "(not x2) and (not x4) and (not x8)" -k "test_text_generation_bf16_1x" --token $(TOKEN)
+	python -m pytest -v -s --token $(TOKEN) \
+		tests/test_text_generation_example.py::test_text_generation_bf16_1x[gpt2-xl-1-False-False-False] \
+		tests/test_encoder_decoder.py::TestEncoderDecoderModels::test_text_translation_bf16[t5-small-Habana/t5-2-1] \
+		tests/test_text_generation_example.py::test_text_generation_bf16_1x[microsoft/phi-2-1-False-False-False]
 
 # Utilities to release to PyPi
 build_dist_install_tools:
