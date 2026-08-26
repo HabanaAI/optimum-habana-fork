@@ -184,6 +184,11 @@ test_security: test_installs
 	python -m pytest tests/test_security_patches.py -v -s || status2=$$?; \
 	exit $$((status1 + status2))
 
+test_security_smoke: test_installs
+	python -m pip install -r examples/text-generation/requirements_awq.txt
+	BUILD_CUDA_EXT=0 python -m pip install -vvv --no-build-isolation git+https://github.com/HabanaAI/AutoGPTQ.git
+	python -m pytest tests/test_text_generation_example.py -v -s -m "(not x2) and (not x4) and (not x8)" -k "test_text_generation_bf16_1x" --token $(TOKEN)
+
 # Utilities to release to PyPi
 build_dist_install_tools:
 	python -m pip install build
